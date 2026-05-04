@@ -1,103 +1,186 @@
 # Agent Gov
 
-One-command project governance initializer for long-running Codex and Claude agent workflows.
+`agent-gov` 是一个面向 Codex / Claude 长周期软件开发的项目治理 skill 和一键初始化工具。它的目标不是替代你的测试、代码审查或项目设计，而是把 agent 开发过程中容易丢失的规格、会话上下文、验证证据、审阅结论和交接信息固化到仓库文件中。
 
-`@airpot/agent-gov` installs repo-local skills and initializes a durable project governance harness with embedded spec management, session continuity, long-term memory, context budgets, validation/runlog evidence, review gates, and optional Codex/Claude native adapters.
+当前 npm 包名：
 
-## Quick Start
+```bash
+@airpot/agent-gov
+```
 
-Initialize the current repository:
+## 能力范围
+
+`agent-gov` 当前主要提供以下能力。
+
+1. 项目治理初始化
+   - 生成 `AGENTS.md`，可选生成 `CLAUDE.md`。
+   - 记录技术栈、固定目录结构、远程开发环境类型。
+   - 默认保留已有文件，除非显式使用 `--force`。
+
+2. 内嵌规格管理
+   - 生成 `.agent/spec.json` 和 `openspec/` 目录。
+   - 通过 `scripts/agent_spec.py` 管理 proposal、design、tasks、archive。
+   - 不依赖全局 OpenSpec CLI，也不会自动安装外部 OpenSpec。
+
+3. Harness 工程管理
+   - 生成 `.agent/harness.json` 和 `scripts/agent_validate.py`。
+   - 按技术栈预填 build、test、lint、typecheck 等验证命令。
+   - 通过 runlog 记录验证证据。
+
+4. 长会话和跨会话接续
+   - 生成 `.agent/sessions/` 和 `.agent/tools/agent_session.py`。
+   - 支持 `start`、`checkpoint`、`compact`、`bootstrap`、`resume`、`doctor`。
+   - 适合 VS Code Remote 中长期使用 Codex，避免把关键上下文只留在聊天记录里。
+
+5. repo-local 长期记忆
+   - 生成 `.agent/memory.json`、`.agent/memory/events.jsonl` 和 `agent_memory.py`。
+   - 支持 `timeline`、`search`、`detail`、`ingest-session`。
+   - 只存摘要、决策、验证和检索线索，不存原始聊天记录和密钥。
+
+6. 上下文预算管理
+   - 生成 `.agent/context.json` 和 `agent_context.py`。
+   - 跟踪 `AGENTS.md`、会话 bootstrap、memory digest、spec 文档、subagent 输出等上下文大小。
+   - 支持本地 token 估算、压缩建议和压缩前后语义校验。
+
+7. 工作流和实现纪律
+   - 生成 `.agent/workflow.json`、`.agent/worktrees.json`、implementation plan 和 debugging record 模板。
+   - 覆盖规格审批、计划质量、实现纪律、TDD/调试证据、审阅顺序、完成证明。
+   - 实现纪律吸收了 `andrej-karpathy-skills` 的核心思想：先澄清假设，优先简单直接实现，避免无根据抽象，保持 diff 精准，定义可验证成功标准。
+
+8. Subagent 编排治理
+   - 生成 `.agent/subagents.json` 和 `.agent/templates/subagent-task.md.tmpl`。
+   - 支持 searcher、explorer、worker、verifier、spec_reviewer、quality_reviewer、reviewer、coordinator 等角色定义。
+   - 要求 disjoint write boundary、`===SNAPSHOT===` JSON 摘要、spec review 先于 quality review。
+   - 不强制使用 subagent；只有当前平台和上级指令允许时才使用。
+
+9. Codex / Claude 原生适配
+   - 生成 `.codex/config.toml`、`.codex/hooks.json`、`.codex/agents/governance-*.toml`。
+   - 可选生成 `.claude/settings.json`、`.claude/agents/governance-*.md`。
+   - 这些原生配置是 `.agent/` 中性治理策略的薄投影。
+
+10. 能力、安全、评估和知识治理
+    - 生成 `.agent/capabilities.json`、`.agent/tooling.json`、`.agent/security.json`、`.agent/evals.json`。
+    - 生成 `scripts/agent_capabilities.py`、`agent_tooling.py`、`agent_security.py`、`agent_score.py`。
+    - 生成 `docs/` 知识库、ADR/RFC/postmortem 模板和治理健康评分。
+
+## 不做什么
+
+- 不替代真实测试、构建、人工审查或安全审计。
+- 不把 Codex/Claude 聊天记录当作持久状态。
+- 不保存 npm token、SSH key、API key 等密钥。
+- 不强制安装外部 OpenSpec CLI。
+- 不强制使用 subagent，也不强制指定模型。
+- 不会默认覆盖已有项目文件；需要覆盖时显式传 `--force`。
+
+## 快速使用
+
+在目标仓库根目录运行：
 
 ```bash
 npx @airpot/agent-gov@latest
 ```
 
-Initialize with an explicit stack and fixed layout:
+指定技术栈和固定目录结构：
 
 ```bash
 npx @airpot/agent-gov@latest --tech-stack python,typescript --layout service
 ```
 
-Useful variants:
+初始化指定路径：
 
 ```bash
 npx @airpot/agent-gov@latest init /path/to/repo --remote-kind ssh
+```
+
+只安装 bundled skills，不初始化治理文件：
+
+```bash
 npx @airpot/agent-gov@latest install-skill /path/to/repo
+```
+
+检查 npm 包和目标项目中的 skill 安装状态：
+
+```bash
 npx @airpot/agent-gov@latest doctor /path/to/repo
 ```
 
-The npm command copies bundled project skills into `<repo>/.codex/skills/` and then runs the `agent-gov` initializer. Existing files are preserved unless `--force` or `--force-skill` is supplied.
+安装项目级 skill 后，重启或 reload Codex，让新的 skill 被发现。
 
-After installing project-level skills, restart or reload Codex so the new skills are discovered.
+## 常用初始化参数
 
-## What It Generates
+```bash
+npx @airpot/agent-gov@latest [root] [options]
+```
 
-The initialized target project includes:
+常用参数：
 
-- `AGENTS.md` and optional `CLAUDE.md`
-- embedded spec config in `.agent/spec.json` and `openspec/`
-- session continuity under `.agent/sessions/`
-- repo-local memory and context budget stores under `.agent/memory/` and `.agent/context/`
-- `.agent/harness.json`, `.agent/workflow.json`, `.agent/worktrees.json`, `.agent/subagents.json`, `.agent/hooks.json`, `.agent/knowledge.json`, `.agent/capabilities.json`, `.agent/runlog.jsonl`, `.agent/tooling.json`, `.agent/security.json`, and `.agent/evals.json`
-- native Codex and Claude subagent/hook adapter files when enabled
-- `docs/` governance docs and local scripts such as `scripts/agent_check.py`, `scripts/agent_spec.py`, `scripts/agent_validate.py`, and `scripts/agent_score.py`
+- `--tech-stack python,typescript`：记录技术栈，并预填常见验证命令。
+- `--layout minimal|python-app|node-app|web-app|service|library`：选择固定目录结构。
+- `--dir path`：追加需要创建和治理的目录，可重复使用。
+- `--remote-kind ssh|devcontainer|wsl|local|unknown`：记录远程开发环境类型。
+- `--no-claude`：不生成 Claude 相关适配文件。
+- `--no-makefile`：不生成目标项目 `Makefile`。
+- `--no-create-layout`：不创建固定目录结构，只记录配置。
+- `--force`：允许覆盖已有生成文件。
+- `--dry-run`：只展示将要创建或跳过的文件。
+- `--skip-skill-install`：npm wrapper 专用，只运行初始化脚本，不复制 bundled skills。
+- `--force-skill`：npm wrapper 专用，覆盖目标仓库中的 bundled skills。
 
-The workflow layer captures spec approval, plan quality, implementation discipline, isolated worktree execution, TDD/debugging evidence, spec-review before quality-review, and fresh validation before completion claims.
+## 初始化后常用命令
 
-The implementation-discipline gate integrates the useful ideas from `andrej-karpathy-skills`: surface assumptions, prefer simple direct changes, justify new abstractions, keep diffs tied to the request, and define verifiable success criteria.
-
-`agent-gov` does not install or call a global OpenSpec CLI. Spec lifecycle commands are provided by generated `scripts/agent_spec.py`.
-
-## Common Commands
-
-Run these inside an initialized target repository:
+在已初始化的目标仓库中运行：
 
 ```bash
 python3 scripts/agent_check.py
 python3 scripts/agent_spec.py doctor
+python3 scripts/agent_spec.py list --json
 python3 scripts/agent_validate.py --list
 python3 scripts/agent_capabilities.py doctor
 python3 scripts/agent_runlog.py doctor
 python3 scripts/agent_tooling.py doctor
 python3 scripts/agent_security.py doctor
 python3 scripts/agent_score.py score --write
-python3 .agent/tools/agent_session.py bootstrap
-python3 .agent/tools/agent_memory.py timeline --limit 10
-python3 .agent/tools/agent_context.py scan --limit 10
 ```
 
-## Install From npm
-
-Global installation is optional:
+会话接续：
 
 ```bash
-npm install -g @airpot/agent-gov
-agent-gov
+python3 .agent/tools/agent_session.py start feature-name --goal "目标"
+python3 .agent/tools/agent_session.py checkpoint --summary "当前进展" --next "下一步"
+python3 .agent/tools/agent_session.py compact --summary "压缩摘要" --next "下一步"
+python3 .agent/tools/agent_session.py bootstrap
+python3 .agent/tools/agent_session.py doctor
 ```
 
-The npm package exposes `agent-gov` as the command name while keeping package ownership under the `@airpot` scope.
+长期记忆和上下文预算：
 
-## Install From GitHub
+```bash
+python3 .agent/tools/agent_memory.py timeline --limit 10
+python3 .agent/tools/agent_memory.py search "关键词"
+python3 .agent/tools/agent_context.py scan --limit 10
+python3 .agent/tools/agent_context.py suggest
+```
 
-GitHub installation remains available when npm is not desired:
+## GitHub 安装方式
+
+如果不通过 npm，也可以从 GitHub 安装 skill：
 
 ```text
 Install skill from https://github.com/airpot/agent-gov/tree/main/.codex/skills/agent-gov
 ```
 
-Restart Codex after installation so the new skills are discovered.
+安装后同样需要重启或 reload Codex。
 
-## Maintainer Checks
+## 维护者发布检查
 
-Validate before pushing or publishing:
+发布前在本目录运行：
 
 ```bash
 npm run validate
 ```
 
-Publish the npm package:
+发布 npm 包：
 
 ```bash
-npm login
 npm publish --access public
 ```
