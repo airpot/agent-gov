@@ -1,5 +1,4 @@
 interface:
-  display_name: "OpenSpec Explore"
+  display_name: "Spec Explore"
   short_description: "Explore ideas before changes"
-  default_prompt: "Use $openspec-explore to investigate and clarify an OpenSpec change idea."
-
+  default_prompt: "Use $openspec-explore to investigate and clarify an embedded spec change idea."

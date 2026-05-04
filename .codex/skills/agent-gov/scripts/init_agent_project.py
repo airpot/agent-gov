@@ -13,14 +13,7 @@ from pathlib import Path
 
 
 REMOTE_KINDS = {"ssh", "devcontainer", "wsl", "local", "unknown"}
-OPEN_SPEC_PACKAGE = "@fission-ai/openspec"
-MIN_NODE_VERSION = (20, 19, 0)
-PACKAGE_MANAGER_COMMANDS = {
-    "npm": ["npm", "install", "-g", f"{OPEN_SPEC_PACKAGE}@latest"],
-    "pnpm": ["pnpm", "add", "-g", f"{OPEN_SPEC_PACKAGE}@latest"],
-    "yarn": ["yarn", "global", "add", f"{OPEN_SPEC_PACKAGE}@latest"],
-    "bun": ["bun", "add", "-g", f"{OPEN_SPEC_PACKAGE}@latest"],
-}
+SPEC_MODES = {"embedded"}
 LAYOUTS = {
     "minimal": ["src", "tests", "docs", "scripts"],
     "python-app": ["src", "tests", "docs", "scripts", "configs"],
@@ -124,6 +117,8 @@ def harness_config(
         ".agent/config.json",
         ".agent/harness.json",
         ".agent/project-layout.json",
+        ".agent/workflow.json",
+        ".agent/worktrees.json",
         ".agent/subagents.json",
         ".agent/hooks.json",
         ".agent/knowledge.json",
@@ -146,6 +141,8 @@ def harness_config(
         ".agent/sessions/bootstrap.md",
         ".agent/templates/project-review.md.tmpl",
         ".agent/templates/project-fix-log.md.tmpl",
+        ".agent/templates/implementation-plan.md.tmpl",
+        ".agent/templates/debugging-record.md.tmpl",
         ".agent/templates/subagent-task.md.tmpl",
         ".agent/templates/memory-summary.md.tmpl",
         ".agent/templates/memory-latest.md.tmpl",
@@ -164,9 +161,12 @@ def harness_config(
         ".codex/agents/governance-explorer.toml",
         ".codex/agents/governance-worker.toml",
         ".codex/agents/governance-verifier.toml",
+        ".codex/agents/governance-spec_reviewer.toml",
+        ".codex/agents/governance-quality_reviewer.toml",
         ".codex/agents/governance-reviewer.toml",
         ".codex/agents/governance-coordinator.toml",
         "scripts/agent_check.py",
+        "scripts/agent_spec.py",
         "scripts/agent_validate.py",
         "scripts/agent_knowledge.py",
         "scripts/agent_invariants.py",
@@ -184,7 +184,16 @@ def harness_config(
         *dirs,
     ]
     if openspec_enabled:
-        required_paths.append("openspec/config.yaml")
+        required_paths.extend(
+            [
+                "openspec/config.yaml",
+                "openspec/project.md",
+                ".agent/spec.json",
+                "openspec/changes/.gitkeep",
+                "openspec/changes/archive/.gitkeep",
+                "openspec/specs/.gitkeep",
+            ]
+        )
     if claude_enabled:
         required_paths.extend(
             [
@@ -194,6 +203,8 @@ def harness_config(
                 ".claude/agents/governance-explorer.md",
                 ".claude/agents/governance-worker.md",
                 ".claude/agents/governance-verifier.md",
+                ".claude/agents/governance-spec_reviewer.md",
+                ".claude/agents/governance-quality_reviewer.md",
                 ".claude/agents/governance-reviewer.md",
                 ".claude/agents/governance-coordinator.md",
             ]
@@ -254,6 +265,166 @@ def project_layout_config(project_name: str, layout: str, tech_stack: list[str],
     }
 
 
+def spec_config(project_name: str, created_at: str) -> dict:
+    return {
+        "schema": "agent-spec-v1",
+        "project_name": project_name,
+        "created_at": created_at,
+        "mode": "embedded",
+        "source": "agent-gov",
+        "paths": {
+            "root": "openspec",
+            "changes": "openspec/changes",
+            "archive": "openspec/changes/archive",
+            "specs": "openspec/specs",
+            "project": "openspec/project.md",
+        },
+        "artifacts": {
+            "proposal": "proposal.md",
+            "design": "design.md",
+            "tasks": "tasks.md",
+        },
+        "required_before_apply": ["proposal", "design", "tasks"],
+        "policy": {
+            "non_trivial_changes_require_change": True,
+            "tasks_are_markdown_checkboxes": True,
+            "archive_requires_completed_tasks_or_force": True,
+            "record_session_links": True,
+        },
+        "commands": {
+            "init": "python3 scripts/agent_spec.py init",
+            "list": "python3 scripts/agent_spec.py list --json",
+            "new_change": "python3 scripts/agent_spec.py new-change <name>",
+            "status": "python3 scripts/agent_spec.py status --change <name> --json",
+            "validate": "python3 scripts/agent_spec.py validate",
+            "archive": "python3 scripts/agent_spec.py archive <name>",
+            "doctor": "python3 scripts/agent_spec.py doctor",
+        },
+    }
+
+
+def workflow_config(project_name: str, created_at: str, openspec_enabled: bool) -> dict:
+    return {
+        "schema": "agent-workflow-v1",
+        "project_name": project_name,
+        "created_at": created_at,
+        "mode": "policy-gated",
+        "spec_source": "agent-gov-spec" if openspec_enabled else "project-docs",
+        "stages": [
+            "intake",
+            "spec",
+            "plan",
+            "isolation",
+            "implementation",
+            "spec_review",
+            "quality_review",
+            "verification",
+            "handoff",
+            "finish",
+        ],
+        "gates": {
+            "design_approval": {
+                "required_for": ["non_trivial_change", "architecture_change", "cross_module_behavior_change"],
+                "evidence": ["embedded spec proposal/design approval or recorded project-doc approval"],
+            },
+            "plan_quality": {
+                "required_for": ["multi_step_change", "delegated_work"],
+                "requires_exact_files": True,
+                "requires_commands_with_expected_results": True,
+                "forbidden_placeholders": ["TBD", "TODO", "implement later", "fill in details"],
+            },
+            "implementation_discipline": {
+                "required_for": [
+                    "implementation",
+                    "refactor",
+                    "new_abstraction",
+                    "architecture_change",
+                    "multi_file_change",
+                ],
+                "state_assumptions_when_ambiguous": True,
+                "prefer_simple_direct_code": True,
+                "avoid_speculative_features": True,
+                "abstractions_require_repeated_complexity_or_existing_pattern": True,
+                "touch_only_requested_scope": True,
+                "every_changed_line_traces_to_request": True,
+                "success_criteria_required": True,
+                "exceptions_require_session_note": True,
+            },
+            "worktree_isolation": {
+                "preferred_for": ["feature_work", "implementation_plan_execution", "risky_refactor"],
+                "policy": ".agent/worktrees.json",
+                "baseline_validation_before_edits": True,
+                "never_start_on_main_without_explicit_user_consent": True,
+            },
+            "tdd": {
+                "required_for": ["behavior_change", "bugfix", "refactor"],
+                "exceptions_require_session_note": True,
+                "evidence": ["failing test command", "passing test command"],
+            },
+            "systematic_debugging": {
+                "required_for": ["bug", "test_failure", "build_failure", "unexpected_behavior"],
+                "template": ".agent/templates/debugging-record.md.tmpl",
+                "evidence": ["reproduction", "root_cause", "hypothesis", "minimal_fix_validation"],
+            },
+            "review_sequence": {
+                "required_for": ["delegated_work", "substantial_change"],
+                "order": ["spec_review", "quality_review"],
+                "spec_review_must_pass_before_quality_review": True,
+                "re_review_after_fixes": True,
+            },
+            "completion_verification": {
+                "required_for": ["handoff", "merge", "pull_request", "archive"],
+                "fresh_validation_required": True,
+                "record_results_in_runlog": True,
+                "no_completion_claim_without_command_evidence": True,
+            },
+        },
+        "commands": {
+            "list_validation": "python3 scripts/agent_validate.py --list",
+            "record_runlog": "python3 scripts/agent_runlog.py record --kind validation --outcome <pass|fail|skipped> --summary <summary>",
+            "session_checkpoint": "python3 .agent/tools/agent_session.py checkpoint --summary <summary>",
+            "session_compact": "python3 .agent/tools/agent_session.py compact --summary <summary> --next <next>",
+        },
+    }
+
+
+def worktree_config(project_name: str, created_at: str) -> dict:
+    return {
+        "schema": "agent-worktree-policy-v1",
+        "project_name": project_name,
+        "created_at": created_at,
+        "mode": "preferred-not-forced",
+        "directories": {
+            "preferred_project_local": ".worktrees",
+            "alternate_project_local": "worktrees",
+            "global_fallback": f"~/.config/agent-gov/worktrees/{project_name}",
+        },
+        "policy": {
+            "use_existing_project_local_dir_first": True,
+            "verify_project_local_dir_is_git_ignored": True,
+            "add_ignore_rule_only_with_explicit_change_record": True,
+            "run_project_setup_when_detected": True,
+            "run_baseline_validation_before_feature_edits": True,
+            "do_not_continue_from_failing_baseline_without_user_or_session_decision": True,
+            "cleanup_requires_finish_decision": True,
+            "discard_requires_typed_confirmation": True,
+            "force_delete_requires_explicit_user_request": True,
+        },
+        "branching": {
+            "feature_branch_prefix": "agent/",
+            "avoid_main_or_master_for_implementation": True,
+            "record_base_branch": True,
+            "record_worktree_path_in_session": True,
+        },
+        "finish_options": [
+            "merge_locally",
+            "push_pull_request",
+            "keep_branch",
+            "discard_after_confirmation",
+        ],
+    }
+
+
 def subagent_config(project_name: str, created_at: str, claude_enabled: bool) -> dict:
     roles = {
         "searcher": {
@@ -270,6 +441,14 @@ def subagent_config(project_name: str, created_at: str, claude_enabled: bool) ->
         },
         "verifier": {
             "purpose": "Tests, builds, lint, typecheck, smoke checks, and log inspection.",
+            "default_write_access": False,
+        },
+        "spec_reviewer": {
+            "purpose": "Independent review that checks implementation against the requested spec before quality review.",
+            "default_write_access": False,
+        },
+        "quality_reviewer": {
+            "purpose": "Independent review that checks maintainability, tests, safety, and project conventions after spec review passes.",
             "default_write_access": False,
         },
         "reviewer": {
@@ -292,8 +471,18 @@ def subagent_config(project_name: str, created_at: str, claude_enabled: bool) ->
             "do_not_pin_model_by_default": True,
             "prefer_minimal_context": True,
             "prefer_compressed_structured_outputs": True,
+            "prefer_fresh_subagent_per_plan_task": True,
             "require_disjoint_worker_write_boundaries": True,
             "record_accepted_snapshots_in_session": True,
+            "spec_review_before_quality_review": True,
+            "re_review_after_fix": True,
+        },
+        "review_workflow": {
+            "implementation_status_values": ["DONE", "DONE_WITH_CONCERNS", "NEEDS_CONTEXT", "BLOCKED"],
+            "review_sequence": ["spec_reviewer", "quality_reviewer"],
+            "handle_done_with_concerns_before_review": True,
+            "handle_needs_context_by_re_dispatching_with_more_context": True,
+            "handle_blocked_by_replanning_or_escalating": True,
         },
         "native_adapters": {
             "codex": {
@@ -321,7 +510,7 @@ def subagent_config(project_name: str, created_at: str, claude_enabled: bool) ->
                 "estimated_risk_level",
                 "validation",
             ],
-            "status_values": ["success", "partial", "blocked"],
+            "status_values": ["DONE", "DONE_WITH_CONCERNS", "NEEDS_CONTEXT", "BLOCKED"],
             "risk_values": ["low", "medium", "high"],
             "max_supporting_notes_tokens": 700,
             "prefer_path_line_first_findings": True,
@@ -477,7 +666,10 @@ def context_budget_config(project_name: str, created_at: str) -> dict:
             "docs/tech-debt.md",
             ".agent/sessions/bootstrap.md",
             ".agent/memory/latest.md",
+            ".agent/spec.json",
             ".agent/capabilities.json",
+            ".agent/workflow.json",
+            ".agent/worktrees.json",
             ".agent/tooling.json",
             ".agent/security.json",
             ".agent/evals.json",
@@ -488,6 +680,9 @@ def context_budget_config(project_name: str, created_at: str) -> dict:
             "docs/rfcs/README.md",
             "docs/incidents/README.md",
             ".agent/templates/subagent-task.md.tmpl",
+            ".agent/templates/implementation-plan.md.tmpl",
+            ".agent/templates/debugging-record.md.tmpl",
+            "openspec/project.md",
         ],
         "tracked_globs": [
             "openspec/changes/*/proposal.md",
@@ -563,15 +758,15 @@ def capabilities_config(project_name: str, created_at: str, openspec_enabled: bo
             "validation": ["git status --short"],
         },
         {
-            "id": "openspec",
+            "id": "agent-spec",
             "kind": "tool",
-            "provider": "openspec",
+            "provider": "agent-gov",
             "enabled": openspec_enabled,
             "risk": "low",
             "owner": "unassigned",
-            "description": "Specification-driven change planning and task tracking.",
+            "description": "Embedded specification-driven change planning and task tracking.",
             "permissions": {"read": True, "write": "bounded", "network": False, "secrets": False},
-            "validation": ["openspec list --json"],
+            "validation": ["python3 scripts/agent_spec.py doctor", "python3 scripts/agent_spec.py list --json"],
         },
         {
             "id": "harness-validation",
@@ -583,6 +778,39 @@ def capabilities_config(project_name: str, created_at: str, openspec_enabled: bo
             "description": "Configured build, test, lint, typecheck, and smoke command registry.",
             "permissions": {"read": True, "write": False, "network": "project-defined", "secrets": False},
             "validation": ["python3 scripts/agent_validate.py --list"],
+        },
+        {
+            "id": "workflow-governance",
+            "kind": "policy",
+            "provider": "local",
+            "enabled": True,
+            "risk": "medium",
+            "owner": "unassigned",
+            "description": "Lifecycle gates for spec approval, plan quality, implementation discipline, worktree isolation, TDD, debugging, reviews, and completion evidence.",
+            "permissions": {"read": True, "write": False, "network": False, "secrets": False},
+            "validation": ["python3 scripts/agent_check.py"],
+        },
+        {
+            "id": "implementation-discipline",
+            "kind": "policy",
+            "provider": "local",
+            "enabled": True,
+            "risk": "medium",
+            "owner": "unassigned",
+            "description": "Simplicity-first and surgical-change rules for assumptions, abstractions, diff scope, and verifiable success criteria.",
+            "permissions": {"read": True, "write": False, "network": False, "secrets": False},
+            "validation": ["python3 scripts/agent_check.py", "python3 scripts/agent_score.py doctor"],
+        },
+        {
+            "id": "worktree-isolation",
+            "kind": "policy",
+            "provider": "git",
+            "enabled": True,
+            "risk": "medium",
+            "owner": "unassigned",
+            "description": "Preferred isolated git worktree policy with baseline validation and guarded cleanup.",
+            "permissions": {"read": True, "write": "bounded", "network": False, "secrets": False},
+            "validation": ["git worktree list", "git status --short"],
         },
         {
             "id": "aci-tooling",
@@ -786,15 +1014,16 @@ def evals_config(project_name: str, created_at: str) -> dict:
             "warn": 70,
         },
         "dimensions": {
-            "required_paths": {"weight": 20},
-            "validation": {"weight": 12},
-            "context_budget": {"weight": 12},
+            "required_paths": {"weight": 18},
+            "validation": {"weight": 10},
+            "implementation_discipline": {"weight": 8},
+            "context_budget": {"weight": 10},
             "session_continuity": {"weight": 10},
             "memory": {"weight": 10},
             "capabilities": {"weight": 10},
             "security": {"weight": 10},
             "knowledge": {"weight": 8},
-            "runlog": {"weight": 8},
+            "runlog": {"weight": 6},
         },
         "commands": {
             "doctor": "python3 scripts/agent_score.py doctor",
@@ -815,8 +1044,11 @@ Purpose: {purpose}
 
 Follow repository governance:
 - Read AGENTS.md first when available.
-- Respect .agent/subagents.json, .agent/harness.json, and .agent/project-layout.json.
+- Respect .agent/subagents.json, .agent/workflow.json, .agent/worktrees.json, .agent/harness.json, and .agent/project-layout.json.
 - Keep work inside the assigned read/write boundary.
+- Prefer the simplest direct implementation and justify new abstractions or speculative flexibility.
+- Keep diffs surgical; do not do unrelated cleanup unless it is part of the assigned task.
+- For implementation reviews, confirm spec compliance before code quality.
 - Keep final output structured and concise; respect .agent/context.json output budgets.
 - Do not claim validation you did not run.
 - Start the final report with ===SNAPSHOT=== followed by JSON matching the repository snapshot contract.
@@ -827,7 +1059,11 @@ def codex_agent_toml(role: str, purpose: str) -> str:
     name = f"governance_{role}"
     description = f"Project governance {role}: {purpose}"
     instructions = role_instruction(role, purpose)
-    sandbox = 'sandbox_mode = "read-only"\n' if role in {"searcher", "explorer", "reviewer"} else ""
+    sandbox = (
+        'sandbox_mode = "read-only"\n'
+        if role in {"searcher", "explorer", "verifier", "reviewer", "spec_reviewer", "quality_reviewer"}
+        else ""
+    )
     return (
         f'name = "{name}"\n'
         f'description = "{escape_toml_string(description)}"\n'
@@ -955,118 +1191,6 @@ def git_value(root: Path, args: list[str], fallback: str = "unknown") -> str:
     return result.stdout.strip() or fallback
 
 
-def command_output(command: list[str], cwd: Path | None = None) -> tuple[int, str, str]:
-    try:
-        result = subprocess.run(
-            command,
-            cwd=cwd,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-    except OSError as exc:
-        return 127, "", str(exc)
-    return result.returncode, result.stdout.strip(), result.stderr.strip()
-
-
-def run_logged(command: list[str], cwd: Path | None = None, dry_run: bool = False) -> int:
-    prefix = f"(cd {cwd} && " if cwd else ""
-    suffix = ")" if cwd else ""
-    print(f"{'dry-run: ' if dry_run else ''}{prefix}{' '.join(command)}{suffix}")
-    if dry_run:
-        return 0
-    try:
-        result = subprocess.run(command, cwd=cwd, text=True, check=False)
-    except OSError as exc:
-        print(f"error: failed to run {' '.join(command)}: {exc}", file=sys.stderr)
-        return 127
-    return result.returncode
-
-
-def parse_version(raw: str) -> tuple[int, int, int] | None:
-    raw = raw.strip().lstrip("v")
-    parts = raw.split(".")
-    if len(parts) < 3:
-        return None
-    try:
-        return int(parts[0]), int(parts[1]), int(parts[2].split("-")[0])
-    except ValueError:
-        return None
-
-
-def ensure_node_version() -> int:
-    code, stdout, stderr = command_output(["node", "--version"])
-    if code != 0:
-        print(f"error: Node.js is required for OpenSpec installation: {stderr}", file=sys.stderr)
-        return 1
-    version = parse_version(stdout)
-    if version is None or version < MIN_NODE_VERSION:
-        minimum = ".".join(str(part) for part in MIN_NODE_VERSION)
-        print(f"error: OpenSpec requires Node.js {minimum}+; found {stdout}", file=sys.stderr)
-        return 1
-    return 0
-
-
-def openspec_version() -> str | None:
-    code, stdout, _ = command_output(["openspec", "--version"])
-    return stdout if code == 0 and stdout else None
-
-
-def latest_openspec_version() -> str | None:
-    code, stdout, _ = command_output(["npm", "view", OPEN_SPEC_PACKAGE, "version"])
-    return stdout if code == 0 and stdout else None
-
-
-def ensure_openspec_latest(args: argparse.Namespace) -> int:
-    if args.install_openspec == "never":
-        print("OpenSpec CLI installation skipped (--install-openspec never)")
-        return 0
-
-    node_status = ensure_node_version()
-    if node_status != 0:
-        return node_status
-
-    package_command = PACKAGE_MANAGER_COMMANDS[args.openspec_package_manager]
-    if shutil.which(package_command[0]) is None:
-        print(f"error: package manager not found: {package_command[0]}", file=sys.stderr)
-        return 1
-
-    installed = openspec_version()
-    latest = latest_openspec_version() if args.openspec_package_manager == "npm" else None
-    if args.install_openspec == "auto" and installed and latest and installed == latest:
-        print(f"OpenSpec CLI already at latest version {installed}")
-        return 0
-
-    status = run_logged(package_command, dry_run=args.dry_run)
-    if status != 0:
-        return status
-
-    if not args.dry_run and shutil.which("openspec") is None:
-        print("error: openspec command not found after installation", file=sys.stderr)
-        return 1
-    return 0
-
-
-def setup_openspec_project(root: Path, args: argparse.Namespace) -> int:
-    if args.no_openspec:
-        print("OpenSpec project setup skipped (--no-openspec)")
-        return 0
-
-    install_status = ensure_openspec_latest(args)
-    if install_status != 0:
-        return install_status
-
-    if args.install_openspec == "never" and shutil.which("openspec") is None:
-        print("warning: openspec command not found; skipped openspec init/update", file=sys.stderr)
-        return 0
-
-    if (root / "openspec").exists():
-        return run_logged(["openspec", "update", str(root)], dry_run=args.dry_run)
-
-    tools = args.openspec_tools or ("codex" if args.no_claude else "codex,claude")
-    return run_logged(["openspec", "init", str(root), "--tools", tools], dry_run=args.dry_run)
-
-
 class Writer:
     def __init__(self, root: Path, force: bool, dry_run: bool) -> None:
         self.root = root
@@ -1110,10 +1234,15 @@ def ensure_json(path: Path, default: dict, writer: Writer, relative: str) -> Non
     writer.write(relative, json.dumps(default, indent=2) + "\n")
 
 
+def spec_enabled(args: argparse.Namespace) -> bool:
+    return args.spec_mode == "embedded"
+
+
 def build_values(root: Path, args: argparse.Namespace) -> dict[str, str]:
     project_name = args.project_name or root.name
     tech_stack = parse_csv(args.tech_stack)
     dirs = layout_dirs(args.layout, parse_csv(args.dir))
+    enabled = spec_enabled(args)
     return {
         "project_name": project_name,
         "tech_stack": ", ".join(tech_stack) if tech_stack else "unspecified",
@@ -1123,18 +1252,18 @@ def build_values(root: Path, args: argparse.Namespace) -> dict[str, str]:
         "remote_kind": args.remote_kind,
         "workspace_path": str(root.resolve()),
         "created_at": utc_now(),
-        "openspec_enabled_json": "false" if args.no_openspec else "true",
+        "openspec_enabled_json": "true" if enabled else "false",
         "claude_enabled_json": "false" if args.no_claude else "true",
-        "spec_source": "none" if args.no_openspec else "openspec",
+        "spec_source": "none" if not enabled else "agent-gov-spec",
         "spec_management_rule": (
-            "Use project docs and `.agent/sessions/` for planning context because OpenSpec is disabled."
-            if args.no_openspec
-            else "Use OpenSpec for non-trivial change planning and task tracking."
+            "Use project docs and `.agent/sessions/` for planning context because the embedded spec layer is disabled."
+            if not enabled
+            else "Use agent-gov's embedded spec layer for non-trivial change planning and task tracking."
         ),
         "spec_workflow_step": (
             "Check documented planning context before substantial changes."
-            if args.no_openspec
-            else "Check OpenSpec context before substantial changes."
+            if not enabled
+            else "Check embedded spec context with `python3 scripts/agent_spec.py list --json` before substantial changes."
         ),
         "git_branch": git_value(root, ["branch", "--show-current"]),
         "git_commit": git_value(root, ["rev-parse", "--short", "HEAD"]),
@@ -1159,27 +1288,36 @@ def init_project(args: argparse.Namespace) -> int:
     if args.layout not in LAYOUTS:
         print(f"error: --layout must be one of {', '.join(sorted(LAYOUTS))}", file=sys.stderr)
         return 2
-
-    openspec_status = setup_openspec_project(root, args)
-    if openspec_status != 0:
-        return openspec_status
+    if args.spec_mode not in SPEC_MODES:
+        print(f"error: --spec-mode must be one of {', '.join(sorted(SPEC_MODES))}", file=sys.stderr)
+        return 2
+    if args.install_openspec != "ignored" or args.openspec_package_manager or args.openspec_tools:
+        print("note: external OpenSpec CLI options are ignored; agent-gov uses its embedded spec layer")
+    if args.no_openspec:
+        print("note: --no-openspec is ignored; embedded spec management is part of agent-gov")
 
     writer = Writer(root, args.force, args.dry_run)
     values = build_values(root, args)
     tech_stack = parse_csv(args.tech_stack)
     dirs = layout_dirs(args.layout, parse_csv(args.dir))
     project_name = args.project_name or root.name
-    openspec_enabled = not args.no_openspec
+    openspec_enabled = spec_enabled(args)
     claude_enabled = not args.no_claude
 
     if openspec_enabled:
         writer.write("openspec/config.yaml", render(template("openspec-config.yaml.tmpl"), values))
+        writer.write("openspec/project.md", render(template("openspec-project.md.tmpl"), values))
+        writer.write("openspec/changes/.gitkeep", "")
+        writer.write("openspec/changes/archive/.gitkeep", "")
+        writer.write("openspec/specs/.gitkeep", "")
 
     writer.write("AGENTS.md", render(template("AGENTS.md.tmpl"), values))
     if claude_enabled:
         writer.write("CLAUDE.md", render(template("CLAUDE.md.tmpl"), values))
 
     writer.write(".agent/config.json", render(template("agent-config.json.tmpl"), values))
+    if openspec_enabled:
+        writer.write(".agent/spec.json", json.dumps(spec_config(project_name, values["created_at"]), indent=2) + "\n")
     writer.write(
         ".agent/harness.json",
         json.dumps(
@@ -1191,6 +1329,14 @@ def init_project(args: argparse.Namespace) -> int:
     writer.write(
         ".agent/project-layout.json",
         json.dumps(project_layout_config(project_name, args.layout, tech_stack, dirs), indent=2) + "\n",
+    )
+    writer.write(
+        ".agent/workflow.json",
+        json.dumps(workflow_config(project_name, values["created_at"], openspec_enabled), indent=2) + "\n",
+    )
+    writer.write(
+        ".agent/worktrees.json",
+        json.dumps(worktree_config(project_name, values["created_at"]), indent=2) + "\n",
     )
     writer.write(
         ".agent/subagents.json",
@@ -1255,6 +1401,8 @@ def init_project(args: argparse.Namespace) -> int:
         "artifacts.json.tmpl",
         "project-review.md.tmpl",
         "project-fix-log.md.tmpl",
+        "implementation-plan.md.tmpl",
+        "debugging-record.md.tmpl",
         "subagent-task.md.tmpl",
         "memory-summary.md.tmpl",
         "memory-latest.md.tmpl",
@@ -1279,6 +1427,7 @@ def init_project(args: argparse.Namespace) -> int:
     if claude_enabled:
         writer.write(".claude/settings.json", claude_settings_json())
     writer.write("scripts/agent_check.py", template("agent-check.py.tmpl"), executable=True)
+    writer.write("scripts/agent_spec.py", template("agent-spec.py.tmpl"), executable=True)
     writer.write("scripts/agent_validate.py", template("agent-validate.py.tmpl"), executable=True)
     writer.write("scripts/agent_knowledge.py", template("agent-knowledge.py.tmpl"), executable=True)
     writer.write("scripts/agent_invariants.py", template("agent-invariants.py.tmpl"), executable=True)
@@ -1322,6 +1471,8 @@ def init_project(args: argparse.Namespace) -> int:
         check = root / "scripts" / "agent_check.py"
         if check.exists():
             print("next: python3 scripts/agent_check.py")
+            if openspec_enabled:
+                print("next: python3 scripts/agent_spec.py doctor")
             print("next: python3 scripts/agent_validate.py --list")
             print("next: python3 scripts/agent_capabilities.py doctor")
             print("next: python3 scripts/agent_tooling.py doctor")
@@ -1343,25 +1494,31 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--client-surface", default="vscode-codex-extension")
     parser.add_argument("--remote-kind", default="unknown")
     parser.add_argument(
+        "--spec-mode",
+        choices=sorted(SPEC_MODES),
+        default="embedded",
+        help="Specification layer mode. Only embedded agent-gov spec management is supported.",
+    )
+    parser.add_argument(
         "--install-openspec",
-        choices=["auto", "always", "never"],
-        default="auto",
-        help="Install the official latest OpenSpec CLI unless explicitly skipped",
+        choices=["auto", "always", "never", "ignored"],
+        default="ignored",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--openspec-package-manager",
-        choices=sorted(PACKAGE_MANAGER_COMMANDS),
-        default="npm",
+        default="",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--openspec-tools",
-        help="Tool list passed to `openspec init --tools`; defaults to codex,claude or codex with --no-claude",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument("--create-root", action="store_true")
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--no-claude", action="store_true")
-    parser.add_argument("--no-openspec", action="store_true")
+    parser.add_argument("--no-openspec", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-makefile", action="store_true")
     parser.add_argument("--no-create-layout", action="store_true")
     return parser

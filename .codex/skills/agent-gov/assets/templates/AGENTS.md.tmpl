@@ -17,9 +17,12 @@ Required project directories:
 - Treat the remote repository filesystem as the source of truth.
 - Keep new files inside the fixed directory layout unless the user explicitly changes the layout.
 - {{spec_management_rule}}
+- Use `.agent/spec.json` and `scripts/agent_spec.py` for embedded spec changes; do not depend on a global OpenSpec CLI.
 - Keep long-running session state in `.agent/sessions/`, not in chat history.
 - Use `docs/index.md` as the durable project knowledge map.
 - Use `.agent/harness.json` and `scripts/agent_validate.py` for executable feedback.
+- Use `.agent/workflow.json` for lifecycle gates: spec approval, plan quality, implementation discipline, worktree isolation, TDD/debugging evidence, review order, and completion verification.
+- Use `.agent/worktrees.json` for isolated feature work and guarded branch/worktree cleanup.
 - Use `.agent/subagents.json` for delegated work when the active platform allows it.
 - Use `.agent/hooks.json` for advisory bootstrap and checkpoint reminders.
 - Use `.agent/knowledge.json`, `.agent/memory.json`, and `.agent/context.json` for durable docs, memory retrieval, and context budgets.
@@ -27,6 +30,8 @@ Required project directories:
 - Use `.agent/skill-distribution.json` when project skills need to be mirrored into current agent skill directories.
 - Preserve unrelated user changes.
 - Do not store secrets, tokens, SSH keys, or private credentials in repository files.
+- Prefer simple, direct implementations; justify new abstractions, speculative flexibility, or broad cleanup in the active session.
+- Keep diffs surgical: each changed line should trace to the request, approved spec, or cleanup caused by this change.
 
 ## Workflow
 
@@ -37,20 +42,26 @@ Required project directories:
 5. Run `python3 scripts/agent_capabilities.py doctor`, `python3 scripts/agent_runlog.py doctor`, `python3 scripts/agent_tooling.py doctor`, `python3 scripts/agent_security.py doctor`, and `python3 scripts/agent_score.py doctor`.
 6. Inspect `git status --short` before editing.
 7. Read `.agent/project-layout.json` before adding top-level directories or moving files.
-8. {{spec_workflow_step}}
-9. Read `docs/index.md` and the relevant linked doc before making broad changes.
-10. Inspect configured harness commands:
+8. Read `.agent/workflow.json`; for non-trivial changes, pass the design/spec, plan, and implementation-discipline gates before implementation.
+9. Read `.agent/worktrees.json`; prefer an ignored isolated worktree for feature work, plan execution, or risky refactors.
+10. {{spec_workflow_step}}
+11. Read `docs/index.md` and the relevant linked doc before making broad changes.
+12. Inspect configured harness commands:
    `python3 scripts/agent_validate.py --list`
-11. For delegated work, read `.agent/subagents.json`, assign disjoint write boundaries, and require concise `===SNAPSHOT===` JSON reports.
-12. For long-running work, start or continue an agent session:
+13. For behavior changes, record failing-test evidence before implementation unless an exception is documented.
+14. For bugs, test failures, build failures, or unexpected behavior, record reproduction, root cause, hypothesis, and fix validation before patching.
+15. Before broad implementation, state assumptions and success criteria; ask for clarification when multiple interpretations would change the solution.
+16. For delegated or substantial work, run spec review before quality review and re-review after fixes.
+17. For delegated work, read `.agent/subagents.json`, assign disjoint write boundaries, and require concise `===SNAPSHOT===` JSON reports.
+18. For long-running work, start or continue an agent session:
    `python3 .agent/tools/agent_session.py status`
-13. Check `.agent/hooks.json` before modifying native hook adapters.
-14. Checkpoint after major decisions, file changes, validation runs, and accepted subagent snapshots.
-15. Before handing off or compacting context, run `python3 .agent/tools/agent_session.py compact`.
-16. For reusable context, run `python3 .agent/tools/agent_memory.py ingest-session --reason handoff`.
-17. For oversized governance docs, run `python3 .agent/tools/agent_context.py suggest` and validate any compressed rewrite with `validate-pair`.
-18. Use ADRs for durable architecture decisions, RFCs for proposals, and postmortems for incidents.
-19. Run `python3 scripts/agent_check.py` after project governance changes and use project review/fix-log templates for substantial work.
+19. Check `.agent/hooks.json` before modifying native hook adapters.
+20. Checkpoint after major decisions, file changes, validation runs, and accepted subagent snapshots.
+21. Before handing off or compacting context, run `python3 .agent/tools/agent_session.py compact`.
+22. For reusable context, run `python3 .agent/tools/agent_memory.py ingest-session --reason handoff`.
+23. For oversized governance docs, run `python3 .agent/tools/agent_context.py suggest` and validate any compressed rewrite with `validate-pair`.
+24. Use ADRs for durable architecture decisions, RFCs for proposals, and postmortems for incidents.
+25. Run `python3 scripts/agent_check.py` after project governance changes and use project review/fix-log templates for substantial work.
 
 ## Session Continuity
 
@@ -60,7 +71,7 @@ Codex or Claude native session state is temporary. The durable recovery path is:
 .agent/sessions/active.md
   -> .agent/sessions/bootstrap.md
   -> current session handoff/context/changes/validation
-  -> linked OpenSpec change
+  -> linked embedded spec change
   -> git status
 ```
 
@@ -68,6 +79,7 @@ Codex or Claude native session state is temporary. The durable recovery path is:
 
 ```bash
 python3 scripts/agent_check.py
+python3 scripts/agent_spec.py doctor
 python3 scripts/agent_knowledge.py
 python3 scripts/agent_invariants.py
 python3 scripts/agent_capabilities.py doctor
@@ -78,24 +90,4 @@ python3 scripts/agent_score.py doctor
 python3 scripts/agent_validate.py --list
 ```
 
-## Common Commands
-
-```bash
-python3 .agent/tools/agent_context.py scan --limit 10
-python3 .agent/tools/agent_memory.py timeline --limit 10
-python3 .agent/tools/agent_memory.py search "<query>"
-python3 scripts/agent_capabilities.py list --enabled
-python3 scripts/agent_runlog.py tail --limit 10
-python3 scripts/agent_tooling.py search "<query>" --glob "**/*.md"
-python3 scripts/agent_security.py scan-paths
-python3 scripts/agent_score.py score --write
-python3 scripts/agent_sync_skills.py --dry-run
-```
-
-## Session Commands
-
-```bash
-python3 .agent/tools/agent_session.py bootstrap
-python3 .agent/tools/agent_session.py compact
-python3 .agent/tools/agent_session.py doctor
-```
+Use `docs/QUALITY.md` for the broader command list.

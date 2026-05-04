@@ -1,0 +1,20 @@
+# Project Spec
+
+Project: {{project_name}}
+
+This repository uses `agent-gov` embedded specification management for non-trivial
+change intent, design decisions, task lists, and spec deltas.
+
+## Change Flow
+
+1. Create a change with `python3 scripts/agent_spec.py new-change <name>`.
+2. Fill `openspec/changes/<name>/proposal.md`, `design.md`, and `tasks.md`.
+3. Link active sessions to the change.
+4. Implement tasks with workflow evidence in `.agent/sessions/`.
+5. Archive completed changes with `python3 scripts/agent_spec.py archive <name>`.
+
+## Governance Links
+
+- `.agent/spec.json`: embedded spec policy.
+- `.agent/workflow.json`: lifecycle gates and completion evidence.
+- `.agent/sessions/`: volatile progress, validation, and handoff state.

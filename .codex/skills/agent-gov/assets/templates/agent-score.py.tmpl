@@ -108,6 +108,44 @@ def score_validation() -> dict:
     return dimension("validation", 100, findings, [f"{len(commands)} commands in {len(suites)} suite(s)"])
 
 
+def score_implementation_discipline() -> dict:
+    workflow = load_json(Path(".agent/workflow.json"))
+    gates = workflow.get("gates", {})
+    discipline = gates.get("implementation_discipline", {})
+    findings: list[str] = []
+    required = {
+        "state_assumptions_when_ambiguous",
+        "prefer_simple_direct_code",
+        "avoid_speculative_features",
+        "abstractions_require_repeated_complexity_or_existing_pattern",
+        "touch_only_requested_scope",
+        "every_changed_line_traces_to_request",
+        "success_criteria_required",
+        "exceptions_require_session_note",
+    }
+    if not discipline:
+        findings.append("missing implementation_discipline gate")
+    else:
+        for key in sorted(required):
+            if key not in discipline:
+                findings.append(f"implementation_discipline missing {key}")
+    plan_template = Path(".agent/templates/implementation-plan.md.tmpl")
+    review_template = Path(".agent/templates/project-review.md.tmpl")
+    if not plan_template.exists():
+        findings.append("missing implementation plan template")
+    elif "Implementation Discipline Gate" not in plan_template.read_text(encoding="utf-8", errors="ignore"):
+        findings.append("implementation plan template lacks discipline gate")
+    if not review_template.exists():
+        findings.append("missing project review template")
+    elif "Implementation discipline evidence" not in review_template.read_text(encoding="utf-8", errors="ignore"):
+        findings.append("project review template lacks discipline evidence")
+    score = 100 - min(90, len(findings) * 15)
+    evidence = [
+        f"{len(required) - len([key for key in required if key not in discipline])}/{len(required)} policy keys present",
+    ]
+    return dimension("implementation_discipline", score, findings, evidence)
+
+
 def threshold_for(path: Path, context: dict) -> int:
     budgets = context.get("budgets", {})
     text_path = str(path)
@@ -300,6 +338,7 @@ def collect_scores(extra_runlog_events: int = 0) -> dict:
     checks = {
         "required_paths": score_required_paths(),
         "validation": score_validation(),
+        "implementation_discipline": score_implementation_discipline(),
         "context_budget": score_context_budget(),
         "session_continuity": score_session_continuity(),
         "memory": score_memory(),
@@ -382,7 +421,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         if config.get("schema") != "agent-evals-v1":
             errors.append(".agent/evals.json schema must be agent-evals-v1")
         dimensions = config.get("dimensions", {})
-        for name in ("required_paths", "validation", "context_budget", "session_continuity", "memory", "capabilities", "security", "knowledge", "runlog"):
+        for name in ("required_paths", "validation", "implementation_discipline", "context_budget", "session_continuity", "memory", "capabilities", "security", "knowledge", "runlog"):
             if name not in dimensions:
                 errors.append(f".agent/evals.json missing dimension: {name}")
     LATEST_PATH.parent.mkdir(parents=True, exist_ok=True)

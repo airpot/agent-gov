@@ -1,0 +1,589 @@
+#!/usr/bin/env python3
+"""Repo-local specification management for agent-governed projects."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import shutil
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+ROOT = Path.cwd()
+AGENT_DIR = ROOT / ".agent"
+SPEC_CONFIG = AGENT_DIR / "spec.json"
+SPEC_ROOT = ROOT / "openspec"
+CHANGES_DIR = SPEC_ROOT / "changes"
+ARCHIVE_DIR = CHANGES_DIR / "archive"
+SPECS_DIR = SPEC_ROOT / "specs"
+
+ARTIFACTS = {
+    "proposal": "proposal.md",
+    "design": "design.md",
+    "tasks": "tasks.md",
+}
+PROPOSAL_REQUIRED_SECTIONS = ("Summary", "Goals", "Non-Goals", "User Impact")
+DESIGN_REQUIRED_SECTIONS = ("Approach", "Architecture Notes", "Risks", "Validation Strategy")
+DEFAULT_TASK_TEXTS = {
+    "confirm proposal and design are approved",
+    "add or update tests for changed behavior",
+    "implement the smallest scoped change",
+    "run narrow validation",
+    "run relevant broader validation",
+    "record validation and handoff evidence in the active session",
+}
+TASK_RE = re.compile(r"^\s*-\s+\[(?P<mark>[ xX])\]\s*(?P<text>.*?)\s*$")
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def today() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def slugify(value: str) -> str:
+    value = value.strip().lower()
+    value = re.sub(r"[^a-z0-9]+", "-", value)
+    return value.strip("-") or "change"
+
+
+def read_json(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError as exc:
+        print(f"error: invalid JSON in {path}: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+
+
+def write_if_missing(path: Path, content: str, force: bool = False) -> bool:
+    if path.exists() and not force:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return True
+
+
+def project_name() -> str:
+    config = read_json(AGENT_DIR / "config.json")
+    return str(config.get("project_name") or ROOT.name)
+
+
+def default_spec_config() -> dict:
+    return {
+        "schema": "agent-spec-v1",
+        "project_name": project_name(),
+        "created_at": utc_now(),
+        "mode": "embedded",
+        "source": "agent-gov",
+        "paths": {
+            "root": "openspec",
+            "changes": "openspec/changes",
+            "archive": "openspec/changes/archive",
+            "specs": "openspec/specs",
+            "project": "openspec/project.md",
+        },
+        "artifacts": {
+            "proposal": "proposal.md",
+            "design": "design.md",
+            "tasks": "tasks.md",
+        },
+        "required_before_apply": ["proposal", "design", "tasks"],
+        "policy": {
+            "non_trivial_changes_require_change": True,
+            "tasks_are_markdown_checkboxes": True,
+            "archive_requires_completed_tasks_or_force": True,
+            "record_session_links": True,
+        },
+    }
+
+
+def config_yaml() -> str:
+    return """schema: agent-gov-spec-v1
+
+context: |
+  This repository uses agent-gov's embedded specification layer for
+  non-trivial change proposals, designs, task lists, and spec deltas.
+  Agent session state lives in .agent/sessions/ and should reference
+  changes instead of duplicating their full content.
+
+rules:
+  proposal:
+    - State the user-visible goal and non-goals.
+    - Link related agent session ids when work spans multiple sessions.
+  design:
+    - Capture architecture decisions that should outlive a single chat session.
+    - Keep volatile progress updates in .agent/sessions/.
+  tasks:
+    - Use markdown checkboxes.
+    - Include validation commands and checkpoint expectations for long-running work.
+"""
+
+
+def project_md() -> str:
+    return f"""# Project Spec
+
+Project: {project_name()}
+
+This file is the durable project-level specification entry point for
+agent-gov's embedded spec layer.
+
+## Change Flow
+
+1. Create a change under `openspec/changes/<change-name>/`.
+2. Fill `proposal.md`, `design.md`, and `tasks.md`.
+3. Link active sessions to the change.
+4. Implement tasks with workflow evidence in `.agent/sessions/`.
+5. Archive completed changes under `openspec/changes/archive/`.
+"""
+
+
+def ensure_initialized(force: bool = False) -> list[str]:
+    created: list[str] = []
+    for directory in (AGENT_DIR, SPEC_ROOT, CHANGES_DIR, ARCHIVE_DIR, SPECS_DIR):
+        if not directory.exists():
+            directory.mkdir(parents=True, exist_ok=True)
+            created.append(str(directory.relative_to(ROOT)))
+    files = {
+        SPEC_CONFIG: json.dumps(default_spec_config(), indent=2) + "\n",
+        SPEC_ROOT / "config.yaml": config_yaml(),
+        SPEC_ROOT / "project.md": project_md(),
+        CHANGES_DIR / ".gitkeep": "",
+        ARCHIVE_DIR / ".gitkeep": "",
+        SPECS_DIR / ".gitkeep": "",
+    }
+    for path, content in files.items():
+        if write_if_missing(path, content, force=force):
+            created.append(str(path.relative_to(ROOT)))
+    return created
+
+
+def initialization_errors() -> list[str]:
+    errors: list[str] = []
+    for path in (SPEC_CONFIG, SPEC_ROOT / "config.yaml", SPEC_ROOT / "project.md", CHANGES_DIR, ARCHIVE_DIR, SPECS_DIR):
+        if not path.exists():
+            errors.append(f"missing {path.relative_to(ROOT)}")
+    if SPEC_CONFIG.exists():
+        config = read_json(SPEC_CONFIG)
+        if config.get("schema") != "agent-spec-v1":
+            errors.append(".agent/spec.json schema must be agent-spec-v1")
+    return errors
+
+
+def require_initialized() -> None:
+    errors = initialization_errors()
+    if errors:
+        print("error: embedded spec is not initialized", file=sys.stderr)
+        for error in errors:
+            print(f"error: {error}", file=sys.stderr)
+        print("run: python3 scripts/agent_spec.py init", file=sys.stderr)
+        raise SystemExit(1)
+
+
+def change_path(name: str) -> Path:
+    return CHANGES_DIR / slugify(name)
+
+
+def artifact_path(change: Path, artifact_id: str) -> Path:
+    return change / ARTIFACTS[artifact_id]
+
+
+def normalize_label(value: str) -> str:
+    value = re.sub(r"\s+", " ", value.strip().lower())
+    return value.rstrip(".")
+
+
+def section_map(text: str) -> dict[str, list[str]]:
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in text.splitlines():
+        match = re.match(r"^##\s+(.+?)\s*$", line)
+        if match:
+            current = match.group(1).strip().lower()
+            sections.setdefault(current, [])
+            continue
+        if current is not None:
+            sections[current].append(line)
+    return sections
+
+
+def meaningful_line(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    stripped = re.sub(r"^[-*]\s*", "", stripped)
+    stripped = re.sub(r"^\d+[.)]\s*", "", stripped)
+    stripped = re.sub(r"^\[[ xX]\]\s*", "", stripped)
+    stripped = stripped.strip()
+    if not stripped:
+        return False
+    lowered = stripped.lower()
+    if lowered in {"todo", "tbd", "placeholder", "..."}:
+        return False
+    if "describe the intent for" in lowered:
+        return False
+    if "fill in" in lowered:
+        return False
+    return True
+
+
+def section_has_content(sections: dict[str, list[str]], heading: str) -> bool:
+    return any(meaningful_line(line) for line in sections.get(heading.lower(), []))
+
+
+def task_counts(path: Path) -> dict:
+    counts = {"complete": 0, "incomplete": 0, "total": 0, "specific": 0, "generic": 0, "blank": 0}
+    if not path.exists():
+        return counts
+    for line in path.read_text(encoding="utf-8").splitlines():
+        match = TASK_RE.match(line)
+        if not match:
+            continue
+        label = normalize_label(match.group("text"))
+        if match.group("mark").lower() == "x":
+            counts["complete"] += 1
+        else:
+            counts["incomplete"] += 1
+        counts["total"] += 1
+        if not label:
+            counts["blank"] += 1
+        elif label in DEFAULT_TASK_TEXTS:
+            counts["generic"] += 1
+        else:
+            counts["specific"] += 1
+    return counts
+
+
+def artifact_state(path: Path, artifact_id: str) -> tuple[str, list[str]]:
+    if not path.exists():
+        return "missing", ["missing file"]
+    text = path.read_text(encoding="utf-8")
+    if not text.strip():
+        return "missing", ["empty file"]
+    issues: list[str] = []
+    if artifact_id == "proposal":
+        sections = section_map(text)
+        for heading in PROPOSAL_REQUIRED_SECTIONS:
+            if not section_has_content(sections, heading):
+                issues.append(f"{heading} has no concrete content")
+    elif artifact_id == "design":
+        sections = section_map(text)
+        for heading in DESIGN_REQUIRED_SECTIONS:
+            if not section_has_content(sections, heading):
+                issues.append(f"{heading} has no concrete content")
+    elif artifact_id == "tasks":
+        counts = task_counts(path)
+        if counts["total"] == 0:
+            issues.append("tasks.md must contain markdown checkbox tasks")
+        if counts["blank"]:
+            issues.append("tasks.md contains blank checkbox tasks")
+        if counts["specific"] == 0:
+            issues.append("tasks.md must include at least one change-specific task")
+    return ("draft" if issues else "done"), issues
+
+
+def read_metadata(change: Path) -> dict:
+    return read_json(change / ".agent-spec.json")
+
+
+def status_for_change(name: str) -> dict:
+    require_initialized()
+    change = change_path(name)
+    if not change.exists():
+        print(f"error: change not found: {slugify(name)}", file=sys.stderr)
+        raise SystemExit(1)
+    artifacts = []
+    for artifact_id, filename in ARTIFACTS.items():
+        path = change / filename
+        artifact_status, issues = artifact_state(path, artifact_id)
+        artifacts.append(
+            {
+                "id": artifact_id,
+                "path": str(path.relative_to(ROOT)),
+                "status": artifact_status,
+                "issues": issues,
+            }
+        )
+    tasks = task_counts(change / "tasks.md")
+    required_done = all(item["status"] == "done" for item in artifacts)
+    if not required_done:
+        state = "blocked"
+    elif tasks["incomplete"]:
+        state = "ready"
+    elif tasks["total"] == 0:
+        state = "blocked"
+    else:
+        state = "all_done"
+    return {
+        "schema": "agent-spec-status-v1",
+        "change": slugify(name),
+        "schemaName": "agent-gov-embedded",
+        "path": str(change.relative_to(ROOT)),
+        "state": state,
+        "applyRequires": list(ARTIFACTS),
+        "artifacts": artifacts,
+        "tasks": tasks,
+        "contextFiles": {
+            artifact_id: [item["path"]]
+            for artifact_id, item in zip(ARTIFACTS, artifacts)
+            if item["status"] == "done"
+        },
+        "metadata": read_metadata(change),
+    }
+
+
+def active_changes() -> list[dict]:
+    require_initialized()
+    changes: list[dict] = []
+    for path in sorted(CHANGES_DIR.iterdir()):
+        if not path.is_dir() or path.name == "archive":
+            continue
+        status = status_for_change(path.name)
+        changes.append(
+            {
+                "name": path.name,
+                "path": str(path.relative_to(ROOT)),
+                "schema": status["schemaName"],
+                "state": status["state"],
+                "tasks": status["tasks"],
+            }
+        )
+    return changes
+
+
+def proposal_template(name: str, summary: str) -> str:
+    return f"""# Proposal: {name}
+
+## Summary
+
+{summary}
+
+## Goals
+
+- 
+
+## Non-Goals
+
+- 
+
+## User Impact
+
+- 
+
+## Related Sessions
+
+- 
+"""
+
+
+def design_template(name: str) -> str:
+    return f"""# Design: {name}
+
+## Approach
+
+- 
+
+## Architecture Notes
+
+- 
+
+## Alternatives Considered
+
+- 
+
+## Risks
+
+- 
+
+## Validation Strategy
+
+- 
+"""
+
+
+def tasks_template(name: str) -> str:
+    return f"""# Tasks: {name}
+
+## Implementation
+
+- [ ] Confirm proposal and design are approved.
+- [ ] Add or update tests for changed behavior.
+- [ ] Implement the smallest scoped change.
+- [ ] Run narrow validation.
+- [ ] Run relevant broader validation.
+- [ ] Record validation and handoff evidence in the active session.
+"""
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    created = ensure_initialized(force=args.force)
+    print("agent spec initialized")
+    for item in created:
+        print(f"created: {item}")
+    if not created:
+        print("no changes")
+    return 0
+
+
+def cmd_new_change(args: argparse.Namespace) -> int:
+    ensure_initialized()
+    name = slugify(args.name)
+    change = change_path(name)
+    if change.exists() and not args.force:
+        print(f"error: change already exists: {name}", file=sys.stderr)
+        return 1
+    change.mkdir(parents=True, exist_ok=True)
+    summary = args.summary or f"Describe the intent for `{name}`."
+    write_if_missing(change / ".agent-spec.json", json.dumps({
+        "schema": "agent-spec-change-v1",
+        "name": name,
+        "created_at": utc_now(),
+        "status": "active",
+        "summary": summary,
+    }, indent=2) + "\n", force=args.force)
+    write_if_missing(change / "proposal.md", proposal_template(name, summary), force=args.force)
+    write_if_missing(change / "design.md", design_template(name), force=args.force)
+    write_if_missing(change / "tasks.md", tasks_template(name), force=args.force)
+    write_if_missing(change / "specs" / ".gitkeep", "", force=args.force)
+    print(f"created change: {name}")
+    print(f"path: {change.relative_to(ROOT)}")
+    return 0
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    changes = active_changes()
+    if args.json:
+        print(json.dumps({"schema": "agent-spec-list-v1", "changes": changes}, indent=2))
+        return 0
+    if not changes:
+        print("no active changes")
+        return 0
+    for item in changes:
+        tasks = item["tasks"]
+        print(f"{item['name']} [{item['state']}] tasks {tasks['complete']}/{tasks['total']} - {item['path']}")
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    status = status_for_change(args.change)
+    if args.json:
+        print(json.dumps(status, indent=2))
+        return 0
+    print(f"change: {status['change']}")
+    print(f"state: {status['state']}")
+    for artifact in status["artifacts"]:
+        print(f"{artifact['id']}: {artifact['status']} ({artifact['path']})")
+    tasks = status["tasks"]
+    print(f"tasks: {tasks['complete']}/{tasks['total']} complete, {tasks['incomplete']} incomplete")
+    return 0
+
+
+def cmd_validate(args: argparse.Namespace) -> int:
+    errors: list[str] = initialization_errors()
+    if not errors:
+        for change in active_changes():
+            status = status_for_change(change["name"])
+            incomplete = [
+                f"{artifact['id']} ({artifact['status']})"
+                for artifact in status["artifacts"]
+                if artifact["status"] != "done"
+            ]
+            if incomplete:
+                errors.append(f"change {change['name']} incomplete artifacts: {', '.join(incomplete)}")
+            tasks = status["tasks"]
+            if tasks["total"] == 0:
+                errors.append(f"change {change['name']} has no markdown checkbox tasks")
+            elif tasks["specific"] == 0:
+                errors.append(f"change {change['name']} has no change-specific tasks")
+    if errors:
+        print("agent spec validation failed")
+        for error in errors:
+            print(f"error: {error}")
+        return 1
+    print("agent spec validation passed")
+    return 0
+
+
+def cmd_archive(args: argparse.Namespace) -> int:
+    ensure_initialized()
+    name = slugify(args.change)
+    status = status_for_change(name)
+    tasks = status["tasks"]
+    incomplete_artifacts = [artifact for artifact in status["artifacts"] if artifact["status"] != "done"]
+    if status["state"] != "all_done" and not args.force:
+        if incomplete_artifacts:
+            details = ", ".join(f"{item['id']} ({item['status']})" for item in incomplete_artifacts)
+            print(f"error: change has incomplete artifacts: {details}; use --force to archive anyway", file=sys.stderr)
+        elif tasks["total"] == 0:
+            print("error: change has no markdown checkbox tasks; use --force to archive anyway", file=sys.stderr)
+        elif tasks["incomplete"]:
+            print(
+                f"error: change has {tasks['incomplete']} incomplete task(s); use --force to archive anyway",
+                file=sys.stderr,
+            )
+        else:
+            print(f"error: change is not complete ({status['state']}); use --force to archive anyway", file=sys.stderr)
+        return 1
+    source = change_path(name)
+    target = ARCHIVE_DIR / f"{args.date or today()}-{name}"
+    if target.exists():
+        print(f"error: archive target already exists: {target.relative_to(ROOT)}", file=sys.stderr)
+        return 1
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(source), str(target))
+    print(f"archived: {name}")
+    print(f"path: {target.relative_to(ROOT)}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    init = subparsers.add_parser("init", help="Initialize embedded spec files")
+    init.add_argument("--force", action="store_true")
+    init.set_defaults(func=cmd_init)
+
+    new = subparsers.add_parser("new-change", help="Create a new spec change")
+    new.add_argument("name")
+    new.add_argument("--summary")
+    new.add_argument("--force", action="store_true")
+    new.set_defaults(func=cmd_new_change)
+
+    list_cmd = subparsers.add_parser("list", help="List active changes")
+    list_cmd.add_argument("--json", action="store_true")
+    list_cmd.set_defaults(func=cmd_list)
+
+    status = subparsers.add_parser("status", help="Show change status")
+    status.add_argument("--change", required=True)
+    status.add_argument("--json", action="store_true")
+    status.set_defaults(func=cmd_status)
+
+    validate = subparsers.add_parser("validate", help="Validate embedded spec state")
+    validate.set_defaults(func=cmd_validate)
+
+    doctor = subparsers.add_parser("doctor", help="Validate embedded spec state")
+    doctor.set_defaults(func=cmd_validate)
+
+    archive = subparsers.add_parser("archive", help="Archive a completed change")
+    archive.add_argument("change")
+    archive.add_argument("--date")
+    archive.add_argument("--force", action="store_true")
+    archive.set_defaults(func=cmd_archive)
+
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

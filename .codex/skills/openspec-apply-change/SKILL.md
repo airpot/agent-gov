@@ -1,15 +1,14 @@
 ---
 name: openspec-apply-change
-description: Implement tasks from an OpenSpec change. Use when the user wants to start implementing, continue implementation, or work through tasks.
+description: Implement tasks from an embedded spec change. Use when the user wants to start implementing, continue implementation, or work through tasks.
 license: MIT
-compatibility: Requires openspec CLI.
 metadata:
-  author: openspec
+  author: agent-gov
   version: "1.0"
-  generatedBy: "1.3.1"
+  generatedBy: "agent-gov"
 ---
 
-Implement tasks from an OpenSpec change.
+Implement tasks from an embedded spec change.
 
 **Input**: Optionally specify a change name. If omitted, check if it can be inferred from conversation context. If vague or ambiguous you MUST prompt for available changes.
 
@@ -20,41 +19,38 @@ Implement tasks from an OpenSpec change.
    If a name is provided, use it. Otherwise:
    - Infer from conversation context if the user mentioned a change
    - Auto-select if only one active change exists
-   - If ambiguous, run `openspec list --json` to get available changes and use the **AskUserQuestion tool** to let the user select
+   - If ambiguous, run `python3 scripts/agent_spec.py list --json` to get available changes and ask the user to select
 
-   Always announce: "Using change: <name>" and how to override (e.g., `/opsx:apply <other>`).
+   Always announce: "Using change: <name>" and say that the user can name a different change to override.
 
 2. **Check status to understand the schema**
    ```bash
-   openspec status --change "<name>" --json
+   python3 scripts/agent_spec.py status --change "<name>" --json
    ```
    Parse the JSON to understand:
-   - `schemaName`: The workflow being used (e.g., "spec-driven")
-   - Which artifact contains the tasks (typically "tasks" for spec-driven, check status for others)
+   - `schemaName`: The workflow being used, normally `agent-gov-embedded`
+   - Which artifact contains the tasks, normally `tasks`
+   - Artifact status values: `missing`, `draft`, or `done`
 
-3. **Get apply instructions**
+3. **Get apply context**
 
-   ```bash
-   openspec instructions apply --change "<name>" --json
-   ```
+   Use the status JSON plus `.agent/spec.json` and `.agent/workflow.json`.
 
-   This returns:
-   - `contextFiles`: artifact ID -> array of concrete file paths (varies by schema - could be proposal/specs/design/tasks or spec/tests/implementation/docs)
-   - Progress (total, complete, remaining)
-   - Task list with status
-   - Dynamic instruction based on current state
+   The status JSON returns:
+   - `contextFiles`: artifact ID -> array of concrete file paths
+   - `tasks`: complete, incomplete, and total counts
+   - `state`: `blocked`, `ready`, or `all_done`
 
    **Handle states:**
-   - If `state: "blocked"` (missing artifacts): show message, suggest using openspec-continue-change
-   - If `state: "all_done"`: congratulate, suggest archive
-   - Otherwise: proceed to implementation
+   - If `state: "blocked"`: show the missing or draft artifacts and complete them before implementation
+   - If `state: "all_done"`: report that implementation tasks are complete and suggest archive
+   - If `state: "ready"`: proceed to implementation
 
 4. **Read context files**
 
-   Read every file path listed under `contextFiles` from the apply instructions output.
+   Read every file path listed under `contextFiles` from the status JSON.
    The files depend on the schema being used:
-   - **spec-driven**: proposal, specs, design, tasks
-   - Other schemas: follow the contextFiles from CLI output
+   - Embedded agent-gov spec: proposal, design, tasks, and any files under `specs/`
 
 5. **Show current progress**
 
@@ -62,7 +58,7 @@ Implement tasks from an OpenSpec change.
    - Schema being used
    - Progress: "N/M tasks complete"
    - Remaining tasks overview
-   - Dynamic instruction from CLI
+   - Workflow gates from `.agent/workflow.json`
 
 6. **Implement tasks (loop until done or blocked)**
 
@@ -94,11 +90,11 @@ Implement tasks from an OpenSpec change.
 
 Working on task 3/7: <task description>
 [...implementation happening...]
-✓ Task complete
+[done] Task complete
 
 Working on task 4/7: <task description>
 [...implementation happening...]
-✓ Task complete
+[done] Task complete
 ```
 
 **Output On Completion**
@@ -108,7 +104,7 @@ Working on task 4/7: <task description>
 
 **Change:** <change-name>
 **Schema:** <schema-name>
-**Progress:** 7/7 tasks complete ✓
+**Progress:** 7/7 tasks complete
 
 ### Completed This Session
 - [x] Task 1
@@ -140,13 +136,13 @@ What would you like to do?
 
 **Guardrails**
 - Keep going through tasks until done or blocked
-- Always read context files before starting (from the apply instructions output)
+- Always read context files before starting (from the status JSON)
 - If task is ambiguous, pause and ask before implementing
 - If implementation reveals issues, pause and suggest artifact updates
 - Keep code changes minimal and scoped to each task
 - Update task checkbox immediately after completing each task
 - Pause on errors, blockers, or unclear requirements - don't guess
-- Use contextFiles from CLI output, don't assume specific file names
+- Use `contextFiles` from `agent_spec.py status --json`; don't assume specific file names
 
 **Fluid Workflow Integration**
 

@@ -4,8 +4,10 @@ Use these documents for durable project knowledge. Keep `AGENTS.md` short and li
 
 Knowledge metadata is tracked in `.agent/knowledge.json`. Update `owner`, `last_reviewed`, `source_links`, and `known_stale_sections` when durable knowledge changes.
 Cross-session working memory is tracked in `.agent/memory.json` and `.agent/memory/`. Store summaries, decisions, validation, and retrieval handles; do not store raw transcripts.
+Embedded specification management is tracked in `.agent/spec.json` and `openspec/`; use `scripts/agent_spec.py` for change lifecycle commands.
 Capability governance is tracked in `.agent/capabilities.json`. Run evidence is tracked in `.agent/runlog.jsonl`.
 Agent-facing inspection limits are tracked in `.agent/tooling.json`. Security and supply-chain suites are tracked in `.agent/security.json`.
+Workflow gates, including implementation discipline, are tracked in `.agent/workflow.json`. Isolated worktree policy is tracked in `.agent/worktrees.json`.
 Governance health scoring is tracked in `.agent/evals.json` and `.agent/evals/latest.md`.
 
 - [Architecture](ARCHITECTURE.md): system boundaries, dependency direction, and major design decisions.
@@ -20,6 +22,9 @@ Governance health scoring is tracked in `.agent/evals.json` and `.agent/evals/la
 - [Incidents](incidents/README.md): postmortems and reliability learning.
 
 Update `.agent/harness.json` when validation commands or required docs change.
+Update `.agent/spec.json` when embedded spec paths, artifacts, or lifecycle policy change.
+Update `.agent/workflow.json` when lifecycle gates, implementation discipline, review order, TDD/debugging rules, or completion evidence rules change.
+Update `.agent/worktrees.json` when isolated worktree locations, baseline validation, or guarded cleanup rules change.
 Update `.agent/subagents.json` when delegated agent roles, boundaries, or snapshot rules change.
 Update `.agent/hooks.json` when session bootstrap, checkpoint, or native hook adapter behavior changes.
 Update `.agent/memory.json` when memory stores, privacy tags, or retention policy change.

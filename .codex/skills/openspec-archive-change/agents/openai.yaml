@@ -1,5 +1,4 @@
 interface:
-  display_name: "OpenSpec Archive"
-  short_description: "Archive completed OpenSpec changes"
-  default_prompt: "Use $openspec-archive-change to finalize and archive a completed OpenSpec change."
-
+  display_name: "Spec Archive"
+  short_description: "Archive completed embedded spec changes"
+  default_prompt: "Use $openspec-archive-change to finalize and archive a completed embedded spec change."

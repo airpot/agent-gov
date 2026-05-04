@@ -10,6 +10,14 @@ python3 scripts/agent_validate.py
 python3 scripts/agent_runlog.py tail --limit 10
 ```
 
+Workflow policy:
+
+```bash
+python3 scripts/agent_check.py
+python3 scripts/agent_spec.py doctor
+python3 scripts/agent_validate.py --list
+```
+
 Technology stack: {{tech_stack}}
 
 Skill distribution checks:
@@ -43,9 +51,17 @@ python3 scripts/agent_security.py scan-paths
 
 ## Expectations
 
-- Add or update tests for risky behavior changes.
+- Follow `.agent/workflow.json` for spec approval, plan quality, implementation discipline, worktree isolation, TDD/debugging, review sequence, and completion verification gates.
+- Follow the `implementation_discipline` gate for non-trivial implementation: surface assumptions, choose the simplest maintainable approach, keep diffs tied to the request, and define success criteria.
+- For behavior changes, write or update a failing test first, record the failing command, then record the passing command after implementation.
+- For bugs, build failures, test failures, and unexpected behavior, record reproduction, root cause, hypothesis, and validation with `.agent/templates/debugging-record.md.tmpl`.
+- For multi-step work, use `.agent/templates/implementation-plan.md.tmpl` or an embedded spec task file with exact files, commands, expected results, and no placeholders.
+- Prefer an ignored isolated worktree for feature work and substantial plan execution; record baseline validation before edits.
 - Record skipped validation in the active session's `validation.md`.
 - Run review-fix loops for substantial changes.
+- Review unnecessary abstractions, speculative features, drive-by cleanup, and broad rewrites as findings unless an exception is recorded.
+- Run spec compliance review before code quality review for delegated or substantial implementation, and re-review after fixes.
+- Do not report completion, merge readiness, or PR readiness without fresh command evidence.
 - When subagents are used, validate integrated changes after accepting their snapshots.
 - Validation commands should append compact pass/fail evidence to `.agent/runlog.jsonl`.
 - Use `scripts/agent_tooling.py` when normal shell output would be too large or ambiguous.

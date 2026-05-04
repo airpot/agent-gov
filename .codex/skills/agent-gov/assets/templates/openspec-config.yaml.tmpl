@@ -1,9 +1,9 @@
-schema: spec-driven
+schema: agent-gov-spec-v1
 
 context: |
-  This repository uses OpenSpec as the canonical source for non-trivial change
-  proposals, designs, task lists, and spec deltas.
-  Agent session state lives in .agent/sessions/ and should reference OpenSpec
+  This repository uses agent-gov's embedded specification layer for
+  non-trivial change proposals, designs, task lists, and spec deltas.
+  Agent session state lives in .agent/sessions/ and should reference
   changes instead of duplicating their full content.
 
 rules:
@@ -14,5 +14,5 @@ rules:
     - Capture architecture decisions that should outlive a single chat session.
     - Keep volatile progress updates in .agent/sessions/.
   tasks:
+    - Use markdown checkboxes.
     - Include validation commands and checkpoint expectations for long-running work.
-

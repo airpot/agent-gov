@@ -21,6 +21,9 @@ openspec/config.yaml
   config.json
   harness.json
   project-layout.json
+  spec.json
+  workflow.json
+  worktrees.json
   subagents.json
   hooks.json
   knowledge.json
@@ -57,6 +60,8 @@ openspec/config.yaml
     artifacts.json.tmpl
     project-review.md.tmpl
     project-fix-log.md.tmpl
+    implementation-plan.md.tmpl
+    debugging-record.md.tmpl
     subagent-task.md.tmpl
     memory-summary.md.tmpl
     memory-latest.md.tmpl
@@ -72,6 +77,7 @@ openspec/config.yaml
     governance_hook.py
 scripts/
   agent_check.py
+  agent_spec.py
   agent_validate.py
   agent_knowledge.py
   agent_invariants.py
@@ -105,11 +111,14 @@ Makefile                   # optional if missing
 - Use scripts for deterministic checks and session state operations.
 - Use `.agent/harness.json` as the project-specific command registry for build, test, lint, typecheck, smoke, logs, and health checks.
 - Use `.agent/project-layout.json` as the fixed directory contract for top-level project structure.
+- Use `.agent/spec.json` and `scripts/agent_spec.py` as the embedded specification policy and command surface.
+- Use `.agent/workflow.json` as the lifecycle gate policy for design/spec approval, plan quality, implementation discipline, isolated work, TDD, debugging, review order, completion proof, and finish choices.
+- Use `.agent/worktrees.json` as the git worktree isolation and guarded cleanup policy.
 - Use `.agent/subagents.json` as the delegated agent role, boundary, and snapshot contract when subagents are allowed.
 - Use `.agent/hooks.json` as the platform-neutral hook policy, with native Codex and Claude hook adapters treated as generated projections.
 - Use `.agent/knowledge.json` as the durable knowledge manifest for ownership, review dates, source links, and known stale sections.
 - Use `.agent/memory.json` as the cross-session memory policy for summaries, indexes, privacy redaction, and progressive retrieval.
-- Use `.agent/context.json` as the context budget policy for agent-facing docs, bootstrap packets, memory digests, OpenSpec change docs, and subagent output size.
+- Use `.agent/context.json` as the context budget policy for agent-facing docs, bootstrap packets, memory digests, embedded spec change docs, and subagent output size.
 - Use `.agent/capabilities.json` as the capability, integration, permission, and risk registry for agent-visible tools and resources.
 - Use `.agent/runlog.jsonl` as the append-only evidence ledger for session lifecycle events, validation runs, review-fix gates, and high-risk capability use.
 - Use `.agent/tooling.json` as the agent-computer-interface policy for bounded, path-first, line-numbered repository inspection.
@@ -119,6 +128,8 @@ Makefile                   # optional if missing
 - Prefer `npx @airpot/agent-gov@latest` as the public one-command installer; it should copy bundled project skills before running the initializer.
 - Use `docs/adr/`, `docs/rfcs/`, and `docs/incidents/` for durable decisions, proposals, and postmortems that should outlive a session.
 - Capture the technology stack during initialization and prefill harness commands when there is a known safe default.
+- Prefer ignored git worktrees for feature work, implementation-plan execution, and risky refactors; record baseline validation before editing.
+- Require fresh validation evidence before reporting completion, merge readiness, PR readiness, archive readiness, or handoff readiness.
 - Keep durable project knowledge in `docs/`; keep `AGENTS.md` as a short routing document.
 - Add mechanical invariants when architecture or taste constraints can be checked by scripts.
 - Keep commands idempotent and non-destructive by default.
@@ -131,6 +142,7 @@ Preferred validation after initialization:
 
 ```bash
 python3 scripts/agent_check.py
+python3 scripts/agent_spec.py doctor
 python3 scripts/agent_knowledge.py
 python3 scripts/agent_invariants.py
 python3 scripts/agent_capabilities.py doctor
@@ -142,7 +154,7 @@ python3 scripts/agent_validate.py --list
 python3 scripts/agent_sync_skills.py --dry-run
 python3 .agent/tools/agent_memory.py doctor
 python3 .agent/tools/agent_context.py doctor
-openspec list --json
+python3 scripts/agent_spec.py list --json
 python3 .agent/tools/agent_session.py status
 ```
 
@@ -172,6 +184,21 @@ make agent-validate
 Agents should run `python3 scripts/agent_validate.py --list` before choosing validation, then run the narrowest configured suite that proves the change.
 
 `agent_validate.py` appends pass/fail evidence to `.agent/runlog.jsonl`. When validation is skipped, record the reason in the active session `validation.md`; optionally add a runlog entry with `python3 scripts/agent_runlog.py record --kind validation --outcome skipped --summary "..."`.
+
+## Workflow And Worktree Surface
+
+`.agent/workflow.json` records the project lifecycle gates:
+
+- Design/spec approval for non-trivial changes.
+- Plan quality for multi-step or delegated work.
+- Implementation discipline for assumption surfacing, simplicity-first implementation, surgical diffs, abstraction justification, and success criteria.
+- Worktree isolation and clean baseline evidence for feature work.
+- TDD evidence for behavior changes and systematic debugging evidence for failures.
+- Spec compliance review before code quality review.
+- Fresh validation evidence before completion claims.
+- Explicit finish choices for merge, PR, keep, or discard.
+
+`.agent/worktrees.json` records where isolated worktrees should live, how to verify project-local directories are ignored, what baseline validation is expected, and which cleanup operations need confirmation. Do not treat it as permission to run destructive git commands; it is a policy surface that constrains such commands.
 
 ## Capability Governance Surface
 
@@ -221,7 +248,7 @@ Use this wrapper when normal shell output would be too large, silent on empty re
 Use `.agent/templates/adr.md.tmpl`, `.agent/templates/rfc.md.tmpl`, and `.agent/templates/postmortem.md.tmpl` to create durable records:
 
 - ADRs under `docs/adr/` for accepted architecture decisions.
-- RFCs under `docs/rfcs/` for broad proposals before they become OpenSpec changes.
+- RFCs under `docs/rfcs/` for broad proposals before they become embedded spec changes.
 - Postmortems under `docs/incidents/` for reliability, security, session, memory, context, or validation failures.
 
 ## Governance Score Surface
@@ -247,6 +274,8 @@ Use `python3 scripts/agent_score.py score --write` before release handoff or on 
 - Whether subagents are permission-gated.
 - Which roles are available.
 - Whether workers may write by default.
+- Whether implementation uses `DONE`, `DONE_WITH_CONCERNS`, `NEEDS_CONTEXT`, or `BLOCKED` states.
+- Whether spec review must pass before code quality review.
 - The required `===SNAPSHOT===` JSON fields.
 - The dispatch template path.
 
@@ -294,7 +323,7 @@ The context budget layer borrows the useful parts of token-saving projects witho
 - `.agent/context/latest.md` is a small digest included in session bootstrap.
 - `.agent/tools/agent_context.py` provides `doctor`, `scan`, `suggest`, and `validate-pair`.
 
-Use context budget scans to catch bloated `AGENTS.md`, `CLAUDE.md`, docs, session bootstraps, memory digests, OpenSpec change docs, and subagent outputs before they cause rollover or OOM problems. `doctor` is read-only by default; use `scan` or `doctor --write` only when refreshing `.agent/context/latest.md` is intended.
+Use context budget scans to catch bloated `AGENTS.md`, `CLAUDE.md`, docs, session bootstraps, memory digests, embedded spec change docs, and subagent outputs before they cause rollover or OOM problems. `doctor` is read-only by default; use `scan` or `doctor --write` only when refreshing `.agent/context/latest.md` is intended.
 
 Compression must preserve headings, fenced code blocks, inline code, URLs, paths, commands, versions, and technical names. The generated tool validates these invariants locally. Sensitive-looking paths are allowed for local pair validation, but the tool warns that they must not be sent to external compression services.
 

@@ -1,5 +1,6 @@
 .PHONY: agent-check
 .PHONY: agent-validate
+.PHONY: agent-spec
 .PHONY: agent-sync-skills
 .PHONY: agent-memory
 .PHONY: agent-context
@@ -11,6 +12,7 @@
 
 agent-check:
 	python3 scripts/agent_check.py
+	python3 scripts/agent_spec.py doctor
 	python3 scripts/agent_knowledge.py
 	python3 scripts/agent_invariants.py
 	python3 scripts/agent_capabilities.py doctor
@@ -24,6 +26,9 @@ agent-check:
 
 agent-validate:
 	python3 scripts/agent_validate.py
+
+agent-spec:
+	python3 scripts/agent_spec.py list --json
 
 agent-sync-skills:
 	python3 scripts/agent_sync_skills.py

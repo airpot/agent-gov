@@ -7,10 +7,13 @@ Use this reference when a governed project should support delegated agent work. 
 Borrow these practices:
 
 - Role-based delegation for search, exploration, implementation, verification, review, and coordination work.
+- Fresh worker context for independent implementation-plan tasks when the active platform supports it.
 - Small input packets with explicit read/write boundaries.
 - Disjoint write ownership for parallel workers.
 - Structured `===SNAPSHOT===` JSON summaries before natural-language detail.
 - Compressed, path-first supporting notes so delegated tool results do not consume the parent context budget.
+- Two-stage implementation review: spec compliance first, code quality second.
+- Explicit worker states for complete, complete with concerns, needs context, and blocked outcomes.
 - Fast cleanup of completed delegated work.
 - Session handoff records that preserve accepted subagent results.
 
@@ -20,6 +23,7 @@ Do not adopt these as absolute project rules:
 - A project rule may not force specific model names, reasoning levels, or tool calls.
 - A project rule may not require subagents for every task.
 - A project rule may not override higher-priority instructions about when delegation is allowed.
+- A project rule may not let a reviewer report replace fresh local validation of integrated work.
 
 ## Target Files
 
@@ -53,6 +57,8 @@ Keep `.agent/subagents.json` authoritative. If a native adapter exists and is pr
 - `explorer`: repository discovery, file ownership, call graph, and risk mapping.
 - `worker`: bounded implementation or mechanical edits within a declared write set.
 - `verifier`: tests, builds, lint, typecheck, smoke checks, and log inspection.
+- `spec_reviewer`: checks implementation against requested behavior, scope, and spec deltas before quality review.
+- `quality_reviewer`: checks maintainability, test quality, security, performance, and project conventions after spec review passes.
 - `reviewer`: independent risk review, conflict arbitration, and high-risk side-effect assessment.
 - `coordinator`: optional submodule coordinator for large tasks with independent subsystem boundaries.
 
@@ -65,11 +71,13 @@ Roles are descriptive, not a license to bypass platform limits. Use the role nam
 3. Give every subagent a narrow task goal, read boundary, write boundary, allowed operations, and expected validation.
 4. Assign disjoint write boundaries to parallel workers.
 5. Prefer `fork_context=false` or the nearest platform equivalent unless the subagent needs exact conversation context.
-6. Do not pin a model unless the user or platform explicitly requires it.
-7. Close or release completed subagents when the platform exposes lifecycle controls.
-8. Record accepted snapshots in the active session before compaction or handoff.
-9. Keep supporting notes within `.agent/context.json` budget, default 700 estimated tokens after the required JSON snapshot.
-10. Record accepted worker, verifier, or reviewer snapshots in `.agent/runlog.jsonl` when they materially affect validation, risk, or handoff.
+6. For independent plan tasks, prefer a fresh worker context over reusing a context polluted by prior implementation details.
+7. Do not pin a model unless the user or platform explicitly requires it.
+8. Close or release completed subagents when the platform exposes lifecycle controls.
+9. Record accepted snapshots in the active session before compaction or handoff.
+10. Keep supporting notes within `.agent/context.json` budget, default 700 estimated tokens after the required JSON snapshot.
+11. Record accepted worker, verifier, or reviewer snapshots in `.agent/runlog.jsonl` when they materially affect validation, risk, or handoff.
+12. Run post-integration validation locally; do not trust a subagent completion report as final evidence.
 
 ## Snapshot Contract
 
@@ -83,8 +91,8 @@ Follow it with JSON:
 
 ```json
 {
-  "status": "success | partial | blocked",
-  "role": "searcher | explorer | worker | verifier | reviewer | coordinator",
+  "status": "DONE | DONE_WITH_CONCERNS | NEEDS_CONTEXT | BLOCKED",
+  "role": "searcher | explorer | worker | verifier | spec_reviewer | quality_reviewer | reviewer | coordinator",
   "files_touched": [],
   "exports_added_or_modified": [],
   "critical_finding": "short finding",
@@ -95,6 +103,13 @@ Follow it with JSON:
 ```
 
 After the JSON, the subagent may add concise notes. It must separate confirmed facts from inference when reporting risks.
+
+Handle statuses this way:
+
+- `DONE`: proceed to the next required gate.
+- `DONE_WITH_CONCERNS`: read concerns and resolve correctness or scope doubts before review.
+- `NEEDS_CONTEXT`: provide missing facts and re-dispatch with a narrower packet.
+- `BLOCKED`: replan, split the task, escalate to the user, or use a different role; do not force a blind retry.
 
 Use path-first notes when possible:
 
@@ -107,11 +122,13 @@ For reviews, one line per finding is preferred unless security or architecture r
 ## Integration Checklist
 
 - Read `.agent/subagents.json` before delegating.
+- Read `.agent/workflow.json` before delegating implementation or review work.
 - Use `.agent/templates/subagent-task.md.tmpl` for dispatch wording.
 - Use native Codex/Claude governance agents only when the active client supports them.
 - Inspect snapshot `status`, `files_touched`, `estimated_risk_level`, and `validation` before integrating.
 - Reject or summarize snapshots that ignore the output budget before storing them in session handoff files.
 - Reconcile conflicts through a reviewer role or local review.
+- For implementation, run `spec_reviewer` and resolve findings before `quality_reviewer`.
 - Run relevant harness commands after integrating worker changes.
 - Add a checkpoint that records the accepted snapshots, rejected snapshots, validation, and remaining risks.
 - Add runlog evidence for accepted high-risk snapshots and any skipped post-integration validation.

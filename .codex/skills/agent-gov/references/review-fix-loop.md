@@ -6,9 +6,11 @@ Use this reference when the initialized project needs a release-quality setup ra
 
 Review the initialized project before handoff. At minimum, check:
 
-- OpenSpec exists and is identified as the spec source, or OpenSpec is explicitly disabled in `.agent/config.json`.
+- `.agent/spec.json`, `openspec/`, and `scripts/agent_spec.py` exist and identify agent-gov embedded spec management as the spec source.
 - `AGENTS.md` is short, stable, and agent-focused.
 - `CLAUDE.md` is thin and does not duplicate long instructions.
+- `.agent/workflow.json` records lifecycle gates for spec approval, plan quality, implementation discipline, worktree isolation, TDD/debugging, review sequence, completion verification, and finish choices.
+- `.agent/worktrees.json` records isolated worktree directory selection, ignore verification, baseline validation, and guarded cleanup.
 - `.agent/sessions/` supports start, checkpoint, resume, status, and archive.
 - `.agent/subagents.json`, `.agent/hooks.json`, `.agent/knowledge.json`, and `.agent/skill-distribution.json` are valid.
 - `.agent/context.json` exists, context budget commands run, and oversized governance docs have compression or retrieval plans.
@@ -21,6 +23,9 @@ Review the initialized project before handoff. At minimum, check:
 - Native Codex/Claude adapters exist when enabled and remain thin projections of `.agent/` policy.
 - VS Code Remote assumptions are captured in session state.
 - Validation commands exist and run.
+- Substantial changes have fresh completion evidence; skipped checks have explicit reasons and residual risk.
+- Delegated or substantial implementation ran spec compliance review before code quality review, or records an accepted exception.
+- Substantial implementation records assumptions, simplicity/abstraction justification, surgical diff scope, and success criteria, or records an accepted exception.
 - No secrets or private host credentials are written.
 - Compression does not alter headings, code blocks, inline code, URLs, paths, commands, versions, or technical identifiers.
 - Existing project files were not overwritten without explicit instruction.
@@ -49,6 +54,7 @@ Resolve blocker and major findings before release, or document an explicit excep
 review
   -> fix blocker/major findings
   -> re-run agent_check.py and relevant commands
+  -> confirm workflow gate evidence or accepted exceptions
   -> record validation and accepted exceptions in runlog/session files
   -> refresh governance score when release readiness matters
   -> update review status

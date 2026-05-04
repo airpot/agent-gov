@@ -15,6 +15,8 @@ The useful ideas from `caveman` are context economy, measurable token budgets, s
     stats.jsonl
     latest.md
   capabilities.json
+  workflow.json
+  worktrees.json
   tooling.json
   security.json
   evals.json
@@ -42,6 +44,7 @@ Default budgets:
 - Memory digest: 1200 estimated tokens.
 - Capability registry: 3000 estimated tokens through the single durable doc budget.
 - Tooling and security registries: 3000 estimated tokens each through the single durable doc budget.
+- Workflow and worktree policy: 3000 estimated tokens each through the single durable doc budget.
 - Governance score config and latest dashboard: 3000 estimated tokens each through the single durable doc budget.
 - Subagent supporting notes after the snapshot JSON: 700 estimated tokens.
 - Single review finding: 120 estimated tokens.
@@ -59,7 +62,7 @@ Compress only natural-language governance text. Preserve exactly:
 - File paths.
 - Shell commands.
 - API names, symbols, package names, versions, dates, and numeric values.
-- OpenSpec change ids and task ids.
+- Embedded spec change ids and task ids.
 
 Remove or shorten:
 
@@ -94,7 +97,7 @@ python3 .agent/tools/agent_context.py suggest
 python3 .agent/tools/agent_context.py validate-pair <original> <compressed>
 ```
 
-`doctor` is read-only by default. Run `scan` before compaction or when `AGENTS.md`, `CLAUDE.md`, docs, OpenSpec change docs, or session bootstraps grow substantially. Use `doctor --write` only when you want a health check to refresh the latest context digest.
+`doctor` is read-only by default. Run `scan` before compaction or when `AGENTS.md`, `CLAUDE.md`, docs, embedded spec change docs, workflow policy, worktree policy, or session bootstraps grow substantially. Use `doctor --write` only when you want a health check to refresh the latest context digest.
 
 ## Lifecycle Integration
 

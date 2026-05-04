@@ -4,7 +4,7 @@ Use this template only when the active platform and higher-priority instructions
 
 ## Task Packet
 
-- Role: `searcher | explorer | worker | verifier | reviewer | coordinator`
+- Role: `searcher | explorer | worker | verifier | spec_reviewer | quality_reviewer | reviewer | coordinator`
 - Goal:
 - Read boundary:
 - Write boundary:
@@ -16,6 +16,11 @@ Use this template only when the active platform and higher-priority instructions
   - Network:
 - Input facts:
 - Expected validation:
+- Workflow gate:
+  - For worker tasks: report `DONE`, `DONE_WITH_CONCERNS`, `NEEDS_CONTEXT`, or `BLOCKED`.
+  - For implementation tasks: prefer the simplest direct change, justify new abstractions, and keep changes inside the declared write boundary.
+  - For review tasks: run `spec_reviewer` before `quality_reviewer`.
+  - Do not claim validation unless you ran or inspected the stated command evidence.
 - Output budget:
   - Start with machine-readable snapshot.
   - Keep supporting notes concise; default budget is 700 estimated tokens unless caller says otherwise.
@@ -33,8 +38,8 @@ Then provide JSON:
 
 ```json
 {
-  "status": "success | partial | blocked",
-  "role": "searcher | explorer | worker | verifier | reviewer | coordinator",
+  "status": "DONE | DONE_WITH_CONCERNS | NEEDS_CONTEXT | BLOCKED",
+  "role": "searcher | explorer | worker | verifier | spec_reviewer | quality_reviewer | reviewer | coordinator",
   "files_touched": [],
   "exports_added_or_modified": [],
   "critical_finding": "short finding",

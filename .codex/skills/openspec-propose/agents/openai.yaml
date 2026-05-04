@@ -1,5 +1,4 @@
 interface:
-  display_name: "OpenSpec Propose"
-  short_description: "Create OpenSpec change artifacts"
-  default_prompt: "Use $openspec-propose to create a complete OpenSpec change proposal."
-
+  display_name: "Spec Propose"
+  short_description: "Create embedded spec change artifacts"
+  default_prompt: "Use $openspec-propose to create a complete embedded spec change proposal."

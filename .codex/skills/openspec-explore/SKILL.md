@@ -2,16 +2,15 @@
 name: openspec-explore
 description: Enter explore mode - a thinking partner for exploring ideas, investigating problems, and clarifying requirements. Use when the user wants to think through something before or during a change.
 license: MIT
-compatibility: Requires openspec CLI.
 metadata:
-  author: openspec
+  author: agent-gov
   version: "1.0"
-  generatedBy: "1.3.1"
+  generatedBy: "agent-gov"
 ---
 
 Enter explore mode. Think deeply. Visualize freely. Follow the conversation wherever it goes.
 
-**IMPORTANT: Explore mode is for thinking, not implementing.** You may read files, search code, and investigate the codebase, but you must NEVER write code or implement features. If the user asks you to implement something, remind them to exit explore mode first and create a change proposal. You MAY create OpenSpec artifacts (proposals, designs, specs) if the user asks—that's capturing thinking, not implementing.
+**IMPORTANT: Explore mode is for thinking, not implementing.** You may read files, search code, and investigate the codebase, but you must NEVER write code or implement features. If the user asks you to implement something, remind them to exit explore mode first and create a change proposal. You MAY create embedded spec artifacts (proposals, designs, specs) if the user asks - that's capturing thinking, not implementing.
 
 **This is a stance, not a workflow.** There are no fixed steps, no required sequence, no mandatory outputs. You're a thinking partner helping the user explore.
 
@@ -75,15 +74,15 @@ Depending on what the user brings, you might:
 
 ---
 
-## OpenSpec Awareness
+## Embedded Spec Awareness
 
-You have full context of the OpenSpec system. Use it naturally, don't force it.
+You have full context of the agent-gov embedded spec system. Use it naturally, don't force it.
 
 ### Check for context
 
 At the start, quickly check what exists:
 ```bash
-openspec list --json
+python3 scripts/agent_spec.py list --json
 ```
 
 This tells you:
@@ -236,9 +235,9 @@ You: That changes everything.
      • Single user
 
                   SQLite          Postgres
-     Deployment   embedded ✓      needs server ✗
-     Offline      yes ✓           no ✗
-     Single file  yes ✓           no ✗
+     Deployment   embedded        needs server
+     Offline      yes             no
+     Single file  yes             no
 
      SQLite. Not even close.
 
@@ -278,7 +277,7 @@ But this summary is optional. Sometimes the thinking IS the value.
 
 ## Guardrails
 
-- **Don't implement** - Never write code or implement features. Creating OpenSpec artifacts is fine, writing application code is not.
+- **Don't implement** - Never write code or implement features. Creating embedded spec artifacts is fine, writing application code is not.
 - **Don't fake understanding** - If something is unclear, dig deeper
 - **Don't rush** - Discovery is thinking time, not task time
 - **Don't force structure** - Let patterns emerge naturally

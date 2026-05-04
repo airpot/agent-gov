@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sqlite3
@@ -86,11 +87,23 @@ def redact_private(text: str, config: dict) -> str:
     return re.sub(f"{start}.*?{end}", replacement, text, flags=re.DOTALL)
 
 
+def content_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def first_nonempty_lines(path: Path, limit: int = 80) -> list[str]:
     if not path.exists():
         return []
     lines = [line.rstrip() for line in path.read_text(encoding="utf-8", errors="ignore").splitlines()]
     return [line for line in lines if line.strip()][:limit]
+
+
+def selected_nonempty_lines(path: Path, head: int = 20, tail: int = 50) -> list[str]:
+    lines = first_nonempty_lines(path, head + tail + 20)
+    if len(lines) <= head + tail:
+        return lines
+    omitted = len(lines) - head - tail
+    return [*lines[:head], f"... omitted {omitted} older line(s) ...", *lines[-tail:]]
 
 
 def active_session_id() -> str | None:
@@ -136,7 +149,9 @@ def ensure_store(config: dict) -> bool:
               tags_json TEXT NOT NULL,
               reviewed INTEGER NOT NULL DEFAULT 0,
               review_ref TEXT,
-              confidence TEXT NOT NULL DEFAULT 'medium'
+              confidence TEXT NOT NULL DEFAULT 'medium',
+              content_hash TEXT,
+              dedupe_key TEXT
             )
             """
         )
@@ -144,6 +159,8 @@ def ensure_store(config: dict) -> bool:
         ensure_column(db, "memories", "reviewed", "INTEGER NOT NULL DEFAULT 0")
         ensure_column(db, "memories", "review_ref", "TEXT")
         ensure_column(db, "memories", "confidence", "TEXT NOT NULL DEFAULT 'medium'")
+        ensure_column(db, "memories", "content_hash", "TEXT")
+        ensure_column(db, "memories", "dedupe_key", "TEXT")
         try:
             db.execute(
                 """
@@ -213,6 +230,15 @@ def iter_events(path: Path) -> list[dict]:
     return items
 
 
+def find_duplicate_event(events_path: Path, dedupe_key: str | None, hash_value: str) -> dict | None:
+    if not dedupe_key:
+        return None
+    for item in reversed(iter_events(events_path)):
+        if item.get("dedupe_key") == dedupe_key and item.get("content_hash") == hash_value:
+            return item
+    return None
+
+
 def write_latest(config: dict, limit: int = 10) -> None:
     events_path, _, _, latest_path = store_paths(config)
     events = iter_events(events_path)[-limit:]
@@ -236,8 +262,8 @@ def insert_sqlite(config: dict, item: dict) -> None:
         db.execute(
             """
             INSERT OR REPLACE INTO memories
-            (id, created_at, kind, memory_class, session_id, title, summary, source_path, tags_json, reviewed, review_ref, confidence)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (id, created_at, kind, memory_class, session_id, title, summary, source_path, tags_json, reviewed, review_ref, confidence, content_hash, dedupe_key)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 item["id"],
@@ -252,6 +278,8 @@ def insert_sqlite(config: dict, item: dict) -> None:
                 1 if item.get("reviewed") else 0,
                 item.get("review_ref"),
                 item.get("confidence", "medium"),
+                item.get("content_hash"),
+                item.get("dedupe_key"),
             ),
         )
         try:
@@ -277,11 +305,18 @@ def record_memory(
     review_ref: str | None,
     confidence: str,
     config: dict,
+    dedupe_key: str | None = None,
 ) -> dict:
     ensure_store(config)
     events_path, _, summary_dir, _ = store_paths(config)
     created_at = utc_now()
     clean_summary = redact_private(summary.strip(), config)
+    hash_value = content_hash(clean_summary)
+    duplicate = find_duplicate_event(events_path, dedupe_key, hash_value)
+    if duplicate is not None:
+        insert_sqlite(config, duplicate)
+        write_latest(config)
+        return {**duplicate, "_deduped": True}
     resolved_class = memory_class or infer_memory_class(kind, config)
     errors = validate_memory_policy(
         kind=kind,
@@ -311,6 +346,8 @@ def record_memory(
         "reviewed": reviewed,
         "review_ref": review_ref,
         "confidence": confidence,
+        "content_hash": hash_value,
+        "dedupe_key": dedupe_key,
     }
     append_jsonl(events_path, item)
     insert_sqlite(config, item)
@@ -339,7 +376,7 @@ def session_summary(session_id: str, reason: str) -> tuple[str, str, str]:
     parts: list[str] = [f"Reason: {reason}", ""]
     for name in ("handoff.md", "context.md", "changes.md", "validation.md", "decisions.md"):
         path = directory / name
-        lines = first_nonempty_lines(path, 80)
+        lines = selected_nonempty_lines(path)
         if not lines:
             continue
         parts.extend([f"## {name}", "", *lines, ""])
@@ -378,6 +415,7 @@ def cmd_capture(args: argparse.Namespace) -> int:
             review_ref=args.review_ref,
             confidence=args.confidence,
             config=config,
+            dedupe_key=args.dedupe_key,
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -412,8 +450,12 @@ def cmd_ingest_session(args: argparse.Namespace) -> int:
         review_ref=None,
         confidence="medium",
         config=config,
+        dedupe_key=f"session:{session_id}:{args.reason}",
     )
-    print(f"ingested {item['id']}")
+    if item.get("_deduped"):
+        print(f"already ingested {item['id']}")
+    else:
+        print(f"ingested {item['id']}")
     return 0
 
 
@@ -518,6 +560,7 @@ def cmd_promote(args: argparse.Namespace) -> int:
             review_ref=args.review_ref,
             confidence=args.confidence,
             config=config,
+            dedupe_key=f"promotion:{args.memory_id}:{args.to}:{args.kind or source.get('kind', args.to)}",
         )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -594,6 +637,7 @@ def build_parser() -> argparse.ArgumentParser:
     capture.add_argument("--reviewed", action="store_true")
     capture.add_argument("--review-ref")
     capture.add_argument("--confidence", choices=["low", "medium", "high"], default="medium")
+    capture.add_argument("--dedupe-key")
     capture.set_defaults(func=cmd_capture)
 
     ingest = subparsers.add_parser("ingest-session", help="Capture a session summary into memory")

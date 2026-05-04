@@ -46,20 +46,22 @@ Long-term memory is a retrieval aid layered on top of session files. It never re
 
 1. **start**
    - Create a session directory.
-   - Record goal, remote workspace path, git branch, git commit, OpenSpec change, and client surface.
+   - Record goal, remote workspace path, git branch, git commit, embedded spec change, and client surface.
+   - Record current workflow stage, base branch, and worktree path when isolated work is used.
 
 2. **checkpoint**
    - Update handoff, changed files, decisions, and validation results after a meaningful work block.
    - Checkpoint before compaction, large tool runs, branch switches, or leaving the workstation.
+   - Record workflow gate evidence: spec/design approval, plan quality, implementation discipline, baseline validation, TDD/debugging evidence, review sequence, and completion verification.
    - If subagents were used, record accepted snapshots, rejected snapshots, integration decisions, and follow-up validation.
-   - Capture a concise memory record when the checkpoint changes future behavior or saves rediscovery work.
+   - Capture a concise memory record when the checkpoint changes future behavior or saves rediscovery work; repeated identical session ingests should dedupe by session/reason/content hash.
    - Ensure validation and session lifecycle evidence is present in `.agent/runlog.jsonl`.
 
 3. **pre-compact**
    - Summarize task state into files before the session becomes too large.
    - Do not wait for OOM or context failure.
    - Run `python3 .agent/tools/agent_session.py compact`.
-   - Run `python3 .agent/tools/agent_memory.py ingest-session --reason compact` to refresh searchable long-term memory.
+   - Run `python3 .agent/tools/agent_memory.py ingest-session --reason compact` to refresh searchable long-term memory; identical compact summaries should not create duplicate memory records.
    - Run `python3 .agent/tools/agent_context.py scan --limit 10` to refresh the context budget digest.
    - Treat native hook reminders as advisory; still checkpoint explicitly after meaningful work.
 
@@ -67,11 +69,12 @@ Long-term memory is a retrieval aid layered on top of session files. It never re
    - Start a new Codex session with `bootstrap.md` or `resume-prompt.md`.
    - Use progressive memory retrieval: `timeline` first, `search` second, `detail` only for selected records.
    - Use runlog retrieval: `tail` first, then `summary` when validation or session evidence is unclear.
-   - Confirm `git status`, OpenSpec state, and validation status before editing.
+   - Confirm `git status`, embedded spec state, and validation status before editing.
 
 5. **archive**
    - Mark completed sessions archived after the related change is complete.
    - Keep decisions and validation summaries; do not keep raw logs unless explicitly required.
+   - Preserve branch/worktree finish decision and any destructive cleanup confirmation.
 
 ## VS Code Remote Rules
 
@@ -89,13 +92,14 @@ Long-term memory is a retrieval aid layered on top of session files. It never re
 1. `cd` into the remote workspace.
 2. Read `.agent/sessions/active.md`.
 3. Read current session `handoff.md`, `context.md`, `changes.md`, and `validation.md`.
-4. Read linked OpenSpec artifacts.
+4. Read linked embedded spec artifacts.
 5. Run `git status --short`.
 6. Continue only after confirming current branch, dirty files, and remaining task.
-7. Read any accepted subagent snapshots recorded in `handoff.md`, `changes.md`, or `validation.md`.
-8. Run `python3 .agent/tools/agent_memory.py timeline --limit 10`, then search/detail only if needed.
-9. Run `python3 .agent/tools/agent_context.py scan --limit 10` when bootstrap, docs, or memory digest look large.
-10. Run `python3 scripts/agent_runlog.py tail --limit 10` when validation or handoff evidence is unclear.
+7. Read `.agent/workflow.json` and `.agent/worktrees.json` when the remaining task involves implementation, validation, or branch/worktree finish.
+8. Read any accepted subagent snapshots recorded in `handoff.md`, `changes.md`, or `validation.md`.
+9. Run `python3 .agent/tools/agent_memory.py timeline --limit 10`, then search/detail only if needed.
+10. Run `python3 .agent/tools/agent_context.py scan --limit 10` when bootstrap, docs, or memory digest look large.
+11. Run `python3 scripts/agent_runlog.py tail --limit 10` when validation or handoff evidence is unclear.
 
 ## Automation Commands
 
@@ -116,7 +120,7 @@ python3 .agent/tools/governance_hook.py --event session-start
 - `compact` refreshes `handoff.md`, `resume-prompt.md`, and `bootstrap.md`.
 - `doctor` checks the active session files, validation notes, and dirty worktree continuity.
 - `agent_memory.py` provides cross-session timeline/search/detail over concise summaries, decisions, validations, and handoffs. Its `doctor` command is read-only by default; use `init`, `ingest-session`, or `doctor --write` when refreshing stores is intended.
-- `agent_context.py` keeps governance docs, bootstraps, memory digests, OpenSpec change docs, and subagent outputs within measured budgets. Its `doctor` command is read-only by default; use `scan` or `doctor --write` when refreshing the latest digest is intended.
+- `agent_context.py` keeps governance docs, bootstraps, memory digests, embedded spec change docs, and subagent outputs within measured budgets. Its `doctor` command is read-only by default; use `scan` or `doctor --write` when refreshing the latest digest is intended.
 - `agent_runlog.py` records and retrieves compact evidence for validations, session lifecycle actions, and high-risk capability use.
 - `governance_hook.py` is an advisory native-hook bridge; session-start is read-only, and hooks should never be the only place session state is updated.
 
@@ -130,7 +134,7 @@ python3 .agent/tools/governance_hook.py --event session-start
 
 ## Context Budget Rules
 
-- Keep `AGENTS.md`, `CLAUDE.md`, session bootstraps, memory digests, and OpenSpec change docs concise enough to load progressively.
+- Keep `AGENTS.md`, `CLAUDE.md`, session bootstraps, memory digests, and embedded spec change docs concise enough to load progressively.
 - Use `scan` for drift detection and `suggest` before manually compressing a large governance doc.
 - Validate compressed rewrites with `validate-pair` before replacing the original.
 - Prefer summaries plus retrieval commands over embedding long histories in bootstrap files.

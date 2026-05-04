@@ -1,24 +1,26 @@
 ---
 name: agent-gov
-description: Govern Codex/Claude-ready repositories with OpenSpec specification management, harness engineering, technology stack and directory layout contracts, durable docs and knowledge metadata, repo-local long-term memory, context budget management, capability and integration governance, runlog evidence tracing, ACI-friendly bounded tooling, optional policy-as-code and supply-chain checks, ADR/RFC/postmortem records, governance health scoring/evals, VS Code Remote-friendly session continuity, native hook adapters, subagent orchestration, skill distribution, handoff/resume automation, validation commands, and review-fix gates. Use when the user asks to initialize, retrofit, audit, or maintain an agent-governed project; make a repo agent-ready; add or repair OpenSpec/harness/session/memory/context/capabilities/runlog/tooling/security/evals/ADR/RFC/subagent/hooks/skills management; or recover long-running Codex work across sessions.
+description: Govern Codex/Claude-ready repositories with embedded OpenSpec-style specification management, harness engineering, technology stack and directory layout contracts, durable docs and knowledge metadata, repo-local long-term memory, context budget management, workflow and worktree governance, implementation discipline, capability and integration governance, runlog evidence tracing, ACI-friendly bounded tooling, optional policy-as-code and supply-chain checks, ADR/RFC/postmortem records, governance health scoring/evals, VS Code Remote-friendly session continuity, native hook adapters, subagent orchestration, skill distribution, handoff/resume automation, validation commands, and review-fix gates. Use when the user asks to initialize, retrofit, audit, or maintain an agent-governed project; make a repo agent-ready; add or repair embedded spec/harness/session/memory/context/workflow/worktree/implementation-discipline/capabilities/runlog/tooling/security/evals/ADR/RFC/subagent/hooks/skills management; or recover long-running Codex work across sessions.
 ---
 
 # Agent Gov
 
 ## Overview
 
-Govern a repository so long-running Codex/Claude work can be specified, executed, checkpointed, resumed, reviewed, validated, and maintained without depending on a fragile chat transcript.
+Govern a repository so long-running Codex/Claude work can be specified, planned, isolated, executed, checkpointed, resumed, reviewed, validated, and maintained without depending on a fragile chat transcript.
 
 ## Workflow
 
 1. **Inspect the repository**
-   - Check `pwd`, `git status --short`, existing `AGENTS.md`, `CLAUDE.md`, `openspec/`, `.agent/`, `Makefile`, and `scripts/`.
+   - Check `pwd`, `git status --short`, existing `AGENTS.md`, `CLAUDE.md`, `openspec/`, `.agent/spec.json`, `.agent/`, `Makefile`, and `scripts/`.
    - If the user is in VS Code Remote or another remote workspace, treat the remote repository path as the authoritative workspace.
 
 2. **Choose initialization scope**
    - Ask for or infer the technology stack before initialization. If unknown, ask whether to continue with `unspecified`.
    - Ask for the fixed project directory layout. Use a built-in layout (`minimal`, `python-app`, `node-app`, `web-app`, `service`, `library`) or explicit extra directories.
-   - Use `references/spec-management.md` for OpenSpec and project specification setup.
+   - Use `references/spec-management.md` for embedded OpenSpec-style project specification setup.
+   - Use `references/workflow-governance.md` for lifecycle gates, plan quality, TDD/debugging evidence, worktree isolation, review order, and completion proof.
+   - Use `references/implementation-discipline.md` for assumption clarification, simplicity-first implementation, surgical diffs, and verifiable goals.
    - Use `references/harness-management.md` for command, validation, capability governance, runlog evidence, ACI tooling, security/supply-chain suites, governance scoring/evals, ADR/RFC/postmortem records, native adapters, context budget, skill distribution, and repo-harness setup.
    - Use `references/session-continuity.md` for `.agent/sessions/`, `.agent/memory/`, rollover, checkpoint, memory retrieval, and resume behavior.
    - Use `references/context-budget.md` for compression-safe governance docs, token budget scans, and subagent output limits.
@@ -30,7 +32,7 @@ Govern a repository so long-running Codex/Claude work can be specified, executed
    - Pass `--tech-stack <stack>` and `--layout <layout>` when known.
    - Use `--dir <path>` for additional required directories.
    - Add `--remote-kind ssh|devcontainer|wsl|local|unknown` when known.
-   - By default, the initializer installs the official latest OpenSpec CLI and runs `openspec init` or `openspec update`; use `--install-openspec never` only for offline or restricted environments.
+   - The initializer uses agent-gov's embedded spec layer; it does not install or call a global OpenSpec CLI.
    - Add `--no-claude` only when the user does not want Claude support.
    - Do not overwrite existing files unless the user explicitly asks for `--force`.
 
@@ -47,11 +49,18 @@ Govern a repository so long-running Codex/Claude work can be specified, executed
 
 6. **Create or verify context budget management**
    - Ensure `.agent/context.json`, `.agent/context/stats.jsonl`, `.agent/context/latest.md`, and `.agent/tools/agent_context.py` exist.
-   - Track agent-facing docs, bootstrap packets, memory digests, OpenSpec change docs, and subagent output budgets.
+   - Track agent-facing docs, bootstrap packets, memory digests, embedded spec change docs, and subagent output budgets.
    - Use `scan`, `suggest`, and `validate-pair` to keep governance docs compact while preserving headings, code blocks, inline code, URLs, paths, commands, versions, and technical names.
    - Never send sensitive-looking files or private environment files to external compression services.
 
-7. **Create or verify capability governance and runlog evidence**
+7. **Create or verify workflow and worktree governance**
+   - Ensure `.agent/workflow.json`, `.agent/worktrees.json`, `.agent/templates/implementation-plan.md.tmpl`, and `.agent/templates/debugging-record.md.tmpl` exist.
+   - Use workflow gates for design/spec approval, plan quality, implementation discipline, isolated execution, TDD evidence, systematic debugging, spec review, quality review, completion verification, handoff, and finish choices.
+   - Prefer ignored git worktrees for feature work, implementation-plan execution, and risky refactors; record baseline validation before edits.
+   - Require fresh validation evidence before completion, merge, PR, archive, or handoff claims.
+   - Treat destructive branch/worktree cleanup as explicit-user-confirmation work.
+
+8. **Create or verify capability governance and runlog evidence**
    - Ensure `.agent/capabilities.json`, `.agent/runlog.jsonl`, `.agent/tooling.json`, `.agent/security.json`, `.agent/evals.json`, `.agent/evals/latest.md`, `scripts/agent_capabilities.py`, `scripts/agent_runlog.py`, `scripts/agent_tooling.py`, `scripts/agent_security.py`, and `scripts/agent_score.py` exist.
    - Use `.agent/capabilities.json` to record enabled tools, resources, native adapters, external integrations, owner, risk, permission shape, and validation commands.
    - Use `.agent/runlog.jsonl` for compact evidence of validation runs, session lifecycle events, accepted review exceptions, and high-risk capability use.
@@ -61,21 +70,22 @@ Govern a repository so long-running Codex/Claude work can be specified, executed
    - Ensure `docs/adr/`, `docs/rfcs/`, `docs/incidents/`, and their templates exist for durable decisions, proposals, and postmortems.
    - Keep runlog entries structured and concise; do not store raw transcripts, terminal scrollback, secrets, or private host data.
 
-8. **Create or verify subagent orchestration**
+9. **Create or verify subagent orchestration**
    - Ensure `.agent/subagents.json` and `.agent/templates/subagent-task.md.tmpl` exist.
    - Treat subagent delegation as optional and permission-gated: use it only when the current platform and higher-priority instructions allow it.
-   - Require bounded roles, disjoint write ownership, minimal input facts, context-budgeted supporting notes, and `===SNAPSHOT===` JSON summaries for delegated work.
+   - Require bounded roles, disjoint write ownership, minimal input facts, context-budgeted supporting notes, workflow status values, and `===SNAPSHOT===` JSON summaries for delegated work.
+   - For delegated implementation, handle `DONE_WITH_CONCERNS`, `NEEDS_CONTEXT`, and `BLOCKED` before review; run spec review before quality review and re-review after fixes.
    - Record accepted subagent snapshots in `.agent/sessions/` handoff, changes, or validation files before compaction.
 
-9. **Create or verify native adapters**
+10. **Create or verify native adapters**
    - Ensure `.agent/hooks.json`, `.agent/knowledge.json`, `.agent/skill-distribution.json`, and `.agent/tools/governance_hook.py` exist.
    - Ensure Codex adapters exist: `.codex/config.toml`, `.codex/hooks.json`, and `.codex/agents/governance-*.toml`.
    - Ensure Claude adapters exist when Claude support is enabled: `.claude/settings.json` and `.claude/agents/governance-*.md`.
    - Preserve existing native config files by default; report skipped files for manual merge.
 
-10. **Validate**
+11. **Validate**
    - Run the generated project check when available: `python3 scripts/agent_check.py`.
-   - Run `openspec --version` and `openspec list --json` when OpenSpec is enabled.
+   - Run `python3 scripts/agent_spec.py doctor` and `python3 scripts/agent_spec.py list --json`.
    - Inspect executable feedback commands: `python3 scripts/agent_validate.py --list`.
    - Check the knowledge store and invariants: `python3 scripts/agent_knowledge.py` and `python3 scripts/agent_invariants.py`.
    - Check capability governance and runlog health: `python3 scripts/agent_capabilities.py doctor` and `python3 scripts/agent_runlog.py doctor`.
@@ -83,10 +93,11 @@ Govern a repository so long-running Codex/Claude work can be specified, executed
    - Check governance score health: `python3 scripts/agent_score.py doctor`; refresh score with `python3 scripts/agent_score.py score --write` before release handoff.
    - Check memory health: `python3 .agent/tools/agent_memory.py doctor`.
    - Check context budget health: `python3 .agent/tools/agent_context.py doctor`.
+   - Confirm workflow and worktree policy are covered by `python3 scripts/agent_check.py`.
    - Check skill sync readiness: `python3 scripts/agent_sync_skills.py --dry-run`.
    - Report skipped files, existing files, and any manual merge required.
 
-11. **Review before handoff**
+12. **Review before handoff**
    - For substantial initialization work, create or update a review-fix record in the controlling skill lifecycle.
    - Confirm that resume instructions do not depend on unsaved editor buffers, terminal scrollback, or Codex native thread history.
 
@@ -101,7 +112,10 @@ Govern a repository so long-running Codex/Claude work can be specified, executed
 - `assets/templates/agent-tooling.py.tmpl`: Source for generated target-project `scripts/agent_tooling.py`.
 - `assets/templates/agent-security.py.tmpl`: Source for generated target-project `scripts/agent_security.py`.
 - `assets/templates/agent-score.py.tmpl`: Source for generated target-project `scripts/agent_score.py`.
-- `references/spec-management.md`: OpenSpec-first specification rules.
+- `assets/templates/agent-spec.py.tmpl`: Source for generated target-project `scripts/agent_spec.py`.
+- `references/workflow-governance.md`: Workflow gates, worktree isolation, TDD/debugging evidence, review sequencing, and completion proof.
+- `references/implementation-discipline.md`: Assumption clarification, simplicity-first implementation, surgical change boundaries, and goal-driven verification.
+- `references/spec-management.md`: Embedded OpenSpec-style specification rules.
 - `references/harness-management.md`: Harness files, native adapters, commands, validation, and safety rules.
 - `references/session-continuity.md`: Codex/Claude session continuity and long-term memory protocol for VS Code Remote work.
 - `references/context-budget.md`: Context budget, safe compression, and token-scan protocol.
@@ -115,7 +129,10 @@ Govern a repository so long-running Codex/Claude work can be specified, executed
 - Do not store secrets, SSH keys, tokens, host credentials, or private environment values in `.agent/`.
 - Do not store raw transcripts, terminal scrollback, secrets, or private host data in `.agent/runlog.jsonl`.
 - Preserve existing project files by default; create missing files and report conflicts instead of silently rewriting.
-- Keep `AGENTS.md` short and stable; move volatile state to `.agent/sessions/` and OpenSpec changes.
+- Prefer simple, direct implementations and justify new abstractions, speculative flexibility, or broad cleanup with recorded evidence.
+- Keep `AGENTS.md` short and stable; move volatile state to `.agent/sessions/` and embedded spec changes.
 - Keep `CLAUDE.md` thin; prefer importing or pointing to `AGENTS.md` rather than duplicating rules.
 - Keep context compression semantic, not stylistic: compress redundancy and filler, preserve technical facts and retrieval handles.
 - Do not force subagent use, model pinning, or delegation-only execution when the active Codex/Claude environment does not permit it.
+- Do not claim completion, merge readiness, PR readiness, or successful handoff without fresh validation evidence recorded in session or runlog state.
+- Do not create, discard, or force-delete worktrees or branches without following the project worktree policy and explicit user confirmation for destructive actions.

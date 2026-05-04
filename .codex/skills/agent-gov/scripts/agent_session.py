@@ -162,11 +162,12 @@ Continue the agent development session for this repository.
 4. Read `.agent/sessions/{session_id}/context.md`.
 5. Read `.agent/sessions/{session_id}/changes.md`.
 6. Read `.agent/sessions/{session_id}/validation.md`.
-7. If linked, read the OpenSpec change: `{openspec_change}`.
-8. Read accepted or rejected subagent snapshots recorded in handoff, changes, or validation notes.
-9. Run `python3 .agent/tools/agent_context.py scan --limit 10` if context size or stale bootstrap state is unclear.
-10. Run `git status --short`.
-11. Confirm current branch, dirty files, validation status, and the next task before editing.
+7. If linked, read the embedded spec change: `{openspec_change}`.
+8. Read `.agent/workflow.json` and `.agent/worktrees.json` when continuing implementation, validation, or finish work.
+9. Read accepted or rejected subagent snapshots recorded in handoff, changes, or validation notes.
+10. Run `python3 .agent/tools/agent_context.py scan --limit 10` if context size or stale bootstrap state is unclear.
+11. Run `git status --short`.
+12. Confirm current branch, worktree path, dirty files, validation status, workflow gate status, and the next task before editing.
 
 Do not rely on prior chat history, VS Code tabs, selected text, or terminal scrollback.
 """
@@ -202,13 +203,14 @@ def write_bootstrap(session_id: str) -> Path:
         f"1. `cd {workspace}`",
         "2. Read this file fully.",
         "3. Run `git status --short` and compare with the snapshot below.",
-        "4. Read linked OpenSpec artifacts before editing.",
-        "5. Continue only after confirming the next task.",
+        "4. Read `.agent/workflow.json` and `.agent/worktrees.json` when continuing implementation, validation, or finish work.",
+        "5. Read linked embedded spec artifacts before editing.",
+        "6. Continue only after confirming the next task and workflow gate status.",
         "",
         "## Session",
         "",
         f"- Goal: {goal}",
-        f"- OpenSpec change: {openspec_change}",
+        f"- Spec change: {openspec_change}",
         f"- Workspace: {workspace}",
         f"- Git branch: {artifacts.get('git_branch', 'unknown')}",
         f"- Git commit at start: {artifacts.get('git_commit', 'unknown')}",
@@ -260,7 +262,12 @@ def refresh_resume_prompt(session_id: str) -> None:
     write(session_dir(session_id) / "resume-prompt.md", render_resume_prompt(session_id, workspace, openspec_change))
 
 
-def compact_session(session_id: str, summary: str | None = None, next_step: str | None = None) -> Path:
+def compact_session(
+    session_id: str,
+    summary: str | None = None,
+    next_step: str | None = None,
+    ingest_reason: str | None = "compact",
+) -> Path:
     directory = session_dir(session_id)
     timestamp = utc_now()
     if summary:
@@ -272,7 +279,8 @@ def compact_session(session_id: str, summary: str | None = None, next_step: str 
         directory / "changes.md",
         f"\n## Git Status Snapshot {timestamp}\n\n```text\n{git_status or 'clean or unavailable'}\n```\n",
     )
-    maybe_ingest_memory(session_id, "compact")
+    if ingest_reason:
+        maybe_ingest_memory(session_id, ingest_reason)
     maybe_scan_context()
     refresh_resume_prompt(session_id)
     return write_bootstrap(session_id)
@@ -301,6 +309,8 @@ def create_session_files(
         "git_branch": git_branch,
         "git_commit": git_commit,
         "openspec_change": openspec_change,
+        "workflow_stage": "intake",
+        "worktree_path": workspace,
         "created_at": created_at,
         "status": "active",
         "files": [],
@@ -322,7 +332,9 @@ def create_session_files(
 - Workspace: {workspace}
 - Git branch: {git_branch}
 - Git commit: {git_commit}
-- OpenSpec change: {openspec_change}
+- Spec change: {openspec_change}
+- Workflow stage: intake
+- Worktree path: current workspace
 - Started at: {created_at}
 
 ## Status
@@ -338,10 +350,14 @@ active
 
 - Goal: {goal}
 - Status: active
+- Workflow stage:
+- Worktree or branch state:
+- Latest validation evidence:
+- Open review findings:
 
 ## Next Step
 
-- Continue by reading `resume-prompt.md`, then confirm `git status --short`.
+- Continue by reading `resume-prompt.md`, then confirm workflow gate status and `git status --short`.
 
 ## Notes
 
@@ -360,7 +376,7 @@ active
 
 -
 
-## Linked OpenSpec Artifacts
+## Linked Spec Artifacts
 
 - {openspec_change}
 """,
@@ -383,11 +399,27 @@ active
 - Capture dirty files before rollover or handoff.
 """,
     )
-    write(directory / "validation.md", f"# Validation: {session_id}\n\n")
+    write(
+        directory / "validation.md",
+        f"""# Validation: {session_id}
+
+## Workflow Evidence
+
+- Design/spec approval:
+- Plan quality check:
+- Worktree or branch baseline:
+- TDD red command:
+- TDD green command:
+- Debugging record:
+- Spec review:
+- Quality review:
+- Completion verification:
+- Runlog ids:
+""",
+    )
     write(directory / "resume-prompt.md", render_resume_prompt(session_id, workspace, openspec_change))
     write(directory / "artifacts.json", json.dumps(artifacts, indent=2) + "\n")
     write_bootstrap(session_id)
-    maybe_ingest_memory(session_id, "start")
     maybe_scan_context()
     write_bootstrap(session_id)
     return artifacts
@@ -427,7 +459,9 @@ def cmd_start(args: argparse.Namespace) -> int:
 - Session: {session_id}
 - Goal: {args.goal}
 - Workspace: {artifacts["workspace_path"]}
-- OpenSpec change: {args.openspec_change}
+- Spec change: {args.openspec_change}
+- Workflow stage: {artifacts["workflow_stage"]}
+- Worktree path: {artifacts["worktree_path"]}
 
 Resume prompt:
 
@@ -471,7 +505,7 @@ def cmd_checkpoint(args: argparse.Namespace) -> int:
         append(directory / "validation.md", f"\n## {timestamp}\n\n{args.validation}\n")
     if args.next:
         append(directory / "handoff.md", f"\n## Next Step\n\n{args.next}\n")
-    compact_session(session_id)
+    compact_session(session_id, ingest_reason="checkpoint")
     record_runlog(
         kind="session",
         outcome="completed",
@@ -570,7 +604,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 errors.append(f"missing {directory / name}")
 
         validation = read(directory / "validation.md")
-        if validation.strip() in {f"# Validation: {session_id}", f"# Validation: {session_id}\n"}:
+        validation_entries = [
+            line
+            for line in validation.splitlines()
+            if line.startswith("- ") and ":" in line and line.split(":", 1)[1].strip()
+        ]
+        if validation.strip() in {f"# Validation: {session_id}", f"# Validation: {session_id}\n"} or not validation_entries:
             warnings.append("validation.md has no recorded validation")
 
         git_status = run_git(["status", "--short"], fallback="")
@@ -642,7 +681,7 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--goal", required=True)
     start.add_argument("--client-surface", default="vscode-codex-extension")
     start.add_argument("--remote-kind", default="unknown")
-    start.add_argument("--openspec-change", default="none")
+    start.add_argument("--spec-change", "--openspec-change", dest="openspec_change", default="none")
     start.set_defaults(func=cmd_start)
 
     checkpoint = subparsers.add_parser("checkpoint", help="Append a checkpoint to the active session")

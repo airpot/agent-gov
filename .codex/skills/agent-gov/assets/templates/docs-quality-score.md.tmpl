@@ -14,6 +14,7 @@ python3 scripts/agent_score.py score --json
 ## Inputs
 
 - `.agent/harness.json`
+- `.agent/workflow.json`
 - `.agent/context.json`
 - `.agent/memory.json`
 - `.agent/capabilities.json`
@@ -27,4 +28,4 @@ python3 scripts/agent_score.py score --json
 - Latest dashboard: `.agent/evals/latest.md`
 - Evidence ledger: `.agent/runlog.jsonl`
 
-Use the score to find drift: missing required files, oversized context, stale docs, unconfigured validation, weak runlog evidence, or security baseline gaps.
+Use the score to find drift: missing required files, missing implementation-discipline gates, oversized context, stale docs, unconfigured validation, weak runlog evidence, or security baseline gaps.

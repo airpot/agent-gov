@@ -18,6 +18,8 @@ BASE_REQUIRED = [
     ".agent/config.json",
     ".agent/harness.json",
     ".agent/project-layout.json",
+    ".agent/workflow.json",
+    ".agent/worktrees.json",
     ".agent/subagents.json",
     ".agent/hooks.json",
     ".agent/knowledge.json",
@@ -40,6 +42,8 @@ BASE_REQUIRED = [
     ".agent/sessions/bootstrap.md",
     ".agent/templates/project-review.md.tmpl",
     ".agent/templates/project-fix-log.md.tmpl",
+    ".agent/templates/implementation-plan.md.tmpl",
+    ".agent/templates/debugging-record.md.tmpl",
     ".agent/templates/subagent-task.md.tmpl",
     ".agent/templates/memory-summary.md.tmpl",
     ".agent/templates/memory-latest.md.tmpl",
@@ -58,9 +62,12 @@ BASE_REQUIRED = [
     ".codex/agents/governance-explorer.toml",
     ".codex/agents/governance-worker.toml",
     ".codex/agents/governance-verifier.toml",
+    ".codex/agents/governance-spec_reviewer.toml",
+    ".codex/agents/governance-quality_reviewer.toml",
     ".codex/agents/governance-reviewer.toml",
     ".codex/agents/governance-coordinator.toml",
     "scripts/agent_check.py",
+    "scripts/agent_spec.py",
     "scripts/agent_validate.py",
     "scripts/agent_knowledge.py",
     "scripts/agent_invariants.py",
@@ -82,7 +89,14 @@ BASE_REQUIRED = [
     "docs/rfcs/README.md",
     "docs/incidents/README.md",
 ]
-OPENSPEC_REQUIRED = ["openspec/config.yaml"]
+OPENSPEC_REQUIRED = [
+    ".agent/spec.json",
+    "openspec/config.yaml",
+    "openspec/project.md",
+    "openspec/changes/.gitkeep",
+    "openspec/changes/archive/.gitkeep",
+    "openspec/specs/.gitkeep",
+]
 CLAUDE_REQUIRED = [
     "CLAUDE.md",
     ".claude/settings.json",
@@ -90,6 +104,8 @@ CLAUDE_REQUIRED = [
     ".claude/agents/governance-explorer.md",
     ".claude/agents/governance-worker.md",
     ".claude/agents/governance-verifier.md",
+    ".claude/agents/governance-spec_reviewer.md",
+    ".claude/agents/governance-quality_reviewer.md",
     ".claude/agents/governance-reviewer.md",
     ".claude/agents/governance-coordinator.md",
 ]
@@ -142,6 +158,24 @@ def main() -> int:
     if index_path.exists():
         load_json(index_path, ".agent/sessions/index.json")
 
+    spec_path = root / ".agent/spec.json"
+    if openspec_enabled:
+        if spec_path.exists():
+            spec_config = load_json(spec_path, ".agent/spec.json")
+            if spec_config.get("schema") != "agent-spec-v1":
+                print("error: .agent/spec.json schema must be agent-spec-v1")
+                return 1
+            if spec_config.get("mode") != "embedded":
+                print("error: .agent/spec.json mode must be embedded")
+                return 1
+            paths = spec_config.get("paths", {})
+            for key in ("root", "changes", "archive", "specs", "project"):
+                if key not in paths:
+                    print(f"error: .agent/spec.json missing path: {key}")
+                    return 1
+        else:
+            missing.append(".agent/spec.json")
+
     harness_path = root / ".agent/harness.json"
     if harness_path.exists():
         harness = load_json(harness_path, ".agent/harness.json")
@@ -159,6 +193,47 @@ def main() -> int:
             if not (root / directory).is_dir():
                 missing.append(directory)
 
+    workflow_path = root / ".agent/workflow.json"
+    if workflow_path.exists():
+        workflow = load_json(workflow_path, ".agent/workflow.json")
+        if workflow.get("schema") != "agent-workflow-v1":
+            print("error: .agent/workflow.json schema must be agent-workflow-v1")
+            return 1
+        gates = workflow.get("gates", {})
+        for gate in ("design_approval", "plan_quality", "implementation_discipline", "tdd", "systematic_debugging", "review_sequence", "completion_verification"):
+            if gate not in gates:
+                print(f"error: .agent/workflow.json missing gate: {gate}")
+                return 1
+        discipline = gates.get("implementation_discipline", {})
+        for key in (
+            "state_assumptions_when_ambiguous",
+            "prefer_simple_direct_code",
+            "avoid_speculative_features",
+            "abstractions_require_repeated_complexity_or_existing_pattern",
+            "touch_only_requested_scope",
+            "every_changed_line_traces_to_request",
+            "success_criteria_required",
+        ):
+            if key not in discipline:
+                print(f"error: .agent/workflow.json implementation_discipline missing policy: {key}")
+                return 1
+        sequence = gates.get("review_sequence", {}).get("order", [])
+        if sequence != ["spec_review", "quality_review"]:
+            print("error: .agent/workflow.json review sequence must be spec_review then quality_review")
+            return 1
+
+    worktrees_path = root / ".agent/worktrees.json"
+    if worktrees_path.exists():
+        worktrees = load_json(worktrees_path, ".agent/worktrees.json")
+        if worktrees.get("schema") != "agent-worktree-policy-v1":
+            print("error: .agent/worktrees.json schema must be agent-worktree-policy-v1")
+            return 1
+        policy = worktrees.get("policy", {})
+        for key in ("verify_project_local_dir_is_git_ignored", "run_baseline_validation_before_feature_edits", "discard_requires_typed_confirmation"):
+            if key not in policy:
+                print(f"error: .agent/worktrees.json missing policy: {key}")
+                return 1
+
     subagents_path = root / ".agent/subagents.json"
     if subagents_path.exists():
         subagents = load_json(subagents_path, ".agent/subagents.json")
@@ -166,13 +241,20 @@ def main() -> int:
             print("error: .agent/subagents.json schema must be agent-subagent-orchestration-v1")
             return 1
         roles = subagents.get("roles", {})
-        for role in ("searcher", "explorer", "worker", "verifier", "reviewer"):
+        for role in ("searcher", "explorer", "worker", "verifier", "spec_reviewer", "quality_reviewer", "reviewer"):
             if role not in roles:
                 print(f"error: .agent/subagents.json missing role: {role}")
                 return 1
         snapshot = subagents.get("snapshot_contract", {})
         if snapshot.get("marker") != "===SNAPSHOT===":
             print("error: .agent/subagents.json snapshot marker must be ===SNAPSHOT===")
+            return 1
+        if snapshot.get("status_values") != ["DONE", "DONE_WITH_CONCERNS", "NEEDS_CONTEXT", "BLOCKED"]:
+            print("error: .agent/subagents.json snapshot status values are out of date")
+            return 1
+        workflow = subagents.get("review_workflow", {})
+        if workflow.get("review_sequence") != ["spec_reviewer", "quality_reviewer"]:
+            print("error: .agent/subagents.json review sequence must be spec_reviewer then quality_reviewer")
             return 1
 
     hooks_path = root / ".agent/hooks.json"
@@ -290,6 +372,7 @@ def main() -> int:
         for key in (
             "required_paths",
             "validation",
+            "implementation_discipline",
             "context_budget",
             "session_continuity",
             "memory",
