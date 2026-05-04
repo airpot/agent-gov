@@ -8,6 +8,20 @@
 @airpot/agent-gov
 ```
 
+## 借鉴的开源项目与公开资料
+
+`agent-gov` 借鉴了以下项目或公开材料的设计思想。这里的“借鉴”指治理机制、工作流模式和文档结构，不表示 vendoring、运行时依赖或自动安装这些项目。
+
+| 项目 / 资料 | 链接 | 融入到 `agent-gov` 的内容 |
+| --- | --- | --- |
+| SkVM | https://github.com/SJTU-IPADS/SkVM | 借鉴 profile -> optimize -> validate 的迭代思想，用于 skill 开发、评估和审阅-修正闭环。 |
+| OpenSpec | https://github.com/Fission-AI/OpenSpec | 借鉴 proposal、design、tasks、archive 的规格变更结构；`agent-gov` 已内嵌实现，不依赖全局 OpenSpec CLI。 |
+| OpenAI Harness Engineering | https://openai.com/index/harness-engineering/ | 借鉴 harness 作为可执行反馈面、验证命令注册、证据记录和回归检查的思想。 |
+| claude-mem | https://github.com/thedotmack/claude-mem | 借鉴 repo-local 长期记忆、摘要化存储、检索优先和记忆提升/审阅机制。 |
+| caveman | https://github.com/juliusbrussee/caveman | 借鉴上下文经济、token budget、压缩安全检查和精简输出机制；未采纳其 persona 风格。 |
+| superpowers | https://github.com/obra/superpowers | 借鉴可复用 capability / skill 分发、薄说明面和跨工具组织方式。 |
+| andrej-karpathy-skills | https://github.com/forrestchang/andrej-karpathy-skills | 借鉴先澄清、简单优先、精准改动、目标驱动验证，落实为 `implementation_discipline` gate。 |
+
 ## 能力范围
 
 `agent-gov` 当前主要提供以下能力。
