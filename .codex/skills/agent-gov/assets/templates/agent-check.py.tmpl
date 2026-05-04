@@ -144,6 +144,13 @@ def main() -> int:
     config = {}
     if config_path.exists():
         config = load_json(config_path, ".agent/config.json")
+        if config.get("schema") != "agent-project-config-v1":
+            print("error: .agent/config.json schema must be agent-project-config-v1")
+            return 1
+        for key in ("project_name", "remote_workspace_path", "created_at"):
+            if not config.get(key):
+                print(f"error: .agent/config.json missing required field: {key}")
+                return 1
 
     openspec_enabled = bool(config.get("openspec_enabled", config.get("spec_source", "openspec") == "openspec"))
     claude_enabled = bool(config.get("claude_enabled", True))
@@ -370,6 +377,7 @@ def main() -> int:
             return 1
         dimensions = evals.get("dimensions", {})
         for key in (
+            "project_integrity",
             "required_paths",
             "validation",
             "implementation_discipline",

@@ -1005,6 +1005,7 @@ def evals_config(project_name: str, created_at: str) -> dict:
         "policy": {
             "local_deterministic": True,
             "score_is_advisory": True,
+            "invalid_project_json_is_hard_fail": True,
             "record_score_runs_in_runlog": True,
             "periodic_review_cadence": "weekly",
             "do_not_read_secret_contents": True,
@@ -1014,6 +1015,7 @@ def evals_config(project_name: str, created_at: str) -> dict:
             "warn": 70,
         },
         "dimensions": {
+            "project_integrity": {"weight": 12},
             "required_paths": {"weight": 18},
             "validation": {"weight": 10},
             "implementation_discipline": {"weight": 8},
@@ -1243,18 +1245,28 @@ def build_values(root: Path, args: argparse.Namespace) -> dict[str, str]:
     tech_stack = parse_csv(args.tech_stack)
     dirs = layout_dirs(args.layout, parse_csv(args.dir))
     enabled = spec_enabled(args)
+    workspace_path = str(root.resolve())
+    created_at = utc_now()
     return {
         "project_name": project_name,
+        "project_name_json": json.dumps(project_name),
         "tech_stack": ", ".join(tech_stack) if tech_stack else "unspecified",
+        "tech_stack_json": json.dumps(", ".join(tech_stack) if tech_stack else "unspecified"),
         "layout_name": args.layout,
+        "layout_name_json": json.dumps(args.layout),
         "layout_dirs": "\n".join(f"- `{path}/`" for path in dirs),
         "client_surface": args.client_surface,
+        "client_surface_json": json.dumps(args.client_surface),
         "remote_kind": args.remote_kind,
-        "workspace_path": str(root.resolve()),
-        "created_at": utc_now(),
+        "remote_kind_json": json.dumps(args.remote_kind),
+        "workspace_path": workspace_path,
+        "workspace_path_json": json.dumps(workspace_path),
+        "created_at": created_at,
+        "created_at_json": json.dumps(created_at),
         "openspec_enabled_json": "true" if enabled else "false",
         "claude_enabled_json": "false" if args.no_claude else "true",
         "spec_source": "none" if not enabled else "agent-gov-spec",
+        "spec_source_json": json.dumps("none" if not enabled else "agent-gov-spec"),
         "spec_management_rule": (
             "Use project docs and `.agent/sessions/` for planning context because the embedded spec layer is disabled."
             if not enabled

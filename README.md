@@ -76,6 +76,7 @@
     - 生成 `.agent/capabilities.json`、`.agent/tooling.json`、`.agent/security.json`、`.agent/evals.json`。
     - 生成 `scripts/agent_capabilities.py`、`agent_tooling.py`、`agent_security.py`、`agent_score.py`。
     - 生成 `docs/` 知识库、ADR/RFC/postmortem 模板和治理健康评分。
+    - `agent_score.py` 会把关键治理 JSON / JSONL 的解析和 schema 有效性作为硬门禁，避免基础配置损坏时仍然给出 pass。
 
 ## 不做什么
 
@@ -119,6 +120,43 @@ npx @airpot/agent-gov@latest doctor /path/to/repo
 ```
 
 安装项目级 skill 后，重启或 reload Codex，让新的 skill 被发现。
+
+## 纳入已有项目
+
+已有项目可以直接纳入 `agent-gov`，推荐按“先观察、再初始化、再校准”的顺序执行。
+
+1. 在独立分支或干净 worktree 中先做 dry run：
+
+```bash
+npx @airpot/agent-gov@latest init . --tech-stack python,typescript --layout service --dry-run
+```
+
+2. 确认将要创建的文件后再初始化：
+
+```bash
+npx @airpot/agent-gov@latest init . --tech-stack python,typescript --layout service
+```
+
+3. 如果已有项目目录结构已经固定，不希望创建新目录：
+
+```bash
+npx @airpot/agent-gov@latest init . --layout minimal --no-create-layout
+```
+
+默认不会覆盖已有文件。遇到已有 `AGENTS.md`、`CLAUDE.md`、`Makefile`、`docs/` 或 `.agent/` 文件时，先人工合并差异；只有确认要替换生成文件时才使用 `--force`。如果只是更新 bundled skills，使用：
+
+```bash
+npx @airpot/agent-gov@latest install-skill . --force-skill
+```
+
+纳入后先跑基础治理检查，再按项目实际命令调整 `.agent/harness.json`：
+
+```bash
+python3 scripts/agent_check.py
+python3 scripts/agent_score.py doctor
+python3 scripts/agent_validate.py --list
+python3 scripts/agent_score.py score --write
+```
 
 ## 常用初始化参数
 

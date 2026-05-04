@@ -1,6 +1,6 @@
 {
   "name": "@airpot/agent-gov",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "One-command project governance initializer for Codex and Claude agent workflows.",
   "license": "MIT",
   "type": "module",
@@ -33,7 +33,7 @@
     "node": ">=20.19.0"
   },
   "scripts": {
-    "validate": "node --check npm/bin/agent-gov.mjs && npm pack --dry-run",
+    "validate": "node --check npm/bin/agent-gov.mjs && python3 npm/scripts/regression.py && npm pack --dry-run",
     "pack:dry-run": "npm pack --dry-run"
   },
   "keywords": [

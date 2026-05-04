@@ -31,6 +31,53 @@ SENSITIVE_BASENAME_RE = re.compile(
 )
 SENSITIVE_COMPONENTS = {".ssh", ".aws", ".gnupg", ".kube", ".docker"}
 IGNORE_DIRS = {".git", "node_modules", "dist", "build", "target", "__pycache__", ".agent/memory"}
+SCHEMA_JSON_FILES = {
+    ".agent/config.json": "agent-project-config-v1",
+    ".agent/spec.json": "agent-spec-v1",
+    ".agent/harness.json": "agent-harness-v1",
+    ".agent/project-layout.json": "agent-project-layout-v1",
+    ".agent/workflow.json": "agent-workflow-v1",
+    ".agent/worktrees.json": "agent-worktree-policy-v1",
+    ".agent/subagents.json": "agent-subagent-orchestration-v1",
+    ".agent/hooks.json": "agent-hooks-v1",
+    ".agent/knowledge.json": "agent-knowledge-v1",
+    ".agent/memory.json": "agent-memory-v1",
+    ".agent/context.json": "agent-context-budget-v1",
+    ".agent/capabilities.json": "agent-capabilities-v1",
+    ".agent/tooling.json": "agent-tooling-v1",
+    ".agent/security.json": "agent-security-v1",
+    ".agent/evals.json": "agent-evals-v1",
+    ".agent/skill-distribution.json": "agent-skill-distribution-v1",
+    ".agent/sessions/index.json": "agent-session-index-v1",
+}
+JSON_FILES_WITHOUT_SCHEMA = [
+    ".codex/hooks.json",
+    ".claude/settings.json",
+]
+JSONL_FILES = [
+    ".agent/runlog.jsonl",
+    ".agent/memory/events.jsonl",
+    ".agent/context/stats.jsonl",
+]
+CRITICAL_JSON_FILES = {
+    ".agent/config.json",
+    ".agent/harness.json",
+    ".agent/evals.json",
+}
+DEFAULT_DIMENSION_WEIGHTS = {
+    "project_integrity": 12,
+    "required_paths": 18,
+    "validation": 10,
+    "implementation_discipline": 8,
+    "context_budget": 10,
+    "session_continuity": 10,
+    "memory": 10,
+    "capabilities": 10,
+    "security": 10,
+    "knowledge": 8,
+    "runlog": 6,
+}
+HARD_FAIL_DIMENSIONS = {"project_integrity"}
 
 
 def utc_now() -> str:
@@ -40,7 +87,10 @@ def utc_now() -> str:
 def load_json(path: Path, fallback: dict | None = None) -> dict:
     if not path.exists():
         return fallback or {}
-    return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return fallback or {}
 
 
 def iter_jsonl(path: Path) -> list[dict]:
@@ -80,6 +130,86 @@ def dimension(name: str, score: float, findings: list[str], evidence: list[str])
         "findings": findings,
         "evidence": evidence,
     }
+
+
+def read_json_for_integrity(path: Path) -> tuple[dict | None, str | None]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8")), None
+    except OSError as exc:
+        return None, f"cannot read {path}: {exc}"
+    except json.JSONDecodeError as exc:
+        return None, f"invalid JSON: {path}: {exc}"
+
+
+def jsonl_error_count(path: Path) -> int:
+    errors = 0
+    try:
+        lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return 1
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            json.loads(line)
+        except json.JSONDecodeError:
+            errors += 1
+    return errors
+
+
+def score_project_integrity() -> dict:
+    findings: list[str] = []
+    evidence: list[str] = []
+    valid_json = 0
+    checked_json = 0
+    invalid_json = 0
+    schema_mismatches = 0
+    missing_critical = 0
+
+    for name, expected_schema in SCHEMA_JSON_FILES.items():
+        path = Path(name)
+        if not path.exists():
+            if name in CRITICAL_JSON_FILES:
+                missing_critical += 1
+                findings.append(f"missing critical JSON: {name}")
+            continue
+        checked_json += 1
+        data, error = read_json_for_integrity(path)
+        if error:
+            invalid_json += 1
+            findings.append(error)
+            continue
+        valid_json += 1
+        if expected_schema and data.get("schema") != expected_schema:
+            schema_mismatches += 1
+            findings.append(f"{name} schema must be {expected_schema}")
+
+    for name in JSON_FILES_WITHOUT_SCHEMA:
+        path = Path(name)
+        if not path.exists():
+            continue
+        checked_json += 1
+        _, error = read_json_for_integrity(path)
+        if error:
+            invalid_json += 1
+            findings.append(error)
+        else:
+            valid_json += 1
+
+    invalid_jsonl = 0
+    for name in JSONL_FILES:
+        path = Path(name)
+        if not path.exists():
+            continue
+        errors = jsonl_error_count(path)
+        if errors:
+            invalid_jsonl += errors
+            findings.append(f"{name} has {errors} invalid JSONL line(s)")
+
+    evidence.append(f"{valid_json}/{checked_json} JSON files parse")
+    evidence.append(f"{len([name for name in JSONL_FILES if Path(name).exists()])} JSONL store(s) checked")
+    penalty = min(100, invalid_json * 45 + schema_mismatches * 25 + missing_critical * 25 + invalid_jsonl * 20)
+    return dimension("project_integrity", 100 - penalty, findings, evidence)
 
 
 def score_required_paths() -> dict:
@@ -334,8 +464,10 @@ def score_runlog(extra_events: int = 0) -> dict:
 
 def collect_scores(extra_runlog_events: int = 0) -> dict:
     config = load_json(CONFIG_PATH)
-    weights = {name: spec.get("weight", 0) for name, spec in config.get("dimensions", {}).items()}
+    weights = dict(DEFAULT_DIMENSION_WEIGHTS)
+    weights.update({name: spec.get("weight", 0) for name, spec in config.get("dimensions", {}).items()})
     checks = {
+        "project_integrity": score_project_integrity(),
         "required_paths": score_required_paths(),
         "validation": score_validation(),
         "implementation_discipline": score_implementation_discipline(),
@@ -349,13 +481,19 @@ def collect_scores(extra_runlog_events: int = 0) -> dict:
     }
     total_weight = sum(weights.values()) or 1
     total = sum(checks[name]["score"] * weights.get(name, 0) for name in checks) / total_weight
+    hard_fail_dimensions = [
+        name for name in HARD_FAIL_DIMENSIONS if checks.get(name, {}).get("status") == "fail"
+    ]
+    if hard_fail_dimensions:
+        total = min(total, 69.9)
     result = {
         "schema": "agent-governance-score-v1",
         "created_at": utc_now(),
         "score": round(total, 1),
-        "status": status_for(total),
+        "status": "fail" if hard_fail_dimensions else status_for(total),
         "dimensions": checks,
         "weights": weights,
+        "hard_fail_dimensions": hard_fail_dimensions,
     }
     return result
 
@@ -366,10 +504,10 @@ def render_markdown(report: dict) -> str:
         "",
         f"- Scored: {report['created_at']}",
         f"- Score: {report['score']} ({report['status']})",
-        "",
-        "## Dimensions",
-        "",
     ]
+    if report.get("hard_fail_dimensions"):
+        lines.append(f"- Hard fail dimensions: {', '.join(report['hard_fail_dimensions'])}")
+    lines.extend(["", "## Dimensions", ""])
     for name, item in report["dimensions"].items():
         lines.append(f"- `{name}`: {item['score']} ({item['status']})")
         for evidence in item.get("evidence", []):
@@ -421,9 +559,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         if config.get("schema") != "agent-evals-v1":
             errors.append(".agent/evals.json schema must be agent-evals-v1")
         dimensions = config.get("dimensions", {})
-        for name in ("required_paths", "validation", "implementation_discipline", "context_budget", "session_continuity", "memory", "capabilities", "security", "knowledge", "runlog"):
+        for name in DEFAULT_DIMENSION_WEIGHTS:
             if name not in dimensions:
                 errors.append(f".agent/evals.json missing dimension: {name}")
+    integrity = score_project_integrity()
+    if integrity["status"] == "fail":
+        errors.extend(integrity["findings"])
     LATEST_PATH.parent.mkdir(parents=True, exist_ok=True)
     if not LATEST_PATH.exists():
         LATEST_PATH.write_text("# Agent Governance Score\n\nNo score recorded yet.\n", encoding="utf-8")
@@ -445,6 +586,8 @@ def cmd_score(args: argparse.Namespace) -> int:
         LATEST_PATH.parent.mkdir(parents=True, exist_ok=True)
         LATEST_PATH.write_text(render_markdown(report), encoding="utf-8")
         record_runlog(report)
+    if report.get("hard_fail_dimensions"):
+        return 1
     if args.fail_under is not None and report["score"] < args.fail_under:
         return 1
     return 0
