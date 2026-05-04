@@ -1,0 +1,27 @@
+# Reliability
+
+## Runtime Checks
+
+- Add logs, health checks, or smoke commands to `.agent/harness.json`.
+
+## Rollback
+
+- Record rollback considerations for risky changes.
+
+## Session Continuity
+
+- Use `.agent/tools/agent_session.py checkpoint` before context rollover, large tool runs, and handoffs.
+- Record accepted subagent snapshots in the active session before compaction.
+- Advisory hooks in `.agent/hooks.json`, `.codex/hooks.json`, and `.claude/settings.json` should help surface bootstrap and checkpoint reminders without becoming a hard dependency.
+- Use `.agent/tools/agent_memory.py ingest-session` after meaningful compaction so future sessions can recover context through `timeline`, `search`, and `detail`.
+- Use `.agent/tools/agent_context.py scan` before handoff when governance docs, bootstraps, or memory digests have grown.
+- Use `scripts/agent_runlog.py tail --limit 10` to recover recent validation and session lifecycle evidence when handoff notes are incomplete.
+- Use `scripts/agent_score.py score --write` as a periodic governance health check.
+- Use postmortems under `docs/incidents/` when validation, session continuity, memory, context, security, or production failures should prevent recurrence.
+- Wrap secrets or sensitive user data in `<private>...</private>` before memory capture so it is redacted from long-term memory.
+
+## Evidence Ledger
+
+- `.agent/runlog.jsonl` stores compact events, not transcripts.
+- Record high-risk capability use, accepted review exceptions, and skipped validation with `scripts/agent_runlog.py record`.
+- Keep `trace_id` values when connecting several validation or handoff events.

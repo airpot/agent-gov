@@ -1,0 +1,436 @@
+#!/usr/bin/env python3
+"""Score local project governance health."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import re
+import sys
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+CONFIG_PATH = Path(".agent/evals.json")
+RUNLOG_PATH = Path(".agent/runlog.jsonl")
+LATEST_PATH = Path(".agent/evals/latest.md")
+SENSITIVE_BASENAME_RE = re.compile(
+    r"(?ix)^("
+    r"\.env(\..+)?"
+    r"|\.netrc"
+    r"|credentials(\..+)?"
+    r"|secrets?(\..+)?"
+    r"|passwords?(\..+)?"
+    r"|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?"
+    r"|authorized_keys"
+    r"|known_hosts"
+    r"|.*\.(pem|key|p12|pfx|crt|cer|jks|keystore|asc|gpg)"
+    r")$"
+)
+SENSITIVE_COMPONENTS = {".ssh", ".aws", ".gnupg", ".kube", ".docker"}
+IGNORE_DIRS = {".git", "node_modules", "dist", "build", "target", "__pycache__", ".agent/memory"}
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def load_json(path: Path, fallback: dict | None = None) -> dict:
+    if not path.exists():
+        return fallback or {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def iter_jsonl(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    rows: list[dict] = []
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            rows.append({"schema": "invalid", "raw": line})
+    return rows
+
+
+def estimate_tokens(path: Path) -> int:
+    if not path.exists() or not path.is_file():
+        return 0
+    return int(math.ceil(len(path.read_text(encoding="utf-8", errors="ignore")) / 4))
+
+
+def status_for(score: float) -> str:
+    if score >= 85:
+        return "pass"
+    if score >= 70:
+        return "warn"
+    return "fail"
+
+
+def dimension(name: str, score: float, findings: list[str], evidence: list[str]) -> dict:
+    score = max(0.0, min(100.0, score))
+    return {
+        "name": name,
+        "score": round(score, 1),
+        "status": status_for(score),
+        "findings": findings,
+        "evidence": evidence,
+    }
+
+
+def score_required_paths() -> dict:
+    harness = load_json(Path(".agent/harness.json"))
+    required = harness.get("invariants", {}).get("required_paths", [])
+    if not required:
+        return dimension("required_paths", 0, ["no required paths configured"], [])
+    existing = [path for path in required if Path(path).exists()]
+    missing = [path for path in required if not Path(path).exists()]
+    score = 100 * len(existing) / len(required)
+    findings = [f"missing: {path}" for path in missing[:10]]
+    return dimension("required_paths", score, findings, [f"{len(existing)}/{len(required)} required paths exist"])
+
+
+def score_validation() -> dict:
+    harness = load_json(Path(".agent/harness.json"))
+    validation = harness.get("validation", {})
+    commands = [command for values in validation.values() for command in values]
+    findings: list[str] = []
+    if not validation:
+        return dimension("validation", 0, ["no validation registry"], [])
+    if not commands:
+        findings.append("no validation commands configured")
+        return dimension("validation", 70, findings, ["validation registry exists"])
+    suites = [suite for suite, values in validation.items() if values]
+    return dimension("validation", 100, findings, [f"{len(commands)} commands in {len(suites)} suite(s)"])
+
+
+def threshold_for(path: Path, context: dict) -> int:
+    budgets = context.get("budgets", {})
+    text_path = str(path)
+    if text_path == "AGENTS.md":
+        return int(budgets.get("max_agent_instruction_tokens", 1600))
+    if text_path == "CLAUDE.md":
+        return int(budgets.get("max_claude_instruction_tokens", 2500))
+    if text_path == ".agent/sessions/bootstrap.md":
+        return int(budgets.get("max_bootstrap_tokens", 5000))
+    if text_path == ".agent/memory/latest.md":
+        return int(budgets.get("max_memory_digest_tokens", 1200))
+    return int(budgets.get("max_single_doc_tokens", 3000))
+
+
+def score_context_budget() -> dict:
+    context = load_json(Path(".agent/context.json"))
+    tracked = [Path(path) for path in context.get("tracked_files", []) if Path(path).exists()]
+    total_budget = int(context.get("budgets", {}).get("max_total_tracked_tokens", 20000))
+    findings: list[str] = []
+    total = 0
+    for path in tracked:
+        tokens = estimate_tokens(path)
+        total += tokens
+        threshold = threshold_for(path, context)
+        if tokens > threshold:
+            findings.append(f"{path} over budget: {tokens} > {threshold}")
+    if total > total_budget:
+        findings.append(f"total context over budget: {total} > {total_budget}")
+    if not tracked:
+        return dimension("context_budget", 0, ["no tracked context files found"], [])
+    over_penalty = min(60, len(findings) * 15)
+    total_penalty = 0 if total <= total_budget else min(30, ((total - total_budget) / total_budget) * 100)
+    score = 100 - over_penalty - total_penalty
+    return dimension("context_budget", score, findings, [f"{total}/{total_budget} estimated tokens", f"{len(tracked)} tracked files"])
+
+
+def score_session_continuity() -> dict:
+    required = [
+        ".agent/sessions/index.json",
+        ".agent/sessions/active.md",
+        ".agent/sessions/bootstrap.md",
+        ".agent/tools/agent_session.py",
+    ]
+    existing = [path for path in required if Path(path).exists()]
+    findings = [f"missing: {path}" for path in required if not Path(path).exists()]
+    score = 100 * len(existing) / len(required)
+    index = load_json(Path(".agent/sessions/index.json"), {})
+    evidence = [f"{len(existing)}/{len(required)} session paths exist"]
+    evidence.append(f"active_session={index.get('active_session') or 'none'}")
+    return dimension("session_continuity", score, findings, evidence)
+
+
+def score_memory() -> dict:
+    memory = load_json(Path(".agent/memory.json"))
+    findings: list[str] = []
+    if memory.get("schema") != "agent-memory-v1":
+        findings.append("invalid memory schema")
+    taxonomy = memory.get("taxonomy", {})
+    for name in ("episodic", "semantic", "procedural"):
+        if name not in taxonomy:
+            findings.append(f"taxonomy missing {name}")
+    events = iter_jsonl(Path(memory.get("stores", {}).get("events_jsonl", ".agent/memory/events.jsonl")))
+    for item in events:
+        if item.get("memory_class") == "procedural" and (not item.get("reviewed") or not item.get("review_ref")):
+            findings.append(f"procedural memory lacks review evidence: {item.get('id')}")
+    score = 100 - min(80, len(findings) * 20)
+    return dimension("memory", score, findings, [f"{len(events)} memory records"])
+
+
+def score_capabilities() -> dict:
+    config = load_json(Path(".agent/capabilities.json"))
+    caps = config.get("capabilities", [])
+    findings: list[str] = []
+    required = {"id", "kind", "provider", "enabled", "risk", "owner", "permissions", "validation"}
+    seen: set[str] = set()
+    owner_gaps = 0
+    for item in caps:
+        cap_id = item.get("id", "unknown")
+        missing = required - set(item)
+        if missing:
+            findings.append(f"{cap_id} missing {', '.join(sorted(missing))}")
+        if cap_id in seen:
+            findings.append(f"duplicate capability id: {cap_id}")
+        seen.add(cap_id)
+        if item.get("enabled") and item.get("owner") == "unassigned":
+            owner_gaps += 1
+        if item.get("enabled") and not item.get("validation"):
+            findings.append(f"{cap_id} enabled without validation")
+    if not caps:
+        findings.append("no capabilities registered")
+    score = 100 - min(50, len(findings) * 15) - min(20, owner_gaps * 2)
+    evidence = [f"{len(caps)} capabilities", f"{owner_gaps} enabled owner gaps"]
+    return dimension("capabilities", score, findings, evidence)
+
+
+def is_ignored(path: Path) -> bool:
+    return bool(set(path.parts) & IGNORE_DIRS)
+
+
+def is_sensitive_path(path: Path) -> bool:
+    if SENSITIVE_BASENAME_RE.match(path.name):
+        return True
+    lowered_parts = {part.lower() for part in path.parts}
+    return bool(lowered_parts & SENSITIVE_COMPONENTS)
+
+
+def sensitive_path_count(limit: int = 100) -> int:
+    count = 0
+    for path in Path(".").rglob("*"):
+        if count >= limit:
+            break
+        if not path.is_file() or is_ignored(path):
+            continue
+        try:
+            rel = path.resolve().relative_to(Path.cwd().resolve())
+        except ValueError:
+            continue
+        if is_sensitive_path(rel):
+            count += 1
+    return count
+
+
+def score_security() -> dict:
+    security = load_json(Path(".agent/security.json"))
+    suites = security.get("suites", {})
+    findings: list[str] = []
+    for name in ("policy_as_code", "secret_scan", "dependency_audit", "sbom", "license_scan"):
+        if name not in suites:
+            findings.append(f"missing suite: {name}")
+        elif not isinstance(suites[name], list):
+            findings.append(f"suite must be list: {name}")
+    sensitive = sensitive_path_count()
+    if sensitive:
+        findings.append(f"{sensitive} sensitive-looking path(s) found")
+    configured = sum(len(value) for value in suites.values() if isinstance(value, list))
+    score = 100 - min(50, len(findings) * 15)
+    if configured == 0:
+        score -= 10
+    return dimension("security", score, findings, [f"{configured} configured security command(s)"])
+
+
+def parse_date(value: str) -> datetime | None:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def score_knowledge() -> dict:
+    knowledge = load_json(Path(".agent/knowledge.json"))
+    docs = knowledge.get("documents", [])
+    findings: list[str] = []
+    owner_gaps = 0
+    stale = 0
+    now = datetime.now(timezone.utc)
+    for doc in docs:
+        path = Path(doc.get("path", ""))
+        if not path.exists():
+            findings.append(f"missing doc: {path}")
+        if doc.get("owner") == "unassigned":
+            owner_gaps += 1
+        reviewed = parse_date(doc.get("last_reviewed", ""))
+        if reviewed is None:
+            findings.append(f"invalid review date: {path}")
+        elif (now - reviewed).days > 180:
+            stale += 1
+    score = 100 - min(40, len(findings) * 10) - min(30, owner_gaps * 2) - min(20, stale * 5)
+    return dimension("knowledge", score, findings, [f"{len(docs)} docs", f"{owner_gaps} owner gaps", f"{stale} stale docs"])
+
+
+def score_runlog(extra_events: int = 0) -> dict:
+    rows = iter_jsonl(RUNLOG_PATH)
+    findings: list[str] = []
+    invalid = [row for row in rows if row.get("schema") != "agent-runlog-event-v1"]
+    if invalid:
+        findings.append(f"{len(invalid)} invalid runlog line(s)")
+    score = 100 - min(80, len(invalid) * 20)
+    event_count = len(rows) + extra_events
+    if event_count == 0:
+        score = 80
+    evidence = [f"{event_count} events"]
+    if extra_events:
+        evidence.append(f"includes {extra_events} event(s) from current write")
+    return dimension("runlog", score, findings, evidence)
+
+
+def collect_scores(extra_runlog_events: int = 0) -> dict:
+    config = load_json(CONFIG_PATH)
+    weights = {name: spec.get("weight", 0) for name, spec in config.get("dimensions", {}).items()}
+    checks = {
+        "required_paths": score_required_paths(),
+        "validation": score_validation(),
+        "context_budget": score_context_budget(),
+        "session_continuity": score_session_continuity(),
+        "memory": score_memory(),
+        "capabilities": score_capabilities(),
+        "security": score_security(),
+        "knowledge": score_knowledge(),
+        "runlog": score_runlog(extra_runlog_events),
+    }
+    total_weight = sum(weights.values()) or 1
+    total = sum(checks[name]["score"] * weights.get(name, 0) for name in checks) / total_weight
+    result = {
+        "schema": "agent-governance-score-v1",
+        "created_at": utc_now(),
+        "score": round(total, 1),
+        "status": status_for(total),
+        "dimensions": checks,
+        "weights": weights,
+    }
+    return result
+
+
+def render_markdown(report: dict) -> str:
+    lines = [
+        "# Agent Governance Score",
+        "",
+        f"- Scored: {report['created_at']}",
+        f"- Score: {report['score']} ({report['status']})",
+        "",
+        "## Dimensions",
+        "",
+    ]
+    for name, item in report["dimensions"].items():
+        lines.append(f"- `{name}`: {item['score']} ({item['status']})")
+        for evidence in item.get("evidence", []):
+            lines.append(f"  - {evidence}")
+        for finding in item.get("findings", [])[:5]:
+            lines.append(f"  - finding: {finding}")
+    lines.extend(
+        [
+            "",
+            "## Commands",
+            "",
+            "```bash",
+            "python3 scripts/agent_score.py score",
+            "python3 scripts/agent_score.py score --write",
+            "python3 scripts/agent_runlog.py tail --limit 10",
+            "```",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def record_runlog(report: dict) -> None:
+    item = {
+        "schema": "agent-runlog-event-v1",
+        "id": f"run-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}",
+        "trace_id": uuid.uuid4().hex[:12],
+        "created_at": utc_now(),
+        "kind": "eval",
+        "outcome": report["status"],
+        "summary": f"governance score {report['score']} ({report['status']})",
+        "session_id": None,
+        "command": "scripts/agent_score.py score --write",
+        "source": "scripts/agent_score.py",
+        "tags": ["governance-score"],
+        "artifacts": [str(LATEST_PATH)],
+    }
+    RUNLOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with RUNLOG_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    errors: list[str] = []
+    if not CONFIG_PATH.exists():
+        errors.append(f"missing {CONFIG_PATH}")
+    else:
+        config = load_json(CONFIG_PATH)
+        if config.get("schema") != "agent-evals-v1":
+            errors.append(".agent/evals.json schema must be agent-evals-v1")
+        dimensions = config.get("dimensions", {})
+        for name in ("required_paths", "validation", "context_budget", "session_continuity", "memory", "capabilities", "security", "knowledge", "runlog"):
+            if name not in dimensions:
+                errors.append(f".agent/evals.json missing dimension: {name}")
+    LATEST_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if not LATEST_PATH.exists():
+        LATEST_PATH.write_text("# Agent Governance Score\n\nNo score recorded yet.\n", encoding="utf-8")
+    for error in errors:
+        print(f"error: {error}")
+    if errors:
+        return 1
+    print("agent score doctor passed")
+    return 0
+
+
+def cmd_score(args: argparse.Namespace) -> int:
+    report = collect_scores(extra_runlog_events=1 if args.write else 0)
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(render_markdown(report))
+    if args.write:
+        LATEST_PATH.parent.mkdir(parents=True, exist_ok=True)
+        LATEST_PATH.write_text(render_markdown(report), encoding="utf-8")
+        record_runlog(report)
+    if args.fail_under is not None and report["score"] < args.fail_under:
+        return 1
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    doctor = subparsers.add_parser("doctor", help="Check score configuration")
+    doctor.set_defaults(func=cmd_doctor)
+
+    score = subparsers.add_parser("score", help="Compute governance score")
+    score.add_argument("--json", action="store_true")
+    score.add_argument("--write", action="store_true", help="Write .agent/evals/latest.md and append runlog evidence")
+    score.add_argument("--fail-under", type=float)
+    score.set_defaults(func=cmd_score)
+
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

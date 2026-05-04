@@ -1,0 +1,47 @@
+# Subagent Task
+
+Use this template only when the active platform and higher-priority instructions allow delegated agent work.
+
+## Task Packet
+
+- Role: `searcher | explorer | worker | verifier | reviewer | coordinator`
+- Goal:
+- Read boundary:
+- Write boundary:
+- Explicitly forbidden paths:
+- Allowed operations:
+  - Read:
+  - Write:
+  - Shell commands:
+  - Network:
+- Input facts:
+- Expected validation:
+- Output budget:
+  - Start with machine-readable snapshot.
+  - Keep supporting notes concise; default budget is 700 estimated tokens unless caller says otherwise.
+  - Prefer `path:line` first for findings and evidence.
+
+## Required Output
+
+Start the final report with:
+
+```text
+===SNAPSHOT===
+```
+
+Then provide JSON:
+
+```json
+{
+  "status": "success | partial | blocked",
+  "role": "searcher | explorer | worker | verifier | reviewer | coordinator",
+  "files_touched": [],
+  "exports_added_or_modified": [],
+  "critical_finding": "short finding",
+  "next_dependency": "recommended next task or none",
+  "estimated_risk_level": "low | medium | high",
+  "validation": []
+}
+```
+
+After the JSON, add only concise supporting notes. Mark anything unverified as inference.

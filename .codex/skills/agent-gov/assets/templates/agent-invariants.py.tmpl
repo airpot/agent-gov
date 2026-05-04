@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+"""Check mechanical repository invariants for agents."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+
+HARNESS_PATH = Path(".agent/harness.json")
+
+
+def load_harness() -> dict:
+    if not HARNESS_PATH.exists():
+        print("error: .agent/harness.json is missing", file=sys.stderr)
+        raise SystemExit(1)
+    return json.loads(HARNESS_PATH.read_text(encoding="utf-8"))
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--strict-boundaries", action="store_true", help="Fail on architecture boundary warnings")
+    args = parser.parse_args(argv)
+
+    harness = load_harness()
+    invariants = harness.get("invariants", {})
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    for path in invariants.get("required_paths", []):
+        if not Path(path).exists():
+            errors.append(f"required path missing: {path}")
+
+    for path in invariants.get("forbidden_paths", []):
+        if Path(path).exists():
+            errors.append(f"forbidden path exists: {path}")
+
+    for boundary in invariants.get("architecture_boundaries", []):
+        name = boundary.get("name", "unnamed-boundary")
+        source = Path(boundary.get("source", ""))
+        forbidden_imports = boundary.get("forbidden_imports", [])
+        if not source.exists():
+            warnings.append(f"boundary source missing for {name}: {source}")
+            continue
+        if not forbidden_imports:
+            continue
+        for file in source.rglob("*"):
+            if not file.is_file() or file.suffix not in {".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs"}:
+                continue
+            text = file.read_text(encoding="utf-8", errors="ignore")
+            for pattern in forbidden_imports:
+                if pattern in text:
+                    message = f"boundary {name} violation: {file} contains {pattern!r}"
+                    if args.strict_boundaries:
+                        errors.append(message)
+                    else:
+                        warnings.append(message)
+
+    for warning in warnings:
+        print(f"warning: {warning}")
+    for error in errors:
+        print(f"error: {error}")
+
+    if errors:
+        return 1
+    print("agent invariants check passed")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
+

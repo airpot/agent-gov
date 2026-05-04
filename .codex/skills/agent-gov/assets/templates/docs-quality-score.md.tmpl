@@ -1,0 +1,30 @@
+# Governance Score
+
+This project uses a local deterministic governance score as an advisory health indicator. It does not replace review, tests, or security analysis.
+
+## Commands
+
+```bash
+python3 scripts/agent_score.py doctor
+python3 scripts/agent_score.py score
+python3 scripts/agent_score.py score --write
+python3 scripts/agent_score.py score --json
+```
+
+## Inputs
+
+- `.agent/harness.json`
+- `.agent/context.json`
+- `.agent/memory.json`
+- `.agent/capabilities.json`
+- `.agent/security.json`
+- `.agent/knowledge.json`
+- `.agent/runlog.jsonl`
+- `.agent/sessions/`
+
+## Output
+
+- Latest dashboard: `.agent/evals/latest.md`
+- Evidence ledger: `.agent/runlog.jsonl`
+
+Use the score to find drift: missing required files, oversized context, stale docs, unconfigured validation, weak runlog evidence, or security baseline gaps.

@@ -1,0 +1,108 @@
+#!/usr/bin/env python3
+"""Run configured build/test/lint/run feedback commands for agents."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+HARNESS_PATH = Path(".agent/harness.json")
+RUNLOG_PATH = Path(".agent/runlog.jsonl")
+DEFAULT_SUITES = ["build", "test", "lint", "typecheck", "smoke"]
+
+
+def load_harness() -> dict:
+    if not HARNESS_PATH.exists():
+        print("error: .agent/harness.json is missing", file=sys.stderr)
+        raise SystemExit(1)
+    return json.loads(HARNESS_PATH.read_text(encoding="utf-8"))
+
+
+def commands_for(harness: dict, suites: list[str]) -> list[tuple[str, str]]:
+    validation = harness.get("validation", {})
+    commands: list[tuple[str, str]] = []
+    for suite in suites:
+        for command in validation.get(suite, []):
+            commands.append((suite, command))
+    return commands
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def record_runlog(*, trace_id: str, suite: str, command: str, outcome: str, summary: str) -> None:
+    item = {
+        "schema": "agent-runlog-event-v1",
+        "id": f"run-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}",
+        "trace_id": trace_id,
+        "created_at": utc_now(),
+        "kind": "validation",
+        "outcome": outcome,
+        "summary": summary,
+        "session_id": None,
+        "command": command,
+        "source": "scripts/agent_validate.py",
+        "tags": [suite],
+        "artifacts": [],
+    }
+    RUNLOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with RUNLOG_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("suites", nargs="*", default=DEFAULT_SUITES)
+    parser.add_argument("--list", action="store_true", help="List configured commands without running them")
+    parser.add_argument("--require-configured", action="store_true", help="Fail if no commands are configured")
+    args = parser.parse_args(argv)
+
+    harness = load_harness()
+    commands = commands_for(harness, args.suites)
+
+    if args.list:
+        if not commands:
+            print("no validation commands configured")
+        for suite, command in commands:
+            print(f"{suite}: {command}")
+        return 0 if commands or not args.require_configured else 1
+
+    if not commands:
+        print("no validation commands configured; update .agent/harness.json")
+        return 0 if not args.require_configured else 1
+
+    trace_id = uuid.uuid4().hex[:12]
+    for suite, command in commands:
+        print(f"[{suite}] {command}")
+        result = subprocess.run(command, shell=True, text=True, check=False)
+        if result.returncode != 0:
+            record_runlog(
+                trace_id=trace_id,
+                suite=suite,
+                command=command,
+                outcome="fail",
+                summary=f"{suite} failed with exit code {result.returncode}",
+            )
+            print(f"error: {suite} command failed with exit code {result.returncode}", file=sys.stderr)
+            return result.returncode
+        record_runlog(
+            trace_id=trace_id,
+            suite=suite,
+            command=command,
+            outcome="pass",
+            summary=f"{suite} passed",
+        )
+
+    print("agent validation passed")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

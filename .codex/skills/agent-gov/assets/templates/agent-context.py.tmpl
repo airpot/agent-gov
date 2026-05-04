@@ -1,0 +1,515 @@
+#!/usr/bin/env python3
+"""Manage repo-local agent context budget and compression safety checks."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+import re
+import sys
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+CONFIG_PATH = Path(".agent/context.json")
+DEFAULT_STATS = Path(".agent/context/stats.jsonl")
+DEFAULT_LATEST = Path(".agent/context/latest.md")
+
+DEFAULT_TRACKED_FILES = [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "docs/index.md",
+    "docs/ARCHITECTURE.md",
+    "docs/QUALITY.md",
+    "docs/RELIABILITY.md",
+    "docs/SECURITY.md",
+    "docs/TOOLING.md",
+    "docs/tech-debt.md",
+    "docs/adr/README.md",
+    "docs/rfcs/README.md",
+    "docs/incidents/README.md",
+    ".agent/sessions/bootstrap.md",
+    ".agent/memory/latest.md",
+    ".agent/capabilities.json",
+    ".agent/tooling.json",
+    ".agent/security.json",
+    ".agent/evals.json",
+    ".agent/evals/latest.md",
+    ".agent/templates/subagent-task.md.tmpl",
+]
+DEFAULT_TRACKED_GLOBS = [
+    "openspec/changes/*/proposal.md",
+    "openspec/changes/*/design.md",
+    "openspec/changes/*/tasks.md",
+]
+
+URL_RE = re.compile(r"https?://[^\s)>\"]+")
+HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)", re.MULTILINE)
+BULLET_RE = re.compile(r"^\s*[-*+]\s+", re.MULTILINE)
+FENCE_RE = re.compile(r"^(\s{0,3})(`{3,}|~{3,})(.*)$")
+PATH_RE = re.compile(r"(?:\./|\.\./|/|[A-Za-z]:\\)[\w\-/\\\.]+|[\w\-\.]+[/\\][\w\-/\\\.]+")
+SENSITIVE_BASENAME_RE = re.compile(
+    r"(?ix)^("
+    r"\.env(\..+)?"
+    r"|\.netrc"
+    r"|credentials(\..+)?"
+    r"|secrets?(\..+)?"
+    r"|passwords?(\..+)?"
+    r"|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?"
+    r"|authorized_keys"
+    r"|known_hosts"
+    r"|.*\.(pem|key|p12|pfx|crt|cer|jks|keystore|asc|gpg)"
+    r")$"
+)
+SENSITIVE_COMPONENTS = {".ssh", ".aws", ".gnupg", ".kube", ".docker"}
+SENSITIVE_TOKENS = ("secret", "credential", "password", "passwd", "apikey", "accesskey", "token", "privatekey")
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def load_json(path: Path, fallback: dict) -> dict:
+    if not path.exists():
+        return fallback
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def default_config() -> dict:
+    return {
+        "schema": "agent-context-budget-v1",
+        "stores": {
+            "stats_jsonl": str(DEFAULT_STATS),
+            "latest_digest": str(DEFAULT_LATEST),
+        },
+        "tracked_files": DEFAULT_TRACKED_FILES,
+        "tracked_globs": DEFAULT_TRACKED_GLOBS,
+        "budgets": {
+            "max_total_tracked_tokens": 20000,
+            "max_single_doc_tokens": 3000,
+            "max_agent_instruction_tokens": 1600,
+            "max_claude_instruction_tokens": 2500,
+            "max_bootstrap_tokens": 5000,
+            "max_memory_digest_tokens": 1200,
+            "max_subagent_result_tokens": 700,
+            "max_review_finding_tokens": 120,
+        },
+        "policy": {
+            "estimate_method": "chars_div_4",
+            "prefer_progressive_disclosure": True,
+            "compress_only_natural_language": True,
+            "preserve_code_urls_paths_headings": True,
+            "do_not_send_sensitive_files_to_external_models": True,
+            "doctor_fails_on_budget_excess": False,
+        },
+    }
+
+
+def load_config() -> dict:
+    return load_json(CONFIG_PATH, default_config())
+
+
+def store_paths(config: dict) -> tuple[Path, Path]:
+    stores = config.get("stores", {})
+    return (
+        Path(stores.get("stats_jsonl", str(DEFAULT_STATS))),
+        Path(stores.get("latest_digest", str(DEFAULT_LATEST))),
+    )
+
+
+def ensure_store(config: dict) -> None:
+    stats_path, latest_path = store_paths(config)
+    stats_path.parent.mkdir(parents=True, exist_ok=True)
+    latest_path.parent.mkdir(parents=True, exist_ok=True)
+    stats_path.touch(exist_ok=True)
+    if not latest_path.exists():
+        latest_path.write_text("# Agent Context Budget\n\nNo context scan recorded yet.\n", encoding="utf-8")
+
+
+def append_jsonl(path: Path, item: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+
+def estimate_tokens(text: str) -> int:
+    return int(math.ceil(len(text) / 4))
+
+
+def is_sensitive_path(path: Path) -> bool:
+    name = path.name
+    if SENSITIVE_BASENAME_RE.match(name):
+        return True
+    lowered_parts = {part.lower() for part in path.parts}
+    if lowered_parts & SENSITIVE_COMPONENTS:
+        return True
+    normalized = re.sub(r"[_\-\s.]", "", name.lower())
+    return any(token in normalized for token in SENSITIVE_TOKENS)
+
+
+def iter_tracked_paths(config: dict) -> list[Path]:
+    seen: set[str] = set()
+    paths: list[Path] = []
+    for value in config.get("tracked_files", DEFAULT_TRACKED_FILES):
+        path = Path(value)
+        if path.exists() and path.is_file():
+            key = str(path)
+            if key not in seen:
+                seen.add(key)
+                paths.append(path)
+    for pattern in config.get("tracked_globs", DEFAULT_TRACKED_GLOBS):
+        for path in sorted(Path(".").glob(pattern)):
+            if path.is_file():
+                key = str(path)
+                if key not in seen:
+                    seen.add(key)
+                    paths.append(path)
+    return paths
+
+
+def read_text(path: Path) -> str:
+    return path.read_text(encoding="utf-8", errors="ignore")
+
+
+def threshold_for(path: Path, config: dict) -> int:
+    budgets = config.get("budgets", {})
+    text_path = str(path)
+    if text_path == "AGENTS.md":
+        return int(budgets.get("max_agent_instruction_tokens", 1600))
+    if text_path == "CLAUDE.md":
+        return int(budgets.get("max_claude_instruction_tokens", 2500))
+    if text_path.endswith(".agent/sessions/bootstrap.md") or text_path == ".agent/sessions/bootstrap.md":
+        return int(budgets.get("max_bootstrap_tokens", 5000))
+    if text_path == ".agent/memory/latest.md":
+        return int(budgets.get("max_memory_digest_tokens", 1200))
+    return int(budgets.get("max_single_doc_tokens", 3000))
+
+
+def measure_file(path: Path, config: dict) -> dict:
+    text = read_text(path)
+    tokens = estimate_tokens(text)
+    return {
+        "path": str(path),
+        "bytes": path.stat().st_size,
+        "chars": len(text),
+        "lines": len(text.splitlines()),
+        "estimated_tokens": tokens,
+        "budget_tokens": threshold_for(path, config),
+        "sensitive_path": is_sensitive_path(path),
+    }
+
+
+def scan(config: dict) -> dict:
+    rows = [measure_file(path, config) for path in iter_tracked_paths(config)]
+    total_tokens = sum(row["estimated_tokens"] for row in rows)
+    budgets = config.get("budgets", {})
+    total_budget = int(budgets.get("max_total_tracked_tokens", 20000))
+    warnings = []
+    if total_tokens > total_budget:
+        warnings.append(f"total tracked context over budget: {total_tokens} > {total_budget}")
+    for row in rows:
+        if row["estimated_tokens"] > row["budget_tokens"]:
+            warnings.append(
+                f"{row['path']} over budget: {row['estimated_tokens']} > {row['budget_tokens']}"
+            )
+        if row["sensitive_path"]:
+            warnings.append(f"{row['path']} looks sensitive; never send it to external compression")
+    return {
+        "schema": "agent-context-scan-v1",
+        "created_at": utc_now(),
+        "estimate_method": config.get("policy", {}).get("estimate_method", "chars_div_4"),
+        "total_estimated_tokens": total_tokens,
+        "total_budget_tokens": total_budget,
+        "files": rows,
+        "warnings": warnings,
+    }
+
+
+def write_latest(config: dict, report: dict, limit: int) -> None:
+    _, latest_path = store_paths(config)
+    rows = sorted(report["files"], key=lambda item: item["estimated_tokens"], reverse=True)[:limit]
+    lines = [
+        "# Agent Context Budget",
+        "",
+        f"- Scanned: {report['created_at']}",
+        f"- Estimated tracked tokens: {report['total_estimated_tokens']} / {report['total_budget_tokens']}",
+        f"- Estimate method: {report['estimate_method']}",
+        "",
+        "## Largest Files",
+        "",
+    ]
+    if rows:
+        for row in rows:
+            over = " over-budget" if row["estimated_tokens"] > row["budget_tokens"] else ""
+            lines.append(
+                f"- `{row['path']}`: {row['estimated_tokens']} tokens "
+                f"(budget {row['budget_tokens']}){over}"
+            )
+    else:
+        lines.append("- No tracked files found.")
+    lines.extend(["", "## Warnings", ""])
+    if report["warnings"]:
+        lines.extend(f"- {warning}" for warning in report["warnings"])
+    else:
+        lines.append("- none")
+    lines.extend(
+        [
+            "",
+            "Use `python3 .agent/tools/agent_context.py suggest` before compressing large governance docs.",
+        ]
+    )
+    latest_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    config = load_config()
+    ensure_store(config)
+    report = scan(config)
+    write_latest(config, report, args.limit)
+    print("agent context budget initialized")
+    return 0
+
+
+def cmd_scan(args: argparse.Namespace) -> int:
+    config = load_config()
+    if not args.no_write:
+        ensure_store(config)
+    report = scan(config)
+    stats_path, _ = store_paths(config)
+    if not args.no_write:
+        append_jsonl(stats_path, report)
+        write_latest(config, report, args.limit)
+    print(
+        f"tracked tokens: {report['total_estimated_tokens']} / {report['total_budget_tokens']} "
+        f"({len(report['files'])} files)"
+    )
+    for row in sorted(report["files"], key=lambda item: item["estimated_tokens"], reverse=True)[: args.limit]:
+        print(f"{row['estimated_tokens']:>6} / {row['budget_tokens']:<6} {row['path']}")
+    for warning in report["warnings"]:
+        print(f"warning: {warning}")
+    return 0
+
+
+def cmd_suggest(args: argparse.Namespace) -> int:
+    config = load_config()
+    report = scan(config)
+    candidates = [
+        row
+        for row in report["files"]
+        if row["estimated_tokens"] >= args.min_tokens
+        or row["estimated_tokens"] > row["budget_tokens"]
+    ]
+    candidates.sort(key=lambda item: item["estimated_tokens"], reverse=True)
+    if not candidates:
+        print("no context compression candidates")
+        return 0
+    for row in candidates[: args.limit]:
+        sensitive = " sensitive-path" if row["sensitive_path"] else ""
+        print(f"{row['estimated_tokens']:>6} {row['path']}{sensitive}")
+    print("")
+    print("Compression rule: preserve headings, code blocks, inline code, URLs, paths, commands, versions.")
+    print("Never send sensitive paths or private environment files to external compression.")
+    return 0
+
+
+def extract_headings(text: str) -> list[tuple[str, str]]:
+    return [(level, title.strip()) for level, title in HEADING_RE.findall(text)]
+
+
+def extract_fenced_blocks(text: str) -> list[str]:
+    blocks: list[str] = []
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        match = FENCE_RE.match(lines[i])
+        if not match:
+            i += 1
+            continue
+        fence_char = match.group(2)[0]
+        fence_len = len(match.group(2))
+        block_lines = [lines[i]]
+        i += 1
+        closed = False
+        while i < len(lines):
+            close = FENCE_RE.match(lines[i])
+            if (
+                close
+                and close.group(2)[0] == fence_char
+                and len(close.group(2)) >= fence_len
+                and close.group(3).strip() == ""
+            ):
+                block_lines.append(lines[i])
+                i += 1
+                closed = True
+                break
+            block_lines.append(lines[i])
+            i += 1
+        if closed:
+            blocks.append("\n".join(block_lines))
+    return blocks
+
+
+def strip_fenced_blocks(text: str) -> str:
+    result: list[str] = []
+    lines = text.split("\n")
+    i = 0
+    while i < len(lines):
+        match = FENCE_RE.match(lines[i])
+        if not match:
+            result.append(lines[i])
+            i += 1
+            continue
+        fence_char = match.group(2)[0]
+        fence_len = len(match.group(2))
+        i += 1
+        while i < len(lines):
+            close = FENCE_RE.match(lines[i])
+            i += 1
+            if (
+                close
+                and close.group(2)[0] == fence_char
+                and len(close.group(2)) >= fence_len
+                and close.group(3).strip() == ""
+            ):
+                break
+    return "\n".join(result)
+
+
+def extract_inline_codes(text: str) -> Counter:
+    return Counter(re.findall(r"`([^`]+)`", strip_fenced_blocks(text)))
+
+
+def extract_urls(text: str) -> set[str]:
+    return set(URL_RE.findall(text))
+
+
+def extract_paths(text: str) -> set[str]:
+    return set(PATH_RE.findall(strip_fenced_blocks(text)))
+
+
+def count_bullets(text: str) -> int:
+    return len(BULLET_RE.findall(text))
+
+
+def validate_pair(original: str, compressed: str) -> tuple[list[str], list[str]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    if extract_headings(original) != extract_headings(compressed):
+        errors.append("headings changed")
+    if extract_fenced_blocks(original) != extract_fenced_blocks(compressed):
+        errors.append("fenced code blocks changed")
+    if extract_urls(original) != extract_urls(compressed):
+        errors.append("URLs changed")
+    if extract_inline_codes(original) != extract_inline_codes(compressed):
+        errors.append("inline code changed")
+    original_paths = extract_paths(original)
+    compressed_paths = extract_paths(compressed)
+    if original_paths != compressed_paths:
+        warnings.append(f"path set changed: lost={sorted(original_paths - compressed_paths)} added={sorted(compressed_paths - original_paths)}")
+    original_bullets = count_bullets(original)
+    compressed_bullets = count_bullets(compressed)
+    if original_bullets and abs(original_bullets - compressed_bullets) / original_bullets > 0.15:
+        warnings.append(f"bullet count changed: {original_bullets} -> {compressed_bullets}")
+    return errors, warnings
+
+
+def cmd_validate_pair(args: argparse.Namespace) -> int:
+    original_path = Path(args.original)
+    compressed_path = Path(args.compressed)
+    original = read_text(original_path)
+    compressed = read_text(compressed_path)
+    errors, warnings = validate_pair(original, compressed)
+    if is_sensitive_path(original_path) or is_sensitive_path(compressed_path):
+        warnings.append("path looks sensitive; validation is local, but do not send this content to external compression")
+    for warning in warnings:
+        print(f"warning: {warning}")
+    for error in errors:
+        print(f"error: {error}")
+    if errors or (args.strict and warnings):
+        return 1
+    print("context compression validation passed")
+    print(f"original tokens: {estimate_tokens(original)}")
+    print(f"compressed tokens: {estimate_tokens(compressed)}")
+    print(f"estimated saved: {max(0, estimate_tokens(original) - estimate_tokens(compressed))}")
+    return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    config = load_config()
+    errors: list[str] = []
+    warnings: list[str] = []
+    if config.get("schema") != "agent-context-budget-v1":
+        errors.append(".agent/context.json schema must be agent-context-budget-v1")
+    stores = config.get("stores", {})
+    for key in ("stats_jsonl", "latest_digest"):
+        if key not in stores:
+            errors.append(f".agent/context.json missing store: {key}")
+    budgets = config.get("budgets", {})
+    for key in ("max_total_tracked_tokens", "max_single_doc_tokens", "max_subagent_result_tokens"):
+        if key not in budgets:
+            errors.append(f".agent/context.json missing budget: {key}")
+    stats_path, latest_path = store_paths(config)
+    if args.write:
+        ensure_store(config)
+    else:
+        for path in (stats_path, latest_path):
+            if not path.exists():
+                errors.append(f"missing context path: {path}")
+    report = scan(config)
+    if args.write:
+        write_latest(config, report, args.limit)
+    warnings.extend(report["warnings"])
+    if config.get("policy", {}).get("doctor_fails_on_budget_excess", False) and report["warnings"]:
+        errors.extend(report["warnings"])
+        warnings = []
+    for warning in warnings:
+        print(f"warning: {warning}")
+    for error in errors:
+        print(f"error: {error}")
+    if errors:
+        return 1
+    print("agent context doctor passed")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    init = subparsers.add_parser("init", help="Initialize context budget store")
+    init.add_argument("--limit", type=int, default=8)
+    init.set_defaults(func=cmd_init)
+
+    scan_parser = subparsers.add_parser("scan", help="Scan tracked files and write a context digest")
+    scan_parser.add_argument("--limit", type=int, default=10)
+    scan_parser.add_argument("--no-write", action="store_true")
+    scan_parser.set_defaults(func=cmd_scan)
+
+    suggest = subparsers.add_parser("suggest", help="Suggest context compression candidates")
+    suggest.add_argument("--min-tokens", type=int, default=1200)
+    suggest.add_argument("--limit", type=int, default=10)
+    suggest.set_defaults(func=cmd_suggest)
+
+    validate = subparsers.add_parser("validate-pair", help="Validate a compressed doc against its original")
+    validate.add_argument("original")
+    validate.add_argument("compressed")
+    validate.add_argument("--strict", action="store_true")
+    validate.set_defaults(func=cmd_validate_pair)
+
+    doctor = subparsers.add_parser("doctor", help="Check context budget health")
+    doctor.add_argument("--limit", type=int, default=8)
+    doctor.add_argument("--write", action="store_true", help="Refresh context stores while checking")
+    doctor.set_defaults(func=cmd_doctor)
+
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

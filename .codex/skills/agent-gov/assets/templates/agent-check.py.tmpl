@@ -1,0 +1,342 @@
+#!/usr/bin/env python3
+"""Check whether this repository has the expected agent project harness."""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback
+    tomllib = None
+
+
+BASE_REQUIRED = [
+    "AGENTS.md",
+    ".agent/config.json",
+    ".agent/harness.json",
+    ".agent/project-layout.json",
+    ".agent/subagents.json",
+    ".agent/hooks.json",
+    ".agent/knowledge.json",
+    ".agent/memory.json",
+    ".agent/context.json",
+    ".agent/capabilities.json",
+    ".agent/tooling.json",
+    ".agent/security.json",
+    ".agent/evals.json",
+    ".agent/evals/latest.md",
+    ".agent/runlog.jsonl",
+    ".agent/memory/events.jsonl",
+    ".agent/memory/latest.md",
+    ".agent/memory/summaries/.gitkeep",
+    ".agent/context/stats.jsonl",
+    ".agent/context/latest.md",
+    ".agent/skill-distribution.json",
+    ".agent/sessions/index.json",
+    ".agent/sessions/active.md",
+    ".agent/sessions/bootstrap.md",
+    ".agent/templates/project-review.md.tmpl",
+    ".agent/templates/project-fix-log.md.tmpl",
+    ".agent/templates/subagent-task.md.tmpl",
+    ".agent/templates/memory-summary.md.tmpl",
+    ".agent/templates/memory-latest.md.tmpl",
+    ".agent/templates/context-summary.md.tmpl",
+    ".agent/templates/adr.md.tmpl",
+    ".agent/templates/rfc.md.tmpl",
+    ".agent/templates/postmortem.md.tmpl",
+    ".agent/templates/quality-score.md.tmpl",
+    ".agent/tools/agent_session.py",
+    ".agent/tools/agent_memory.py",
+    ".agent/tools/agent_context.py",
+    ".agent/tools/governance_hook.py",
+    ".codex/config.toml",
+    ".codex/hooks.json",
+    ".codex/agents/governance-searcher.toml",
+    ".codex/agents/governance-explorer.toml",
+    ".codex/agents/governance-worker.toml",
+    ".codex/agents/governance-verifier.toml",
+    ".codex/agents/governance-reviewer.toml",
+    ".codex/agents/governance-coordinator.toml",
+    "scripts/agent_check.py",
+    "scripts/agent_validate.py",
+    "scripts/agent_knowledge.py",
+    "scripts/agent_invariants.py",
+    "scripts/agent_capabilities.py",
+    "scripts/agent_runlog.py",
+    "scripts/agent_tooling.py",
+    "scripts/agent_security.py",
+    "scripts/agent_score.py",
+    "scripts/agent_sync_skills.py",
+    "docs/index.md",
+    "docs/ARCHITECTURE.md",
+    "docs/QUALITY.md",
+    "docs/RELIABILITY.md",
+    "docs/SECURITY.md",
+    "docs/TOOLING.md",
+    "docs/QUALITY_SCORE.md",
+    "docs/tech-debt.md",
+    "docs/adr/README.md",
+    "docs/rfcs/README.md",
+    "docs/incidents/README.md",
+]
+OPENSPEC_REQUIRED = ["openspec/config.yaml"]
+CLAUDE_REQUIRED = [
+    "CLAUDE.md",
+    ".claude/settings.json",
+    ".claude/agents/governance-searcher.md",
+    ".claude/agents/governance-explorer.md",
+    ".claude/agents/governance-worker.md",
+    ".claude/agents/governance-verifier.md",
+    ".claude/agents/governance-reviewer.md",
+    ".claude/agents/governance-coordinator.md",
+]
+
+
+def load_json(path: Path, label: str) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        print(f"error: {label} is invalid JSON: {exc}")
+        raise SystemExit(1)
+
+
+def load_jsonl(path: Path, label: str) -> list[dict]:
+    rows: list[dict] = []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        print(f"error: cannot read {label}: {exc}")
+        raise SystemExit(1)
+    for index, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError as exc:
+            print(f"error: {label} line {index} is invalid JSON: {exc}")
+            raise SystemExit(1)
+    return rows
+
+
+def main() -> int:
+    root = Path.cwd()
+
+    config_path = root / ".agent/config.json"
+    config = {}
+    if config_path.exists():
+        config = load_json(config_path, ".agent/config.json")
+
+    openspec_enabled = bool(config.get("openspec_enabled", config.get("spec_source", "openspec") == "openspec"))
+    claude_enabled = bool(config.get("claude_enabled", True))
+    required = list(BASE_REQUIRED)
+    if openspec_enabled:
+        required.extend(OPENSPEC_REQUIRED)
+    if claude_enabled:
+        required.extend(CLAUDE_REQUIRED)
+    missing = [path for path in required if not (root / path).exists()]
+
+    index_path = root / ".agent/sessions/index.json"
+    if index_path.exists():
+        load_json(index_path, ".agent/sessions/index.json")
+
+    harness_path = root / ".agent/harness.json"
+    if harness_path.exists():
+        harness = load_json(harness_path, ".agent/harness.json")
+        if harness.get("schema") != "agent-harness-v1":
+            print("error: .agent/harness.json schema must be agent-harness-v1")
+            return 1
+
+    layout_path = root / ".agent/project-layout.json"
+    if layout_path.exists():
+        layout = load_json(layout_path, ".agent/project-layout.json")
+        if layout.get("schema") != "agent-project-layout-v1":
+            print("error: .agent/project-layout.json schema must be agent-project-layout-v1")
+            return 1
+        for directory in layout.get("directories", []):
+            if not (root / directory).is_dir():
+                missing.append(directory)
+
+    subagents_path = root / ".agent/subagents.json"
+    if subagents_path.exists():
+        subagents = load_json(subagents_path, ".agent/subagents.json")
+        if subagents.get("schema") != "agent-subagent-orchestration-v1":
+            print("error: .agent/subagents.json schema must be agent-subagent-orchestration-v1")
+            return 1
+        roles = subagents.get("roles", {})
+        for role in ("searcher", "explorer", "worker", "verifier", "reviewer"):
+            if role not in roles:
+                print(f"error: .agent/subagents.json missing role: {role}")
+                return 1
+        snapshot = subagents.get("snapshot_contract", {})
+        if snapshot.get("marker") != "===SNAPSHOT===":
+            print("error: .agent/subagents.json snapshot marker must be ===SNAPSHOT===")
+            return 1
+
+    hooks_path = root / ".agent/hooks.json"
+    if hooks_path.exists():
+        hooks = load_json(hooks_path, ".agent/hooks.json")
+        if hooks.get("schema") != "agent-hooks-v1":
+            print("error: .agent/hooks.json schema must be agent-hooks-v1")
+            return 1
+
+    knowledge_path = root / ".agent/knowledge.json"
+    if knowledge_path.exists():
+        knowledge = load_json(knowledge_path, ".agent/knowledge.json")
+        if knowledge.get("schema") != "agent-knowledge-v1":
+            print("error: .agent/knowledge.json schema must be agent-knowledge-v1")
+            return 1
+
+    memory_path = root / ".agent/memory.json"
+    if memory_path.exists():
+        memory = load_json(memory_path, ".agent/memory.json")
+        if memory.get("schema") != "agent-memory-v1":
+            print("error: .agent/memory.json schema must be agent-memory-v1")
+            return 1
+        stores = memory.get("stores", {})
+        for key in ("events_jsonl", "sqlite_index", "summary_dir", "latest_digest"):
+            if key not in stores:
+                print(f"error: .agent/memory.json missing store: {key}")
+                return 1
+        taxonomy = memory.get("taxonomy", {})
+        for key in ("episodic", "semantic", "procedural"):
+            if key not in taxonomy:
+                print(f"error: .agent/memory.json taxonomy missing {key}")
+                return 1
+
+    context_path = root / ".agent/context.json"
+    if context_path.exists():
+        context = load_json(context_path, ".agent/context.json")
+        if context.get("schema") != "agent-context-budget-v1":
+            print("error: .agent/context.json schema must be agent-context-budget-v1")
+            return 1
+        stores = context.get("stores", {})
+        for key in ("stats_jsonl", "latest_digest"):
+            if key not in stores:
+                print(f"error: .agent/context.json missing store: {key}")
+                return 1
+        budgets = context.get("budgets", {})
+        for key in ("max_total_tracked_tokens", "max_single_doc_tokens", "max_subagent_result_tokens"):
+            if key not in budgets:
+                print(f"error: .agent/context.json missing budget: {key}")
+                return 1
+
+    distribution_path = root / ".agent/skill-distribution.json"
+    if distribution_path.exists():
+        distribution = load_json(distribution_path, ".agent/skill-distribution.json")
+        if distribution.get("schema") != "agent-skill-distribution-v1":
+            print("error: .agent/skill-distribution.json schema must be agent-skill-distribution-v1")
+            return 1
+
+    capabilities_path = root / ".agent/capabilities.json"
+    if capabilities_path.exists():
+        capability_config = load_json(capabilities_path, ".agent/capabilities.json")
+        if capability_config.get("schema") != "agent-capabilities-v1":
+            print("error: .agent/capabilities.json schema must be agent-capabilities-v1")
+            return 1
+        seen: set[str] = set()
+        for item in capability_config.get("capabilities", []):
+            cap_id = item.get("id")
+            if not cap_id:
+                print("error: capability entry missing id")
+                return 1
+            if cap_id in seen:
+                print(f"error: duplicate capability id: {cap_id}")
+                return 1
+            seen.add(cap_id)
+            if item.get("risk") not in capability_config.get("risk_values", ["low", "medium", "high"]):
+                print(f"error: capability {cap_id} has invalid risk")
+                return 1
+        if not seen:
+            print("error: .agent/capabilities.json has no capabilities")
+            return 1
+
+    tooling_path = root / ".agent/tooling.json"
+    if tooling_path.exists():
+        tooling = load_json(tooling_path, ".agent/tooling.json")
+        if tooling.get("schema") != "agent-tooling-v1":
+            print("error: .agent/tooling.json schema must be agent-tooling-v1")
+            return 1
+        limits = tooling.get("limits", {})
+        for key in ("max_read_lines", "max_search_matches", "max_file_list"):
+            if key not in limits:
+                print(f"error: .agent/tooling.json missing limit: {key}")
+                return 1
+
+    security_path = root / ".agent/security.json"
+    if security_path.exists():
+        security = load_json(security_path, ".agent/security.json")
+        if security.get("schema") != "agent-security-v1":
+            print("error: .agent/security.json schema must be agent-security-v1")
+            return 1
+        suites = security.get("suites", {})
+        for key in ("policy_as_code", "secret_scan", "dependency_audit", "sbom", "license_scan"):
+            if key not in suites:
+                print(f"error: .agent/security.json missing suite: {key}")
+                return 1
+            if not isinstance(suites[key], list):
+                print(f"error: .agent/security.json suite must be a list: {key}")
+                return 1
+
+    evals_path = root / ".agent/evals.json"
+    if evals_path.exists():
+        evals = load_json(evals_path, ".agent/evals.json")
+        if evals.get("schema") != "agent-evals-v1":
+            print("error: .agent/evals.json schema must be agent-evals-v1")
+            return 1
+        dimensions = evals.get("dimensions", {})
+        for key in (
+            "required_paths",
+            "validation",
+            "context_budget",
+            "session_continuity",
+            "memory",
+            "capabilities",
+            "security",
+            "knowledge",
+            "runlog",
+        ):
+            if key not in dimensions:
+                print(f"error: .agent/evals.json missing dimension: {key}")
+                return 1
+
+    runlog_path = root / ".agent/runlog.jsonl"
+    if runlog_path.exists():
+        for item in load_jsonl(runlog_path, ".agent/runlog.jsonl"):
+            if item.get("schema") != "agent-runlog-event-v1":
+                print("error: .agent/runlog.jsonl entries must use schema agent-runlog-event-v1")
+                return 1
+
+    codex_config_path = root / ".codex/config.toml"
+    if codex_config_path.exists() and tomllib is not None:
+        try:
+            tomllib.loads(codex_config_path.read_text(encoding="utf-8"))
+        except tomllib.TOMLDecodeError as exc:
+            print(f"error: .codex/config.toml is invalid TOML: {exc}")
+            return 1
+    elif codex_config_path.exists():
+        print("warning: Python tomllib unavailable; skipped .codex/config.toml parse")
+
+    codex_hooks_path = root / ".codex/hooks.json"
+    if codex_hooks_path.exists():
+        load_json(codex_hooks_path, ".codex/hooks.json")
+
+    if claude_enabled:
+        claude_settings_path = root / ".claude/settings.json"
+        if claude_settings_path.exists():
+            load_json(claude_settings_path, ".claude/settings.json")
+
+    if missing:
+        print("agent project check failed")
+        for path in missing:
+            print(f"missing: {path}")
+        return 1
+
+    print("agent project check passed")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

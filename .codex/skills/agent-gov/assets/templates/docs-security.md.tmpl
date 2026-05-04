@@ -1,0 +1,23 @@
+# Security
+
+## Secrets
+
+- Do not commit tokens, SSH keys, API keys, or private host credentials.
+- Do not store secrets in `.agent/` session files.
+- Do not store secrets, credentials, host data, raw transcripts, or terminal scrollback in `.agent/runlog.jsonl`.
+
+## Sensitive Data
+
+- Summarize sensitive logs rather than storing raw content in session state.
+
+## Dependency Risk
+
+- Record dependency or supply-chain concerns in OpenSpec design notes or active session decisions.
+- Register high-risk tools, external integrations, MCP servers, or networked resources in `.agent/capabilities.json` before relying on them.
+- Configure optional security suites in `.agent/security.json`:
+  - `policy_as_code`
+  - `secret_scan`
+  - `dependency_audit`
+  - `sbom`
+  - `license_scan`
+- Run `python3 scripts/agent_security.py scan-paths` before handoff when files or generated artifacts may include sensitive paths.

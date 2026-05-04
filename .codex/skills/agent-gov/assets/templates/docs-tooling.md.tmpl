@@ -1,0 +1,20 @@
+# Agent Tooling
+
+Use this document for repository-local agent tool affordances. The goal is compact, path-first, line-numbered output that avoids accidental context floods.
+
+## Commands
+
+```bash
+python3 scripts/agent_tooling.py doctor
+python3 scripts/agent_tooling.py files --glob "**/*.py" --limit 80
+python3 scripts/agent_tooling.py read AGENTS.md --start 1 --limit 120
+python3 scripts/agent_tooling.py search "pattern" --glob "**/*.md" --limit 40
+```
+
+## Rules
+
+- Prefer bounded reads over whole-file dumps.
+- Prefer `path:line` output for facts the next agent must verify.
+- Sensitive-looking paths are skipped or refused by default.
+- Empty results must be explicit, not silent.
+- Use normal shell tools when needed, but keep outputs small enough for `.agent/context.json` budgets.

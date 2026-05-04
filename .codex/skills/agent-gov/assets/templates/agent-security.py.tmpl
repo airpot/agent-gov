@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+"""Run optional security and supply-chain governance checks."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+CONFIG_PATH = Path(".agent/security.json")
+RUNLOG_PATH = Path(".agent/runlog.jsonl")
+SUITES = ("policy_as_code", "secret_scan", "dependency_audit", "sbom", "license_scan")
+SENSITIVE_BASENAME_RE = re.compile(
+    r"(?ix)^("
+    r"\.env(\..+)?"
+    r"|\.netrc"
+    r"|credentials(\..+)?"
+    r"|secrets?(\..+)?"
+    r"|passwords?(\..+)?"
+    r"|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?"
+    r"|authorized_keys"
+    r"|known_hosts"
+    r"|.*\.(pem|key|p12|pfx|crt|cer|jks|keystore|asc|gpg)"
+    r")$"
+)
+SENSITIVE_COMPONENTS = {".ssh", ".aws", ".gnupg", ".kube", ".docker"}
+IGNORE_DIRS = {".git", "node_modules", "dist", "build", "target", "__pycache__", ".agent/memory"}
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def load_config() -> dict:
+    if not CONFIG_PATH.exists():
+        print(f"error: missing {CONFIG_PATH}", file=sys.stderr)
+        raise SystemExit(1)
+    return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+
+
+def record_runlog(*, outcome: str, summary: str, command: str | None = None, tags: list[str] | None = None) -> None:
+    item = {
+        "schema": "agent-runlog-event-v1",
+        "id": f"run-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}",
+        "trace_id": uuid.uuid4().hex[:12],
+        "created_at": utc_now(),
+        "kind": "security",
+        "outcome": outcome,
+        "summary": summary,
+        "session_id": None,
+        "command": command,
+        "source": "scripts/agent_security.py",
+        "tags": tags or [],
+        "artifacts": [],
+    }
+    RUNLOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with RUNLOG_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+
+def is_ignored(path: Path) -> bool:
+    return bool(set(path.parts) & IGNORE_DIRS)
+
+
+def is_sensitive_path(path: Path) -> bool:
+    if SENSITIVE_BASENAME_RE.match(path.name):
+        return True
+    lowered_parts = {part.lower() for part in path.parts}
+    return bool(lowered_parts & SENSITIVE_COMPONENTS)
+
+
+def lexical_relative(path: Path) -> Path:
+    text = str(path)
+    if text.startswith("./"):
+        text = text[2:]
+    return Path(text)
+
+
+def sensitive_paths(limit: int) -> list[Path]:
+    rows: list[Path] = []
+    for path in sorted(Path(".").rglob("*")):
+        if len(rows) >= limit:
+            break
+        if not path.is_file() or is_ignored(path):
+            continue
+        rel = lexical_relative(path)
+        if is_sensitive_path(rel):
+            rows.append(rel)
+    return rows
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    config = load_config()
+    errors: list[str] = []
+    if config.get("schema") != "agent-security-v1":
+        errors.append(".agent/security.json schema must be agent-security-v1")
+    suites = config.get("suites", {})
+    for name in SUITES:
+        if name not in suites:
+            errors.append(f".agent/security.json missing suite: {name}")
+        elif not isinstance(suites[name], list):
+            errors.append(f".agent/security.json suite must be a list: {name}")
+    for error in errors:
+        print(f"error: {error}")
+    if errors:
+        return 1
+    print("agent security doctor passed")
+    return 0
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    config = load_config()
+    suites = config.get("suites", {})
+    for name in SUITES:
+        commands = suites.get(name, [])
+        print(f"{name}: {len(commands)} command(s)")
+        for command in commands:
+            print(f"  {command}")
+    return 0
+
+
+def cmd_scan_paths(args: argparse.Namespace) -> int:
+    rows = sensitive_paths(args.limit)
+    if not rows:
+        print("no sensitive-looking paths found")
+        record_runlog(outcome="pass", summary="sensitive path scan found no paths", command="scan-paths")
+        return 0
+    for path in rows:
+        print(f"warning: sensitive-looking path: {path}")
+    summary = f"sensitive path scan found {len(rows)} path(s)"
+    record_runlog(outcome="warn", summary=summary, command="scan-paths")
+    if args.fail_on_findings:
+        return 1
+    return 0
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    config = load_config()
+    suites = config.get("suites", {})
+    selected = args.suites or list(SUITES)
+    for suite in selected:
+        if suite not in SUITES:
+            print(f"error: unknown suite: {suite}", file=sys.stderr)
+            return 2
+        commands = suites.get(suite, [])
+        if not commands:
+            print(f"{suite}: no commands configured")
+            record_runlog(outcome="skipped", summary=f"{suite} has no commands configured", tags=[suite])
+            continue
+        for command in commands:
+            print(f"[{suite}] {command}")
+            result = subprocess.run(command, shell=True, text=True, check=False)
+            if result.returncode != 0:
+                record_runlog(
+                    outcome="fail",
+                    summary=f"{suite} failed with exit code {result.returncode}",
+                    command=command,
+                    tags=[suite],
+                )
+                return result.returncode
+            record_runlog(outcome="pass", summary=f"{suite} passed", command=command, tags=[suite])
+    print("agent security checks completed")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    doctor = subparsers.add_parser("doctor", help="Check security governance configuration")
+    doctor.set_defaults(func=cmd_doctor)
+
+    list_parser = subparsers.add_parser("list", help="List configured security suites")
+    list_parser.set_defaults(func=cmd_list)
+
+    scan = subparsers.add_parser("scan-paths", help="Find sensitive-looking paths without reading secrets")
+    scan.add_argument("--limit", type=int, default=100)
+    scan.add_argument("--fail-on-findings", action="store_true")
+    scan.set_defaults(func=cmd_scan_paths)
+
+    run = subparsers.add_parser("run", help="Run configured security suites")
+    run.add_argument("suites", nargs="*", choices=SUITES)
+    run.set_defaults(func=cmd_run)
+
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

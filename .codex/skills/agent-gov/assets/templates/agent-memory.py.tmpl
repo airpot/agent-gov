@@ -1,0 +1,643 @@
+#!/usr/bin/env python3
+"""Manage repo-local long-term agent memory."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sqlite3
+import sys
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+CONFIG_PATH = Path(".agent/memory.json")
+SESSION_ROOT = Path(".agent/sessions")
+DEFAULT_EVENTS = Path(".agent/memory/events.jsonl")
+DEFAULT_DB = Path(".agent/memory/index.sqlite3")
+DEFAULT_SUMMARIES = Path(".agent/memory/summaries")
+DEFAULT_LATEST = Path(".agent/memory/latest.md")
+DEFAULT_TAXONOMY = {
+    "episodic": {"kinds": ["session-summary", "handoff", "validation", "subagent-snapshot", "incident"]},
+    "semantic": {"kinds": ["project-fact", "architecture-fact", "dependency-fact", "api-behavior"]},
+    "procedural": {"kinds": ["workflow-rule", "validation-rule", "coding-rule", "review-rule"]},
+}
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def slugify(value: str) -> str:
+    value = value.strip().lower()
+    value = re.sub(r"[^a-z0-9]+", "-", value)
+    return re.sub(r"-+", "-", value).strip("-") or "memory"
+
+
+def load_json(path: Path, fallback: dict) -> dict:
+    if not path.exists():
+        return fallback
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def load_config() -> dict:
+    return load_json(
+        CONFIG_PATH,
+        {
+            "schema": "agent-memory-v1",
+            "stores": {
+                "events_jsonl": str(DEFAULT_EVENTS),
+                "sqlite_index": str(DEFAULT_DB),
+                "summary_dir": str(DEFAULT_SUMMARIES),
+                "latest_digest": str(DEFAULT_LATEST),
+            },
+            "privacy": {
+                "private_start": "<private>",
+                "private_end": "</private>",
+                "redaction_text": "[redacted-private]",
+            },
+            "taxonomy": DEFAULT_TAXONOMY,
+            "promotion_policy": {
+                "semantic_requires_source_path": True,
+                "procedural_requires_review_ref": True,
+                "procedural_requires_reviewed_true": True,
+            },
+        },
+    )
+
+
+def store_paths(config: dict) -> tuple[Path, Path, Path, Path]:
+    stores = config.get("stores", {})
+    return (
+        Path(stores.get("events_jsonl", str(DEFAULT_EVENTS))),
+        Path(stores.get("sqlite_index", str(DEFAULT_DB))),
+        Path(stores.get("summary_dir", str(DEFAULT_SUMMARIES))),
+        Path(stores.get("latest_digest", str(DEFAULT_LATEST))),
+    )
+
+
+def redact_private(text: str, config: dict) -> str:
+    privacy = config.get("privacy", {})
+    start = re.escape(privacy.get("private_start", "<private>"))
+    end = re.escape(privacy.get("private_end", "</private>"))
+    replacement = privacy.get("redaction_text", "[redacted-private]")
+    return re.sub(f"{start}.*?{end}", replacement, text, flags=re.DOTALL)
+
+
+def first_nonempty_lines(path: Path, limit: int = 80) -> list[str]:
+    if not path.exists():
+        return []
+    lines = [line.rstrip() for line in path.read_text(encoding="utf-8", errors="ignore").splitlines()]
+    return [line for line in lines if line.strip()][:limit]
+
+
+def active_session_id() -> str | None:
+    index = SESSION_ROOT / "index.json"
+    if not index.exists():
+        return None
+    data = json.loads(index.read_text(encoding="utf-8"))
+    return data.get("active_session")
+
+
+def ensure_files(config: dict) -> None:
+    events_path, _, summary_dir, latest_path = store_paths(config)
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_dir.mkdir(parents=True, exist_ok=True)
+    latest_path.parent.mkdir(parents=True, exist_ok=True)
+    events_path.touch(exist_ok=True)
+    (summary_dir / ".gitkeep").touch(exist_ok=True)
+
+
+def ensure_column(db: sqlite3.Connection, table: str, column: str, declaration: str) -> None:
+    rows = db.execute(f"PRAGMA table_info({table})").fetchall()
+    if column not in {row[1] for row in rows}:
+        db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+
+def ensure_store(config: dict) -> bool:
+    ensure_files(config)
+    _, db_path, _, _ = store_paths(config)
+    fts_enabled = False
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db_path) as db:
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memories (
+              id TEXT PRIMARY KEY,
+              created_at TEXT NOT NULL,
+              kind TEXT NOT NULL,
+              memory_class TEXT NOT NULL DEFAULT 'episodic',
+              session_id TEXT,
+              title TEXT NOT NULL,
+              summary TEXT NOT NULL,
+              source_path TEXT,
+              tags_json TEXT NOT NULL,
+              reviewed INTEGER NOT NULL DEFAULT 0,
+              review_ref TEXT,
+              confidence TEXT NOT NULL DEFAULT 'medium'
+            )
+            """
+        )
+        ensure_column(db, "memories", "memory_class", "TEXT NOT NULL DEFAULT 'episodic'")
+        ensure_column(db, "memories", "reviewed", "INTEGER NOT NULL DEFAULT 0")
+        ensure_column(db, "memories", "review_ref", "TEXT")
+        ensure_column(db, "memories", "confidence", "TEXT NOT NULL DEFAULT 'medium'")
+        try:
+            db.execute(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts
+                USING fts5(id UNINDEXED, title, summary, kind, session_id UNINDEXED)
+                """
+            )
+            fts_enabled = True
+        except sqlite3.OperationalError:
+            fts_enabled = False
+    return fts_enabled
+
+
+def taxonomy(config: dict) -> dict:
+    return config.get("taxonomy", DEFAULT_TAXONOMY)
+
+
+def infer_memory_class(kind: str, config: dict) -> str:
+    for memory_class, spec in taxonomy(config).items():
+        if kind in spec.get("kinds", []):
+            return memory_class
+    return "episodic"
+
+
+def validate_memory_policy(
+    *,
+    kind: str,
+    memory_class: str,
+    source_path: str | None,
+    reviewed: bool,
+    review_ref: str | None,
+    config: dict,
+) -> list[str]:
+    errors: list[str] = []
+    if memory_class not in taxonomy(config):
+        errors.append(f"unknown memory class: {memory_class}")
+    policy = config.get("promotion_policy", {})
+    if memory_class == "semantic" and policy.get("semantic_requires_source_path", True) and not source_path:
+        errors.append("semantic memory requires --source-path")
+    if memory_class == "procedural":
+        if policy.get("procedural_requires_reviewed_true", True) and not reviewed:
+            errors.append("procedural memory requires --reviewed")
+        if policy.get("procedural_requires_review_ref", True) and not review_ref:
+            errors.append("procedural memory requires --review-ref")
+    if kind in taxonomy(config).get("procedural", {}).get("kinds", []) and memory_class != "procedural":
+        errors.append(f"{kind} must use memory class procedural")
+    return errors
+
+
+def append_jsonl(path: Path, item: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+
+def iter_events(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    items: list[dict] = []
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        if not line.strip():
+            continue
+        try:
+            items.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return items
+
+
+def write_latest(config: dict, limit: int = 10) -> None:
+    events_path, _, _, latest_path = store_paths(config)
+    events = iter_events(events_path)[-limit:]
+    lines = ["# Agent Memory Digest", "", "Recent memory records:", ""]
+    if events:
+        for item in reversed(events):
+            memory_class = item.get("memory_class", infer_memory_class(item.get("kind", ""), config))
+            lines.append(
+                f"- `{item['id']}` {item['created_at']} [{memory_class}/{item['kind']}] {item['title']}"
+            )
+    else:
+        lines.append("- none")
+    lines.append("")
+    lines.append("Use `python3 .agent/tools/agent_memory.py detail <id>` for full stored summaries.")
+    latest_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def insert_sqlite(config: dict, item: dict) -> None:
+    _, db_path, _, _ = store_paths(config)
+    with sqlite3.connect(db_path) as db:
+        db.execute(
+            """
+            INSERT OR REPLACE INTO memories
+            (id, created_at, kind, memory_class, session_id, title, summary, source_path, tags_json, reviewed, review_ref, confidence)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                item["id"],
+                item["created_at"],
+                item["kind"],
+                item["memory_class"],
+                item.get("session_id"),
+                item["title"],
+                item["summary"],
+                item.get("source_path"),
+                json.dumps(item.get("tags", [])),
+                1 if item.get("reviewed") else 0,
+                item.get("review_ref"),
+                item.get("confidence", "medium"),
+            ),
+        )
+        try:
+            db.execute("DELETE FROM memories_fts WHERE id = ?", (item["id"],))
+            db.execute(
+                "INSERT INTO memories_fts (id, title, summary, kind, session_id) VALUES (?, ?, ?, ?, ?)",
+                (item["id"], item["title"], item["summary"], item["kind"], item.get("session_id")),
+            )
+        except sqlite3.OperationalError:
+            pass
+
+
+def record_memory(
+    *,
+    kind: str,
+    title: str,
+    summary: str,
+    session_id: str | None,
+    source_path: str | None,
+    tags: list[str],
+    memory_class: str | None,
+    reviewed: bool,
+    review_ref: str | None,
+    confidence: str,
+    config: dict,
+) -> dict:
+    ensure_store(config)
+    events_path, _, summary_dir, _ = store_paths(config)
+    created_at = utc_now()
+    clean_summary = redact_private(summary.strip(), config)
+    resolved_class = memory_class or infer_memory_class(kind, config)
+    errors = validate_memory_policy(
+        kind=kind,
+        memory_class=resolved_class,
+        source_path=source_path,
+        reviewed=reviewed,
+        review_ref=review_ref,
+        config=config,
+    )
+    if errors:
+        raise ValueError("; ".join(errors))
+    memory_id = (
+        f"{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-"
+        f"{slugify(kind)}-{slugify(title)[:32]}-{uuid.uuid4().hex[:8]}"
+    )
+    item = {
+        "schema": "agent-memory-record-v1",
+        "id": memory_id,
+        "created_at": created_at,
+        "kind": kind,
+        "memory_class": resolved_class,
+        "session_id": session_id,
+        "title": title.strip() or kind,
+        "summary": clean_summary,
+        "source_path": source_path,
+        "tags": tags,
+        "reviewed": reviewed,
+        "review_ref": review_ref,
+        "confidence": confidence,
+    }
+    append_jsonl(events_path, item)
+    insert_sqlite(config, item)
+    summary_path = summary_dir / f"{memory_id}.md"
+    summary_path.write_text(
+        f"# {item['title']}\n\n"
+        f"- ID: `{memory_id}`\n"
+        f"- Kind: `{kind}`\n"
+        f"- Class: `{resolved_class}`\n"
+        f"- Created: {created_at}\n"
+        f"- Session: {session_id or 'none'}\n"
+        f"- Source: {source_path or 'none'}\n"
+        f"- Tags: {', '.join(tags) if tags else 'none'}\n\n"
+        f"- Reviewed: {str(reviewed).lower()}\n"
+        f"- Review: {review_ref or 'none'}\n"
+        f"- Confidence: {confidence}\n\n"
+        f"## Summary\n\n{clean_summary}\n",
+        encoding="utf-8",
+    )
+    write_latest(config)
+    return item
+
+
+def session_summary(session_id: str, reason: str) -> tuple[str, str, str]:
+    directory = SESSION_ROOT / session_id
+    parts: list[str] = [f"Reason: {reason}", ""]
+    for name in ("handoff.md", "context.md", "changes.md", "validation.md", "decisions.md"):
+        path = directory / name
+        lines = first_nonempty_lines(path, 80)
+        if not lines:
+            continue
+        parts.extend([f"## {name}", "", *lines, ""])
+    title = f"Session {session_id} {reason}"
+    source = str(directory)
+    return title, "\n".join(parts).strip(), source
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    config = load_config()
+    fts_enabled = ensure_store(config)
+    write_latest(config)
+    print("agent memory store initialized")
+    print(f"fts_enabled: {str(fts_enabled).lower()}")
+    return 0
+
+
+def cmd_capture(args: argparse.Namespace) -> int:
+    config = load_config()
+    text = args.text
+    if text is None and not sys.stdin.isatty():
+        text = sys.stdin.read()
+    if not text:
+        print("error: provide --text or stdin", file=sys.stderr)
+        return 2
+    try:
+        item = record_memory(
+            kind=args.kind,
+            title=args.title or args.kind,
+            summary=text,
+            session_id=args.session_id,
+            source_path=args.source_path,
+            tags=args.tag,
+            memory_class=args.memory_class,
+            reviewed=args.reviewed,
+            review_ref=args.review_ref,
+            confidence=args.confidence,
+            config=config,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(f"recorded {item['id']}")
+    return 0
+
+
+def cmd_ingest_session(args: argparse.Namespace) -> int:
+    config = load_config()
+    session_id = args.session_id or active_session_id()
+    if not session_id:
+        print("warning: no active session to ingest")
+        return 0
+    directory = SESSION_ROOT / session_id
+    if not directory.exists():
+        print(f"error: session not found: {session_id}", file=sys.stderr)
+        return 1
+    title, summary, source = session_summary(session_id, args.reason)
+    if not summary:
+        print(f"warning: session has no summary content: {session_id}")
+        return 0
+    item = record_memory(
+        kind="session-summary",
+        title=title,
+        summary=summary,
+        session_id=session_id,
+        source_path=source,
+        tags=args.tag,
+        memory_class="episodic",
+        reviewed=False,
+        review_ref=None,
+        confidence="medium",
+        config=config,
+    )
+    print(f"ingested {item['id']}")
+    return 0
+
+
+def query_sqlite(config: dict, query: str, limit: int, memory_class: str | None = None) -> list[dict]:
+    _, db_path, _, _ = store_paths(config)
+    if not db_path.exists():
+        return []
+    try:
+        with sqlite3.connect(db_path) as db:
+            db.row_factory = sqlite3.Row
+            try:
+                rows = db.execute(
+                    """
+                    SELECT memories.*
+                    FROM memories_fts
+                    JOIN memories ON memories.id = memories_fts.id
+                    WHERE memories_fts MATCH ?
+                    ORDER BY memories.created_at DESC
+                    LIMIT ?
+                    """,
+                    (query, limit),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                pattern = f"%{query}%"
+                rows = db.execute(
+                    """
+                    SELECT * FROM memories
+                    WHERE title LIKE ? OR summary LIKE ? OR kind LIKE ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (pattern, pattern, pattern, limit),
+                ).fetchall()
+    except sqlite3.DatabaseError:
+        return []
+    result = [dict(row) for row in rows]
+    if memory_class:
+        result = [item for item in result if item.get("memory_class") == memory_class]
+    return result
+
+
+def cmd_search(args: argparse.Namespace) -> int:
+    config = load_config()
+    rows = query_sqlite(config, args.query, args.limit, args.memory_class)
+    if not rows:
+        events_path, _, _, _ = store_paths(config)
+        query = args.query.lower()
+        rows = [
+            item
+            for item in reversed(iter_events(events_path))
+            if (
+                query in item.get("title", "").lower()
+                or query in item.get("summary", "").lower()
+                or query in item.get("kind", "").lower()
+            )
+            and (args.memory_class is None or item.get("memory_class") == args.memory_class)
+        ][: args.limit]
+    for item in rows:
+        summary = item.get("summary", "").replace("\n", " ")
+        memory_class = item.get("memory_class", infer_memory_class(item.get("kind", ""), config))
+        print(f"{item['id']} | {item.get('created_at')} | {memory_class} | {item.get('kind')} | {item.get('title')}")
+        print(f"  {summary[:240]}")
+    return 0
+
+
+def cmd_timeline(args: argparse.Namespace) -> int:
+    config = load_config()
+    events_path, _, _, _ = store_paths(config)
+    rows = iter_events(events_path)
+    if args.memory_class:
+        rows = [item for item in rows if item.get("memory_class") == args.memory_class]
+    for item in reversed(rows[-args.limit :]):
+        memory_class = item.get("memory_class", infer_memory_class(item.get("kind", ""), config))
+        print(f"{item['created_at']} | {item['id']} | {memory_class} | {item['kind']} | {item['title']}")
+    return 0
+
+
+def find_event(memory_id: str, config: dict) -> dict | None:
+    events_path, _, _, _ = store_paths(config)
+    for item in iter_events(events_path):
+        if item.get("id") == memory_id:
+            return item
+    return None
+
+
+def cmd_promote(args: argparse.Namespace) -> int:
+    config = load_config()
+    source = find_event(args.memory_id, config)
+    if source is None:
+        print(f"error: memory id not found: {args.memory_id}", file=sys.stderr)
+        return 1
+    try:
+        item = record_memory(
+            kind=args.kind or source.get("kind", args.to),
+            title=args.title or f"Promoted {source.get('title', args.memory_id)}",
+            summary=source.get("summary", ""),
+            session_id=source.get("session_id"),
+            source_path=source.get("source_path") or source.get("id"),
+            tags=[*source.get("tags", []), "promoted"],
+            memory_class=args.to,
+            reviewed=args.reviewed,
+            review_ref=args.review_ref,
+            confidence=args.confidence,
+            config=config,
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(f"promoted {args.memory_id} -> {item['id']}")
+    return 0
+
+
+def cmd_detail(args: argparse.Namespace) -> int:
+    config = load_config()
+    events_path, _, _, _ = store_paths(config)
+    for item in iter_events(events_path):
+        if item.get("id") == args.memory_id:
+            print(json.dumps(item, indent=2, ensure_ascii=False))
+            return 0
+    print(f"error: memory id not found: {args.memory_id}", file=sys.stderr)
+    return 1
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    config = load_config()
+    errors: list[str] = []
+    warnings: list[str] = []
+    if config.get("schema") != "agent-memory-v1":
+        errors.append(".agent/memory.json schema must be agent-memory-v1")
+    for name in ("episodic", "semantic", "procedural"):
+        if name not in taxonomy(config):
+            errors.append(f".agent/memory.json taxonomy missing {name}")
+    events_path, db_path, summary_dir, latest_path = store_paths(config)
+    if args.write:
+        ensure_files(config)
+        write_latest(config)
+    for path in (events_path, summary_dir, latest_path):
+        if not path.exists():
+            errors.append(f"missing memory path: {path}")
+    if not db_path.exists():
+        warnings.append(f"sqlite index missing until memory ingest/init builds it: {db_path}")
+    else:
+        try:
+            with sqlite3.connect(db_path) as db:
+                db.execute("SELECT 1 FROM memories LIMIT 1")
+        except sqlite3.DatabaseError:
+            warnings.append("sqlite index unreadable; search falls back to JSONL matching")
+    events = iter_events(events_path)
+    for item in events:
+        memory_class = item.get("memory_class", infer_memory_class(item.get("kind", ""), config))
+        if memory_class == "procedural" and (not item.get("reviewed") or not item.get("review_ref")):
+            errors.append(f"procedural memory lacks review evidence: {item.get('id')}")
+    for warning in warnings:
+        print(f"warning: {warning}")
+    for error in errors:
+        print(f"error: {error}")
+    if errors:
+        return 1
+    print("agent memory doctor passed")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    init = subparsers.add_parser("init", help="Initialize the memory store")
+    init.set_defaults(func=cmd_init)
+
+    capture = subparsers.add_parser("capture", help="Capture a concise memory record")
+    capture.add_argument("--kind", required=True)
+    capture.add_argument("--title")
+    capture.add_argument("--text")
+    capture.add_argument("--session-id")
+    capture.add_argument("--source-path")
+    capture.add_argument("--tag", action="append", default=[])
+    capture.add_argument("--memory-class", choices=["episodic", "semantic", "procedural"])
+    capture.add_argument("--reviewed", action="store_true")
+    capture.add_argument("--review-ref")
+    capture.add_argument("--confidence", choices=["low", "medium", "high"], default="medium")
+    capture.set_defaults(func=cmd_capture)
+
+    ingest = subparsers.add_parser("ingest-session", help="Capture a session summary into memory")
+    ingest.add_argument("session_id", nargs="?")
+    ingest.add_argument("--reason", default="manual")
+    ingest.add_argument("--tag", action="append", default=[])
+    ingest.set_defaults(func=cmd_ingest_session)
+
+    search = subparsers.add_parser("search", help="Search progressive memory summaries")
+    search.add_argument("query")
+    search.add_argument("--limit", type=int, default=8)
+    search.add_argument("--memory-class", choices=["episodic", "semantic", "procedural"])
+    search.set_defaults(func=cmd_search)
+
+    timeline = subparsers.add_parser("timeline", help="Show recent memory records")
+    timeline.add_argument("--limit", type=int, default=10)
+    timeline.add_argument("--memory-class", choices=["episodic", "semantic", "procedural"])
+    timeline.set_defaults(func=cmd_timeline)
+
+    detail = subparsers.add_parser("detail", help="Show a full memory record")
+    detail.add_argument("memory_id")
+    detail.set_defaults(func=cmd_detail)
+
+    promote = subparsers.add_parser("promote", help="Promote a memory into semantic or procedural memory")
+    promote.add_argument("memory_id")
+    promote.add_argument("--to", choices=["semantic", "procedural"], required=True)
+    promote.add_argument("--kind")
+    promote.add_argument("--title")
+    promote.add_argument("--reviewed", action="store_true")
+    promote.add_argument("--review-ref")
+    promote.add_argument("--confidence", choices=["low", "medium", "high"], default="medium")
+    promote.set_defaults(func=cmd_promote)
+
+    doctor = subparsers.add_parser("doctor", help="Check memory store health")
+    doctor.add_argument("--write", action="store_true", help="Refresh memory stores while checking")
+    doctor.set_defaults(func=cmd_doctor)
+
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

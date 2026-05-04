@@ -1,0 +1,18 @@
+schema: spec-driven
+
+context: |
+  This repository uses OpenSpec as the canonical source for non-trivial change
+  proposals, designs, task lists, and spec deltas.
+  Agent session state lives in .agent/sessions/ and should reference OpenSpec
+  changes instead of duplicating their full content.
+
+rules:
+  proposal:
+    - State the user-visible goal and non-goals.
+    - Link related agent session ids when work spans multiple sessions.
+  design:
+    - Capture architecture decisions that should outlive a single chat session.
+    - Keep volatile progress updates in .agent/sessions/.
+  tasks:
+    - Include validation commands and checkpoint expectations for long-running work.
+

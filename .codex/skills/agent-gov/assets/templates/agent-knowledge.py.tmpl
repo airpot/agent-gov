@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""Check the repository knowledge store used by agents."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+HARNESS_PATH = Path(".agent/harness.json")
+
+
+def load_harness() -> dict:
+    if not HARNESS_PATH.exists():
+        print("error: .agent/harness.json is missing", file=sys.stderr)
+        raise SystemExit(1)
+    return json.loads(HARNESS_PATH.read_text(encoding="utf-8"))
+
+
+def load_manifest(path: Path) -> dict | None:
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        print(f"error: {path} is invalid JSON: {exc}", file=sys.stderr)
+        raise SystemExit(1)
+
+
+def doc_age_days(path: Path) -> int:
+    mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    return (datetime.now(timezone.utc) - mtime).days
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--strict-age", action="store_true", help="Fail when docs exceed max_doc_age_days")
+    args = parser.parse_args(argv)
+
+    harness = load_harness()
+    knowledge = harness.get("knowledge", {})
+    invariants = harness.get("invariants", {})
+    required_docs = [Path(path) for path in knowledge.get("required_docs", [])]
+    index = Path(knowledge.get("index", "docs/index.md"))
+    manifest_path = Path(knowledge.get("manifest", ".agent/knowledge.json"))
+    manifest = load_manifest(manifest_path)
+    max_age = invariants.get("max_doc_age_days")
+
+    errors: list[str] = []
+    warnings: list[str] = []
+    for path in [index, *required_docs]:
+        if not path.exists():
+            errors.append(f"missing doc: {path}")
+            continue
+        text = path.read_text(encoding="utf-8")
+        if len(text.strip()) < 40:
+            warnings.append(f"doc is very short: {path}")
+        if max_age is not None and doc_age_days(path) > int(max_age):
+            message = f"doc may be stale: {path} ({doc_age_days(path)} days)"
+            if args.strict_age:
+                errors.append(message)
+            else:
+                warnings.append(message)
+
+    if index.exists():
+        index_text = index.read_text(encoding="utf-8")
+        for path in required_docs:
+            if str(path) not in index_text and path.name not in index_text:
+                warnings.append(f"index does not mention {path}")
+
+    if manifest is None:
+        warnings.append(f"knowledge manifest missing: {manifest_path}")
+    else:
+        if manifest.get("schema") != "agent-knowledge-v1":
+            errors.append(f"knowledge manifest schema must be agent-knowledge-v1: {manifest_path}")
+        docs = manifest.get("documents", [])
+        if not isinstance(docs, list):
+            errors.append("knowledge manifest documents must be a list")
+        else:
+            by_path = {item.get("path"): item for item in docs if isinstance(item, dict)}
+            for path in [index, *required_docs]:
+                item = by_path.get(str(path))
+                if item is None:
+                    warnings.append(f"knowledge manifest does not track {path}")
+                    continue
+                if not item.get("owner"):
+                    errors.append(f"knowledge manifest missing owner for {path}")
+                if not item.get("last_reviewed"):
+                    errors.append(f"knowledge manifest missing last_reviewed for {path}")
+                if not isinstance(item.get("source_links", []), list):
+                    errors.append(f"knowledge manifest source_links must be a list for {path}")
+                if not isinstance(item.get("known_stale_sections", []), list):
+                    errors.append(f"knowledge manifest known_stale_sections must be a list for {path}")
+
+    for warning in warnings:
+        print(f"warning: {warning}")
+    for error in errors:
+        print(f"error: {error}")
+
+    if errors:
+        return 1
+    print("agent knowledge check passed")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

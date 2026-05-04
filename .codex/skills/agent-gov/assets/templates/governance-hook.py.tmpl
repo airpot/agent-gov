@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+"""Advisory governance hook for Codex and Claude adapters."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+
+def find_root(start: Path) -> Path:
+    for path in [start, *start.parents]:
+        if (path / ".agent").is_dir():
+            return path
+    return start
+
+
+def run(command: list[str], cwd: Path) -> tuple[int, str, str]:
+    try:
+        result = subprocess.run(command, cwd=cwd, text=True, capture_output=True, check=False)
+    except OSError as exc:
+        return 127, "", str(exc)
+    return result.returncode, result.stdout.strip(), result.stderr.strip()
+
+
+def excerpt(text: str, limit: int = 80) -> str:
+    lines = text.splitlines()
+    return "\n".join(lines[:limit])
+
+
+def active_session_id(root: Path) -> str | None:
+    index = root / ".agent" / "sessions" / "index.json"
+    if not index.exists():
+        return None
+    try:
+        data = json.loads(index.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+    return data.get("active_session")
+
+
+def session_start(root: Path) -> int:
+    tool = root / ".agent" / "tools" / "agent_session.py"
+    if not tool.exists():
+        print("governance hook: .agent/tools/agent_session.py is missing")
+        return 0
+
+    code, stdout, stderr = run([sys.executable, str(tool), "status"], root)
+    if stdout:
+        print(stdout)
+    if stderr:
+        print(stderr)
+    if code != 0:
+        print("governance hook: status reported errors; inspect .agent/sessions before editing")
+        return 0
+
+    bootstrap = root / ".agent" / "sessions" / "bootstrap.md"
+    if bootstrap.exists():
+        print("\n# Governance Bootstrap Excerpt\n")
+        print(excerpt(bootstrap.read_text(encoding="utf-8")))
+    memory_tool = root / ".agent" / "tools" / "agent_memory.py"
+    if memory_tool.exists():
+        code, stdout, _ = run([sys.executable, str(memory_tool), "timeline", "--limit", "5"], root)
+        if code == 0 and stdout:
+            print("\n# Recent Agent Memory\n")
+            print(stdout)
+    context_tool = root / ".agent" / "tools" / "agent_context.py"
+    if context_tool.exists():
+        code, stdout, _ = run([sys.executable, str(context_tool), "scan", "--limit", "5", "--no-write"], root)
+        if code == 0 and stdout:
+            print("\n# Context Budget\n")
+            print(stdout)
+    capabilities_tool = root / "scripts" / "agent_capabilities.py"
+    if capabilities_tool.exists():
+        code, stdout, _ = run([sys.executable, str(capabilities_tool), "list", "--enabled"], root)
+        if code == 0 and stdout:
+            print("\n# Enabled Capabilities\n")
+            print(excerpt(stdout, 30))
+    return 0
+
+
+def stop(root: Path) -> int:
+    memory_tool = root / ".agent" / "tools" / "agent_memory.py"
+    if memory_tool.exists():
+        run([sys.executable, str(memory_tool), "ingest-session", "--reason", "hook-stop"], root)
+    context_tool = root / ".agent" / "tools" / "agent_context.py"
+    if context_tool.exists():
+        run([sys.executable, str(context_tool), "scan", "--limit", "5"], root)
+    runlog_tool = root / "scripts" / "agent_runlog.py"
+    if runlog_tool.exists():
+        run(
+            [
+                sys.executable,
+                str(runlog_tool),
+                "record",
+                "--kind",
+                "hook",
+                "--outcome",
+                "info",
+                "--summary",
+                "stop hook checked governance handoff state",
+                "--source",
+                ".agent/tools/governance_hook.py",
+            ],
+            root,
+        )
+    if active_session_id(root):
+        print(
+            "governance hook: checkpoint meaningful changes with "
+            "`python3 .agent/tools/agent_session.py checkpoint --summary \"...\"` "
+            "or compact before handoff."
+        )
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--event", choices=["session-start", "stop"], required=True)
+    args = parser.parse_args(argv)
+
+    root = find_root(Path.cwd().resolve())
+    if args.event == "session-start":
+        return session_start(root)
+    if args.event == "stop":
+        return stop(root)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

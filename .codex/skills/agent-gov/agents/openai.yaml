@@ -1,0 +1,5 @@
+interface:
+  display_name: "Agent Gov"
+  short_description: "Govern agent-ready projects"
+  default_prompt: "Use $agent-gov to govern an agent-ready repository."
+

@@ -1,0 +1,113 @@
+#!/usr/bin/env python3
+"""Inspect the agent capability and integration registry."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+
+CONFIG_PATH = Path(".agent/capabilities.json")
+REQUIRED_FIELDS = {"id", "kind", "provider", "enabled", "risk", "owner", "description", "permissions"}
+
+
+def load_config() -> dict:
+    if not CONFIG_PATH.exists():
+        print(f"error: missing {CONFIG_PATH}", file=sys.stderr)
+        raise SystemExit(1)
+    return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+
+
+def capabilities(config: dict) -> list[dict]:
+    return list(config.get("capabilities", []))
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    config = load_config()
+    rows = capabilities(config)
+    if args.enabled:
+        rows = [row for row in rows if row.get("enabled") is True]
+    if args.risk:
+        rows = [row for row in rows if row.get("risk") == args.risk]
+    for row in rows:
+        enabled = "enabled" if row.get("enabled") else "disabled"
+        print(
+            f"{row.get('id')} | {row.get('kind')} | {row.get('provider')} | "
+            f"{row.get('risk')} | {enabled} | owner={row.get('owner')}"
+        )
+        print(f"  {row.get('description', '')}")
+    return 0
+
+
+def cmd_json(args: argparse.Namespace) -> int:
+    config = load_config()
+    print(json.dumps(config, indent=2))
+    return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    config = load_config()
+    errors: list[str] = []
+    warnings: list[str] = []
+    if config.get("schema") != "agent-capabilities-v1":
+        errors.append(".agent/capabilities.json schema must be agent-capabilities-v1")
+    risk_values = set(config.get("risk_values", ["low", "medium", "high"]))
+    seen: set[str] = set()
+    for index, item in enumerate(capabilities(config), start=1):
+        missing = sorted(REQUIRED_FIELDS - set(item))
+        if missing:
+            errors.append(f"capability #{index} missing fields: {', '.join(missing)}")
+        cap_id = item.get("id")
+        if not cap_id:
+            continue
+        if cap_id in seen:
+            errors.append(f"duplicate capability id: {cap_id}")
+        seen.add(cap_id)
+        if item.get("risk") not in risk_values:
+            errors.append(f"{cap_id} has invalid risk: {item.get('risk')}")
+        permissions = item.get("permissions", {})
+        if not isinstance(permissions, dict):
+            errors.append(f"{cap_id} permissions must be an object")
+        if item.get("enabled") and not item.get("validation"):
+            warnings.append(f"{cap_id} has no validation command")
+        if item.get("risk") == "high" and item.get("enabled"):
+            warnings.append(f"{cap_id} is high risk; record use in .agent/runlog.jsonl")
+    if not capabilities(config):
+        errors.append(".agent/capabilities.json has no capabilities")
+    for warning in warnings:
+        print(f"warning: {warning}")
+    for error in errors:
+        print(f"error: {error}")
+    if errors:
+        return 1
+    print("agent capabilities doctor passed")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    list_parser = subparsers.add_parser("list", help="List registered capabilities")
+    list_parser.add_argument("--enabled", action="store_true", help="Only show enabled capabilities")
+    list_parser.add_argument("--risk", choices=["low", "medium", "high"])
+    list_parser.set_defaults(func=cmd_list)
+
+    json_parser = subparsers.add_parser("json", help="Print the raw registry")
+    json_parser.set_defaults(func=cmd_json)
+
+    doctor = subparsers.add_parser("doctor", help="Check capability registry health")
+    doctor.set_defaults(func=cmd_doctor)
+
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

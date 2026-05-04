@@ -1,0 +1,58 @@
+# Quality
+
+## Commands
+
+Configure executable feedback commands in `.agent/harness.json`.
+
+```bash
+python3 scripts/agent_validate.py --list
+python3 scripts/agent_validate.py
+python3 scripts/agent_runlog.py tail --limit 10
+```
+
+Technology stack: {{tech_stack}}
+
+Skill distribution checks:
+
+```bash
+python3 scripts/agent_sync_skills.py --dry-run
+```
+
+Context budget checks:
+
+```bash
+python3 .agent/tools/agent_context.py scan --limit 10
+python3 .agent/tools/agent_context.py suggest
+```
+
+Capability checks:
+
+```bash
+python3 scripts/agent_capabilities.py doctor
+python3 scripts/agent_capabilities.py list --enabled
+```
+
+Tooling and security checks:
+
+```bash
+python3 scripts/agent_tooling.py doctor
+python3 scripts/agent_security.py doctor
+python3 scripts/agent_score.py score --write
+python3 scripts/agent_security.py scan-paths
+```
+
+## Expectations
+
+- Add or update tests for risky behavior changes.
+- Record skipped validation in the active session's `validation.md`.
+- Run review-fix loops for substantial changes.
+- When subagents are used, validate integrated changes after accepting their snapshots.
+- Validation commands should append compact pass/fail evidence to `.agent/runlog.jsonl`.
+- Use `scripts/agent_tooling.py` when normal shell output would be too large or ambiguous.
+- Configure optional security suites in `.agent/security.json`; record skipped suites in runlog or validation notes.
+- Run `scripts/agent_score.py score --write` periodically to catch governance drift.
+- Keep native Codex/Claude adapters consistent with `.agent/subagents.json`, `.agent/hooks.json`, and `.agent/skill-distribution.json`.
+- Before relying on remembered context, retrieve it through `agent_memory.py search` or `detail` and distinguish stored facts from current repository state.
+- Promote memory deliberately: `episodic` for session history, `semantic` for sourced facts, and `procedural` only after review.
+- Keep `AGENTS.md`, `CLAUDE.md`, docs, session bootstraps, and subagent outputs within `.agent/context.json` budgets.
+- Use ADRs for accepted long-term decisions, RFCs for broad proposals, and postmortems for incidents.

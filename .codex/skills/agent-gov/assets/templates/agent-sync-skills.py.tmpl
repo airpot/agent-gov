@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+"""Synchronize project skills into current Codex and Claude skill directories."""
+
+from __future__ import annotations
+
+import argparse
+import shutil
+import sys
+from pathlib import Path
+
+
+IGNORE_DIRS = {"__pycache__", ".git", ".skvm"}
+IGNORE_SUFFIXES = {".pyc", ".pyo", ".log"}
+
+
+def should_skip(path: Path) -> bool:
+    return path.name in IGNORE_DIRS or path.suffix in IGNORE_SUFFIXES
+
+
+def copy_tree(source: Path, dest: Path, force: bool, dry_run: bool) -> tuple[list[str], list[str]]:
+    copied: list[str] = []
+    skipped: list[str] = []
+    if not source.exists():
+        return copied, skipped
+    for item in source.rglob("*"):
+        if any(part in IGNORE_DIRS for part in item.parts):
+            continue
+        if item.is_dir() or should_skip(item):
+            continue
+        relative = item.relative_to(source)
+        target = dest / relative
+        if target.exists() and not force:
+            skipped.append(str(target))
+            continue
+        copied.append(str(target))
+        if not dry_run:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(item, target)
+    return copied, skipped
+
+
+def sync(source: Path, dest: Path, force: bool, dry_run: bool) -> int:
+    copied, skipped = copy_tree(source, dest, force, dry_run)
+    print(f"source: {source}")
+    print(f"dest: {dest}")
+    print(f"copied: {len(copied)}")
+    print(f"skipped: {len(skipped)}")
+    if skipped:
+        print("rerun with --force to overwrite existing synchronized skills")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source", default=".codex/skills")
+    parser.add_argument("--codex-dest", default=".agents/skills")
+    parser.add_argument("--claude-dest", default=".claude/skills")
+    parser.add_argument("--no-claude", action="store_true")
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    args = parser.parse_args(argv)
+
+    source = Path(args.source)
+    if not source.exists():
+        print(f"warning: skill source missing: {source}")
+        return 0
+    sync(source, Path(args.codex_dest), args.force, args.dry_run)
+    if not args.no_claude:
+        sync(source, Path(args.claude_dest), args.force, args.dry_run)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

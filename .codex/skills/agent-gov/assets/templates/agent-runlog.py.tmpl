@@ -1,0 +1,151 @@
+#!/usr/bin/env python3
+"""Record and inspect the agent governance runlog."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import uuid
+from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+RUNLOG_PATH = Path(".agent/runlog.jsonl")
+OUTCOMES = {"pass", "fail", "warn", "info", "skipped", "started", "completed"}
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def append_jsonl(path: Path, item: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+
+def iter_events(path: Path = RUNLOG_PATH) -> list[dict]:
+    if not path.exists():
+        return []
+    events: list[dict] = []
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        if not line.strip():
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            events.append({"schema": "invalid", "raw": line})
+    return events
+
+
+def cmd_record(args: argparse.Namespace) -> int:
+    outcome = args.outcome
+    item = {
+        "schema": "agent-runlog-event-v1",
+        "id": f"run-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}",
+        "trace_id": args.trace_id or uuid.uuid4().hex[:12],
+        "created_at": utc_now(),
+        "kind": args.kind,
+        "outcome": outcome,
+        "summary": args.summary,
+        "session_id": args.session_id,
+        "command": args.command,
+        "source": args.source,
+        "tags": args.tag,
+        "artifacts": args.artifact,
+    }
+    append_jsonl(RUNLOG_PATH, item)
+    print(item["id"])
+    return 0
+
+
+def cmd_tail(args: argparse.Namespace) -> int:
+    rows = iter_events()[-args.limit :]
+    for item in rows:
+        if item.get("schema") == "invalid":
+            print(f"invalid | {item.get('raw')}")
+            continue
+        print(
+            f"{item.get('created_at')} | {item.get('id')} | {item.get('kind')} | "
+            f"{item.get('outcome')} | trace={item.get('trace_id')}"
+        )
+        print(f"  {item.get('summary', '')}")
+    return 0
+
+
+def cmd_summary(args: argparse.Namespace) -> int:
+    rows = [item for item in iter_events() if item.get("schema") == "agent-runlog-event-v1"]
+    by_kind = Counter(item.get("kind", "unknown") for item in rows)
+    by_outcome = Counter(item.get("outcome", "unknown") for item in rows)
+    print(f"events: {len(rows)}")
+    print("by kind:")
+    for key, count in sorted(by_kind.items()):
+        print(f"  {key}: {count}")
+    print("by outcome:")
+    for key, count in sorted(by_outcome.items()):
+        print(f"  {key}: {count}")
+    return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    errors: list[str] = []
+    warnings: list[str] = []
+    RUNLOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    RUNLOG_PATH.touch(exist_ok=True)
+    for index, item in enumerate(iter_events(), start=1):
+        if item.get("schema") != "agent-runlog-event-v1":
+            errors.append(f"invalid runlog JSON at line {index}")
+            continue
+        for field in ("id", "trace_id", "created_at", "kind", "outcome", "summary"):
+            if field not in item:
+                errors.append(f"runlog line {index} missing {field}")
+        if item.get("outcome") not in OUTCOMES:
+            warnings.append(f"runlog line {index} has nonstandard outcome: {item.get('outcome')}")
+    for warning in warnings:
+        print(f"warning: {warning}")
+    for error in errors:
+        print(f"error: {error}")
+    if errors:
+        return 1
+    print("agent runlog doctor passed")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    record = subparsers.add_parser("record", help="Append a runlog event")
+    record.add_argument("--kind", required=True)
+    record.add_argument("--outcome", required=True, choices=sorted(OUTCOMES))
+    record.add_argument("--summary", required=True)
+    record.add_argument("--trace-id")
+    record.add_argument("--session-id")
+    record.add_argument("--command")
+    record.add_argument("--source")
+    record.add_argument("--tag", action="append", default=[])
+    record.add_argument("--artifact", action="append", default=[])
+    record.set_defaults(func=cmd_record)
+
+    tail = subparsers.add_parser("tail", help="Show recent runlog events")
+    tail.add_argument("--limit", type=int, default=10)
+    tail.set_defaults(func=cmd_tail)
+
+    summary = subparsers.add_parser("summary", help="Summarize runlog events")
+    summary.set_defaults(func=cmd_summary)
+
+    doctor = subparsers.add_parser("doctor", help="Check runlog health")
+    doctor.set_defaults(func=cmd_doctor)
+
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

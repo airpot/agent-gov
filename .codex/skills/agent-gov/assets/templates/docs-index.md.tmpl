@@ -1,0 +1,31 @@
+# Agent Knowledge Index
+
+Use these documents for durable project knowledge. Keep `AGENTS.md` short and link here instead of expanding always-loaded instructions.
+
+Knowledge metadata is tracked in `.agent/knowledge.json`. Update `owner`, `last_reviewed`, `source_links`, and `known_stale_sections` when durable knowledge changes.
+Cross-session working memory is tracked in `.agent/memory.json` and `.agent/memory/`. Store summaries, decisions, validation, and retrieval handles; do not store raw transcripts.
+Capability governance is tracked in `.agent/capabilities.json`. Run evidence is tracked in `.agent/runlog.jsonl`.
+Agent-facing inspection limits are tracked in `.agent/tooling.json`. Security and supply-chain suites are tracked in `.agent/security.json`.
+Governance health scoring is tracked in `.agent/evals.json` and `.agent/evals/latest.md`.
+
+- [Architecture](ARCHITECTURE.md): system boundaries, dependency direction, and major design decisions.
+- [Quality](QUALITY.md): build, test, lint, typecheck, and review expectations.
+- [Reliability](RELIABILITY.md): runtime behavior, observability, rollback, and operational risks.
+- [Security](SECURITY.md): secrets, auth, sensitive data, and dependency risk rules.
+- [Agent Tooling](TOOLING.md): bounded repository inspection, search, and output rules.
+- [Governance Score](QUALITY_SCORE.md): local score dimensions, dashboard, and drift signals.
+- [Tech Debt](tech-debt.md): known debt, cleanup candidates, and follow-up work.
+- [ADRs](adr/README.md): durable architecture decisions.
+- [RFCs](rfcs/README.md): pre-change design proposals.
+- [Incidents](incidents/README.md): postmortems and reliability learning.
+
+Update `.agent/harness.json` when validation commands or required docs change.
+Update `.agent/subagents.json` when delegated agent roles, boundaries, or snapshot rules change.
+Update `.agent/hooks.json` when session bootstrap, checkpoint, or native hook adapter behavior changes.
+Update `.agent/memory.json` when memory stores, privacy tags, or retention policy change.
+Update `.agent/capabilities.json` when agent-visible tools, external integrations, permissions, owners, or risk levels change.
+Update `.agent/runlog.jsonl` through `scripts/agent_runlog.py` or generated validation/session tools; do not edit raw evidence unless repairing invalid JSONL.
+Update `.agent/tooling.json` when output limits, ignored directories, or bounded inspection rules change.
+Update `.agent/security.json` when policy-as-code, secret scan, dependency audit, SBOM, or license scan commands change.
+Update `.agent/evals.json` when score dimensions, thresholds, cadence, or dashboard stores change.
+Update `.agent/skill-distribution.json` when project skill synchronization paths change.

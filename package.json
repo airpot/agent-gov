@@ -1,0 +1,50 @@
+{
+  "name": "@airpot/agent-gov",
+  "version": "0.1.0",
+  "description": "One-command project governance initializer for Codex and Claude agent workflows.",
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/airpot/agent-gov.git"
+  },
+  "homepage": "https://github.com/airpot/agent-gov#readme",
+  "bugs": {
+    "url": "https://github.com/airpot/agent-gov/issues"
+  },
+  "bin": {
+    "agent-gov": "npm/bin/agent-gov.mjs"
+  },
+  "files": [
+    ".codex/skills/agent-gov",
+    ".codex/skills/openspec-apply-change",
+    ".codex/skills/openspec-archive-change",
+    ".codex/skills/openspec-explore",
+    ".codex/skills/openspec-propose",
+    "npm",
+    "README.md",
+    "LICENSE",
+    "!**/__pycache__/**",
+    "!**/*.pyc",
+    "!**/*.pyo",
+    "!**/*.log"
+  ],
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "validate": "node --check npm/bin/agent-gov.mjs && npm pack --dry-run",
+    "pack:dry-run": "npm pack --dry-run"
+  },
+  "keywords": [
+    "codex",
+    "claude",
+    "agents",
+    "governance",
+    "openspec",
+    "skill"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

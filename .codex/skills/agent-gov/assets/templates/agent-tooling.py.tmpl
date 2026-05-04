@@ -1,0 +1,273 @@
+#!/usr/bin/env python3
+"""Agent-facing bounded repository inspection tools."""
+
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import json
+import re
+import sys
+from pathlib import Path
+
+
+CONFIG_PATH = Path(".agent/tooling.json")
+SENSITIVE_BASENAME_RE = re.compile(
+    r"(?ix)^("
+    r"\.env(\..+)?"
+    r"|\.netrc"
+    r"|credentials(\..+)?"
+    r"|secrets?(\..+)?"
+    r"|passwords?(\..+)?"
+    r"|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?"
+    r"|authorized_keys"
+    r"|known_hosts"
+    r"|.*\.(pem|key|p12|pfx|crt|cer|jks|keystore|asc|gpg)"
+    r")$"
+)
+SENSITIVE_COMPONENTS = {".ssh", ".aws", ".gnupg", ".kube", ".docker"}
+DEFAULT_LIMITS = {
+    "max_read_lines": 160,
+    "max_read_bytes": 200000,
+    "max_search_matches": 80,
+    "max_search_files": 5000,
+    "max_line_chars": 240,
+    "max_file_list": 200,
+}
+
+
+def load_config() -> dict:
+    if CONFIG_PATH.exists():
+        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    return {
+        "schema": "agent-tooling-v1",
+        "limits": DEFAULT_LIMITS,
+        "ignore_dirs": [".git", ".agent/memory", ".agent/context", "node_modules", "dist", "build", "target", "__pycache__"],
+    }
+
+
+def limits(config: dict) -> dict:
+    merged = dict(DEFAULT_LIMITS)
+    merged.update(config.get("limits", {}))
+    return merged
+
+
+def rel_path(path: Path) -> Path:
+    root = Path.cwd().resolve()
+    resolved = path.resolve()
+    try:
+        return resolved.relative_to(root)
+    except ValueError:
+        raise ValueError(f"path is outside repository: {path}")
+
+
+def is_sensitive_path(path: Path) -> bool:
+    if SENSITIVE_BASENAME_RE.match(path.name):
+        return True
+    lowered_parts = {part.lower() for part in path.parts}
+    return bool(lowered_parts & SENSITIVE_COMPONENTS)
+
+
+def is_ignored(path: Path, config: dict) -> bool:
+    rel = str(path).replace("\\", "/")
+    parts = set(path.parts)
+    for item in config.get("ignore_dirs", []):
+        clean = item.strip("/").replace("\\", "/")
+        if not clean:
+            continue
+        if clean in parts or rel == clean or rel.startswith(clean + "/"):
+            return True
+    return False
+
+
+def matches_pattern(path: Path, pattern: str) -> bool:
+    rel_text = str(path).replace("\\", "/")
+    if pattern in {"*", "**/*"}:
+        return True
+    if fnmatch.fnmatch(rel_text, pattern):
+        return True
+    if pattern.startswith("**/") and fnmatch.fnmatch(rel_text, pattern[3:]):
+        return True
+    return False
+
+
+def is_binary(path: Path) -> bool:
+    try:
+        chunk = path.read_bytes()[:4096]
+    except OSError:
+        return True
+    return b"\0" in chunk
+
+
+def iter_files(pattern: str, config: dict, max_files: int) -> tuple[list[Path], bool]:
+    rows: list[Path] = []
+    truncated = False
+    for path in sorted(Path(".").rglob("*")):
+        if len(rows) >= max_files:
+            truncated = True
+            break
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            rel = rel_path(path)
+        except ValueError:
+            continue
+        if is_ignored(rel, config) or is_sensitive_path(rel):
+            continue
+        if matches_pattern(rel, pattern):
+            rows.append(rel)
+    return rows, truncated
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    config = load_config()
+    errors: list[str] = []
+    if config.get("schema") != "agent-tooling-v1":
+        errors.append(".agent/tooling.json schema must be agent-tooling-v1")
+    for key in DEFAULT_LIMITS:
+        if key not in limits(config):
+            errors.append(f".agent/tooling.json missing limit: {key}")
+    for error in errors:
+        print(f"error: {error}")
+    if errors:
+        return 1
+    print("agent tooling doctor passed")
+    return 0
+
+
+def cmd_files(args: argparse.Namespace) -> int:
+    config = load_config()
+    cap = min(args.limit, int(limits(config)["max_file_list"]))
+    rows, truncated = iter_files(args.glob, config, cap)
+    if not rows:
+        print("no files")
+        return 0
+    for path in rows:
+        print(path)
+    if truncated:
+        print(f"truncated: listed first {len(rows)} files")
+    return 0
+
+
+def cmd_read(args: argparse.Namespace) -> int:
+    config = load_config()
+    limit_config = limits(config)
+    requested = Path(args.path)
+    if requested.is_symlink():
+        print(f"error: symlink path refused: {requested}", file=sys.stderr)
+        return 2
+    try:
+        rel = rel_path(requested)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    if is_ignored(rel, config):
+        print(f"error: ignored path: {rel}", file=sys.stderr)
+        return 2
+    if is_sensitive_path(rel):
+        print(f"error: sensitive-looking path refused: {rel}", file=sys.stderr)
+        return 2
+    path = Path(rel)
+    if not path.exists() or not path.is_file():
+        print(f"error: file not found: {rel}", file=sys.stderr)
+        return 1
+    if path.stat().st_size > int(limit_config["max_read_bytes"]):
+        print(f"warning: large file; reading selected lines only: {rel}")
+    if is_binary(path):
+        print(f"error: binary file refused: {rel}", file=sys.stderr)
+        return 2
+    max_lines = min(args.limit, int(limit_config["max_read_lines"]))
+    start = max(args.start, 1)
+    end = start + max_lines - 1
+    max_chars = int(limit_config["max_line_chars"])
+    printed = 0
+    for number, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
+        if number < start:
+            continue
+        if number > end:
+            break
+        text = line[:max_chars]
+        suffix = " ..." if len(line) > max_chars else ""
+        print(f"{rel}:{number}: {text}{suffix}")
+        printed += 1
+    if printed == 0:
+        print(f"no lines in range: {rel}:{start}-{end}")
+    return 0
+
+
+def cmd_search(args: argparse.Namespace) -> int:
+    config = load_config()
+    limit_config = limits(config)
+    max_files = int(limit_config["max_search_files"])
+    rows, truncated_files = iter_files(args.glob, config, max_files)
+    if args.regex:
+        try:
+            regex = re.compile(args.query)
+        except re.error as exc:
+            print(f"error: invalid regex: {exc}", file=sys.stderr)
+            return 2
+    else:
+        regex = None
+        query = args.query.lower()
+    max_matches = min(args.limit, int(limit_config["max_search_matches"]))
+    max_chars = int(limit_config["max_line_chars"])
+    matches = 0
+    scanned = 0
+    for rel in rows:
+        path = Path(rel)
+        if is_binary(path) or path.stat().st_size > int(limit_config["max_read_bytes"]):
+            continue
+        scanned += 1
+        for number, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
+            hit = bool(regex.search(line)) if regex else query in line.lower()
+            if not hit:
+                continue
+            text = line.strip()[:max_chars]
+            suffix = " ..." if len(line.strip()) > max_chars else ""
+            print(f"{rel}:{number}: {text}{suffix}")
+            matches += 1
+            if matches >= max_matches:
+                print(f"truncated: first {matches} matches from {scanned} scanned files")
+                return 0
+    if matches == 0:
+        print(f"no matches: scanned {scanned} files")
+    elif truncated_files:
+        print(f"file scan truncated at {max_files} files")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    doctor = subparsers.add_parser("doctor", help="Check tooling configuration")
+    doctor.set_defaults(func=cmd_doctor)
+
+    files = subparsers.add_parser("files", help="List bounded repository files")
+    files.add_argument("--glob", default="**/*")
+    files.add_argument("--limit", type=int, default=80)
+    files.set_defaults(func=cmd_files)
+
+    read = subparsers.add_parser("read", help="Read a bounded line range")
+    read.add_argument("path")
+    read.add_argument("--start", type=int, default=1)
+    read.add_argument("--limit", type=int, default=120)
+    read.set_defaults(func=cmd_read)
+
+    search = subparsers.add_parser("search", help="Search repository text with bounded output")
+    search.add_argument("query")
+    search.add_argument("--glob", default="**/*")
+    search.add_argument("--limit", type=int, default=40)
+    search.add_argument("--regex", action="store_true")
+    search.set_defaults(func=cmd_search)
+
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

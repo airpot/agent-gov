@@ -1,0 +1,17 @@
+# Resume Prompt: {{session_id}}
+
+Continue the agent development session for this repository.
+
+1. `cd {{workspace_path}}`
+2. Read `.agent/sessions/active.md`.
+3. Read `.agent/sessions/{{session_id}}/handoff.md`.
+4. Read `.agent/sessions/{{session_id}}/context.md`.
+5. Read `.agent/sessions/{{session_id}}/changes.md`.
+6. Read `.agent/sessions/{{session_id}}/validation.md`.
+7. If linked, read the OpenSpec change: `{{openspec_change}}`.
+8. Read accepted or rejected subagent snapshots recorded in handoff, changes, or validation notes.
+9. Run `python3 .agent/tools/agent_context.py scan --limit 10` if context size or stale bootstrap state is unclear.
+10. Run `git status --short`.
+11. Confirm current branch, dirty files, validation status, and the next task before editing.
+
+Do not rely on prior chat history, VS Code tabs, selected text, or terminal scrollback.
