@@ -76,6 +76,37 @@ def main() -> int:
             print("invalid JSON was not reported as project integrity failure", file=sys.stderr)
             print(combined_output, file=sys.stderr)
             return 1
+
+        existing = temp_root / "existing-layout"
+        for directory in ("cmd", "pkg", "docs", "scripts"):
+            (existing / directory).mkdir(parents=True, exist_ok=True)
+        run(
+            [
+                python,
+                str(INIT_SCRIPT),
+                str(existing),
+                "--layout",
+                "existing",
+                "--dir",
+                "cmd,pkg",
+                "--no-create-layout",
+            ],
+            cwd=PACKAGE_ROOT,
+        )
+        run([python, "scripts/agent_check.py"], cwd=existing)
+
+        escaped = temp_root / "path-escape"
+        escaped.mkdir(parents=True, exist_ok=True)
+        escape_result = run(
+            [python, str(INIT_SCRIPT), str(escaped), "--dir", "../outside"],
+            cwd=PACKAGE_ROOT,
+            expect_ok=False,
+        )
+        if "must not contain . or .." not in (escape_result.stdout + escape_result.stderr):
+            print("path traversal in --dir was not rejected clearly", file=sys.stderr)
+            print(escape_result.stdout, file=sys.stderr)
+            print(escape_result.stderr, file=sys.stderr)
+            return 1
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)
     return 0

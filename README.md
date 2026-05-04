@@ -143,6 +143,12 @@ npx @airpot/agent-gov@latest init . --tech-stack python,typescript --layout serv
 npx @airpot/agent-gov@latest init . --layout minimal --no-create-layout
 ```
 
+非 `src/tests` 结构的老项目，使用 `existing` 布局并显式声明要治理的目录：
+
+```bash
+npx @airpot/agent-gov@latest init . --layout existing --dir cmd,pkg,internal --no-create-layout
+```
+
 默认不会覆盖已有文件。遇到已有 `AGENTS.md`、`CLAUDE.md`、`Makefile`、`docs/` 或 `.agent/` 文件时，先人工合并差异；只有确认要替换生成文件时才使用 `--force`。如果只是更新 bundled skills，使用：
 
 ```bash
@@ -167,7 +173,7 @@ npx @airpot/agent-gov@latest [root] [options]
 常用参数：
 
 - `--tech-stack python,typescript`：记录技术栈，并预填常见验证命令。
-- `--layout minimal|python-app|node-app|web-app|service|library`：选择固定目录结构。
+- `--layout existing|minimal|python-app|node-app|web-app|service|library`：选择固定目录结构；`existing` 不附加默认目录，适合老项目配合 `--dir` 使用。
 - `--dir path`：追加需要创建和治理的目录，可重复使用。
 - `--remote-kind ssh|devcontainer|wsl|local|unknown`：记录远程开发环境类型。
 - `--no-claude`：不生成 Claude 相关适配文件。

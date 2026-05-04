@@ -340,6 +340,7 @@ python3 .codex/skills/agent-gov/scripts/init_agent_project.py /path/to/repo \
 
 Built-in layouts:
 
+- `existing`: no default directories; use `--dir` to record the repository's real fixed directories
 - `minimal`: `src`, `tests`, `docs`, `scripts`
 - `python-app`: `src`, `tests`, `docs`, `scripts`, `configs`
 - `node-app`: `src`, `tests`, `docs`, `scripts`, `public`
@@ -347,7 +348,9 @@ Built-in layouts:
 - `service`: `src`, `tests`, `docs`, `scripts`, `configs`, `deploy`
 - `library`: `src`, `tests`, `docs`, `scripts`, `examples`
 
-The initializer creates these directories by default and records them in `.agent/project-layout.json`. Use `--no-create-layout` for existing repositories where directories should be checked but not created.
+The initializer creates these directories by default and records them in `.agent/project-layout.json`. Use `--no-create-layout` for existing repositories where directories should be checked but not created. For repositories that do not use the built-in `src` / `tests` shape, use `--layout existing --dir cmd,pkg,internal --no-create-layout`.
+
+`--dir` values must be repository-relative directory paths. Absolute paths, drive paths, `.` segments, and `..` segments are rejected so initialization cannot write outside the target project root.
 
 ## Safety Rules
 

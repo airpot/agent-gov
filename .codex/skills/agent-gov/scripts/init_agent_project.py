@@ -15,6 +15,7 @@ from pathlib import Path
 REMOTE_KINDS = {"ssh", "devcontainer", "wsl", "local", "unknown"}
 SPEC_MODES = {"embedded"}
 LAYOUTS = {
+    "existing": [],
     "minimal": ["src", "tests", "docs", "scripts"],
     "python-app": ["src", "tests", "docs", "scripts", "configs"],
     "node-app": ["src", "tests", "docs", "scripts", "public"],
@@ -82,10 +83,26 @@ def parse_csv(values: list[str]) -> list[str]:
     return result
 
 
+def clean_layout_dir(value: str) -> str:
+    raw = value.strip().replace("\\", "/").strip("/")
+    if not raw:
+        return ""
+    if len(raw) >= 2 and raw[1] == ":":
+        raise ValueError(f"--dir must be a repository-relative path, not a drive path: {value}")
+    parts: list[str] = []
+    for part in raw.split("/"):
+        if not part:
+            continue
+        if part in {".", ".."}:
+            raise ValueError(f"--dir must not contain . or .. path segments: {value}")
+        parts.append(part)
+    return "/".join(parts)
+
+
 def layout_dirs(layout: str, extra_dirs: list[str]) -> list[str]:
     dirs = list(LAYOUTS.get(layout, LAYOUTS["minimal"]))
     for path in extra_dirs:
-        clean = path.strip().strip("/")
+        clean = clean_layout_dir(path)
         if clean and clean not in dirs:
             dirs.append(clean)
     return dirs
@@ -1202,8 +1219,20 @@ class Writer:
         self.updated: list[str] = []
         self.skipped: list[str] = []
 
+    def target(self, relative: str) -> Path:
+        relative_path = Path(relative)
+        if relative_path.is_absolute():
+            raise ValueError(f"refusing to write absolute generated path: {relative}")
+        root = self.root.resolve()
+        path = (self.root / relative_path).resolve()
+        try:
+            path.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"refusing to write outside project root: {relative}") from exc
+        return path
+
     def write(self, relative: str, content: str, executable: bool = False) -> None:
-        path = self.root / relative
+        path = self.target(relative)
         exists = path.exists()
         if exists and not self.force:
             self.skipped.append(relative)
@@ -1216,7 +1245,7 @@ class Writer:
         (self.updated if exists else self.created).append(relative)
 
     def copy(self, source: Path, relative: str, executable: bool = False) -> None:
-        path = self.root / relative
+        path = self.target(relative)
         exists = path.exists()
         if exists and not self.force:
             self.skipped.append(relative)
@@ -1538,7 +1567,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str]) -> int:
     args = build_parser().parse_args(argv)
-    return init_project(args)
+    try:
+        return init_project(args)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
