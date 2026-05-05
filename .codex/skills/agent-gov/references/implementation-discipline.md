@@ -37,6 +37,8 @@ The gate should require:
 Reviews should ask:
 
 - Does each changed file and major changed block trace to the request, approved spec, or plan?
+- Are incidental diff lines removed or recorded as accepted exceptions under `.agent/review-policy.json`?
+- Was task risk classified under `.agent/risk-zones.json`, and did autonomy stay within that class?
 - Did the implementation solve the present need with the simplest maintainable shape consistent with local patterns?
 - Was any new abstraction, framework, dependency, cache, queue, or config surface justified?
 - Were assumptions, unresolved ambiguity, and tradeoffs surfaced before committing to implementation?

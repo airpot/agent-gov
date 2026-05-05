@@ -7,7 +7,9 @@ Cross-session working memory is tracked in `.agent/memory.json` and `.agent/memo
 Embedded specification management is tracked in `.agent/spec.json` and `openspec/`; use `scripts/agent_spec.py` for change lifecycle commands.
 Capability governance is tracked in `.agent/capabilities.json`. Run evidence is tracked in `.agent/runlog.jsonl`.
 Agent-facing inspection limits are tracked in `.agent/tooling.json`. Security and supply-chain suites are tracked in `.agent/security.json`.
-Workflow gates, including implementation discipline, are tracked in `.agent/workflow.json`. Isolated worktree policy is tracked in `.agent/worktrees.json`.
+Workflow gates, including risk classification, implementation discipline, diff traceability, and review evidence, are tracked in `.agent/workflow.json`.
+Risk autonomy is tracked in `.agent/risk-zones.json`. Diff and review policy is tracked in `.agent/review-policy.json`.
+Isolated worktree policy is tracked in `.agent/worktrees.json`.
 Governance health scoring is tracked in `.agent/evals.json` and `.agent/evals/latest.md`.
 
 - [Architecture](ARCHITECTURE.md): system boundaries, dependency direction, and major design decisions.
@@ -16,6 +18,7 @@ Governance health scoring is tracked in `.agent/evals.json` and `.agent/evals/la
 - [Security](SECURITY.md): secrets, auth, sensitive data, and dependency risk rules.
 - [Agent Tooling](TOOLING.md): bounded repository inspection, search, and output rules.
 - [Governance Score](QUALITY_SCORE.md): local score dimensions, dashboard, and drift signals.
+- [AI Coding Glossary](AI_CODING_GLOSSARY.md): shared terms for skills, tools, MCP, harness, sessions, memory, and reviews.
 - [Tech Debt](tech-debt.md): known debt, cleanup candidates, and follow-up work.
 - [ADRs](adr/README.md): durable architecture decisions.
 - [RFCs](rfcs/README.md): pre-change design proposals.
@@ -23,7 +26,9 @@ Governance health scoring is tracked in `.agent/evals.json` and `.agent/evals/la
 
 Update `.agent/harness.json` when validation commands or required docs change.
 Update `.agent/spec.json` when embedded spec paths, artifacts, or lifecycle policy change.
-Update `.agent/workflow.json` when lifecycle gates, implementation discipline, review order, TDD/debugging rules, or completion evidence rules change.
+Update `.agent/workflow.json` when lifecycle gates, risk classification, implementation discipline, diff traceability, review order, TDD/debugging rules, or completion evidence rules change.
+Update `.agent/risk-zones.json` when risk levels, autonomy rules, approval gates, or high-risk path patterns change.
+Update `.agent/review-policy.json` when diff traceability categories, human review evidence, or automated review boundaries change.
 Update `.agent/worktrees.json` when isolated worktree locations, baseline validation, or guarded cleanup rules change.
 Update `.agent/subagents.json` when delegated agent roles, boundaries, or snapshot rules change.
 Update `.agent/hooks.json` when session bootstrap, checkpoint, or native hook adapter behavior changes.

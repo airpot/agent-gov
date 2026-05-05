@@ -19,6 +19,8 @@ BASE_REQUIRED = [
     ".agent/harness.json",
     ".agent/project-layout.json",
     ".agent/workflow.json",
+    ".agent/risk-zones.json",
+    ".agent/review-policy.json",
     ".agent/worktrees.json",
     ".agent/subagents.json",
     ".agent/hooks.json",
@@ -84,6 +86,7 @@ BASE_REQUIRED = [
     "docs/SECURITY.md",
     "docs/TOOLING.md",
     "docs/QUALITY_SCORE.md",
+    "docs/AI_CODING_GLOSSARY.md",
     "docs/tech-debt.md",
     "docs/adr/README.md",
     "docs/rfcs/README.md",
@@ -207,7 +210,18 @@ def main() -> int:
             print("error: .agent/workflow.json schema must be agent-workflow-v1")
             return 1
         gates = workflow.get("gates", {})
-        for gate in ("design_approval", "plan_quality", "implementation_discipline", "tdd", "systematic_debugging", "review_sequence", "completion_verification"):
+        for gate in (
+            "risk_classification",
+            "design_approval",
+            "plan_quality",
+            "implementation_discipline",
+            "diff_traceability",
+            "tdd",
+            "systematic_debugging",
+            "review_sequence",
+            "human_review_evidence",
+            "completion_verification",
+        ):
             if gate not in gates:
                 print(f"error: .agent/workflow.json missing gate: {gate}")
                 return 1
@@ -227,6 +241,62 @@ def main() -> int:
         sequence = gates.get("review_sequence", {}).get("order", [])
         if sequence != ["spec_review", "quality_review"]:
             print("error: .agent/workflow.json review sequence must be spec_review then quality_review")
+            return 1
+        if not gates.get("risk_classification", {}).get("record_in_plan"):
+            print("error: .agent/workflow.json risk classification must be recorded in plans")
+            return 1
+        if not gates.get("diff_traceability", {}).get("every_changed_line_traces_to_request"):
+            print("error: .agent/workflow.json diff traceability gate must trace changed lines to request")
+            return 1
+        if not gates.get("human_review_evidence", {}).get("requires_diff_or_file_review"):
+            print("error: .agent/workflow.json human review evidence must require diff or file review")
+            return 1
+
+    risk_path = root / ".agent/risk-zones.json"
+    if risk_path.exists():
+        risk = load_json(risk_path, ".agent/risk-zones.json")
+        if risk.get("schema") != "agent-risk-zones-v1":
+            print("error: .agent/risk-zones.json schema must be agent-risk-zones-v1")
+            return 1
+        levels = risk.get("autonomy_levels", {})
+        for level in ("low", "medium", "high", "critical"):
+            if level not in levels:
+                print(f"error: .agent/risk-zones.json missing autonomy level: {level}")
+                return 1
+        if levels.get("high", {}).get("human_review_required") is not True:
+            print("error: high risk changes must require human review")
+            return 1
+        if levels.get("critical", {}).get("agent_may_not_autonomously_modify") is not True:
+            print("error: critical risk changes must block autonomous modification")
+            return 1
+        policy = risk.get("policy", {})
+        for key in ("classify_before_implementation", "record_risk_in_plan_and_review", "stop_when_risk_increases"):
+            if policy.get(key) is not True:
+                print(f"error: .agent/risk-zones.json policy must enable {key}")
+                return 1
+
+    review_policy_path = root / ".agent/review-policy.json"
+    if review_policy_path.exists():
+        review_policy = load_json(review_policy_path, ".agent/review-policy.json")
+        if review_policy.get("schema") != "agent-review-policy-v1":
+            print("error: .agent/review-policy.json schema must be agent-review-policy-v1")
+            return 1
+        trace = review_policy.get("diff_traceability", {})
+        categories = trace.get("categories", [])
+        for category in ("requested", "necessary-support", "incidental", "risky"):
+            if category not in categories:
+                print(f"error: .agent/review-policy.json missing diff category: {category}")
+                return 1
+        if trace.get("every_changed_line_traces_to_request") is not True:
+            print("error: .agent/review-policy.json must require changed-line traceability")
+            return 1
+        human = review_policy.get("human_review", {})
+        for field in ("reviewer", "review_type", "diff_range", "files_reviewed", "conclusion"):
+            if field not in human.get("evidence_fields", []):
+                print(f"error: .agent/review-policy.json missing human review evidence field: {field}")
+                return 1
+        if "high" not in human.get("required_for_risk", []) or "critical" not in human.get("required_for_risk", []):
+            print("error: .agent/review-policy.json must require human review for high and critical risk")
             return 1
 
     worktrees_path = root / ".agent/worktrees.json"
@@ -258,6 +328,9 @@ def main() -> int:
             return 1
         if snapshot.get("status_values") != ["DONE", "DONE_WITH_CONCERNS", "NEEDS_CONTEXT", "BLOCKED"]:
             print("error: .agent/subagents.json snapshot status values are out of date")
+            return 1
+        if snapshot.get("risk_values") != ["low", "medium", "high", "critical"]:
+            print("error: .agent/subagents.json snapshot risk values are out of date")
             return 1
         workflow = subagents.get("review_workflow", {})
         if workflow.get("review_sequence") != ["spec_reviewer", "quality_reviewer"]:
@@ -325,6 +398,11 @@ def main() -> int:
         if capability_config.get("schema") != "agent-capabilities-v1":
             print("error: .agent/capabilities.json schema must be agent-capabilities-v1")
             return 1
+        capability_classes = capability_config.get("capability_classes", {})
+        for class_name in ("instruction", "executable", "integration", "native_adapter"):
+            if class_name not in capability_classes:
+                print(f"error: .agent/capabilities.json missing capability class: {class_name}")
+                return 1
         seen: set[str] = set()
         for item in capability_config.get("capabilities", []):
             cap_id = item.get("id")
@@ -335,6 +413,9 @@ def main() -> int:
                 print(f"error: duplicate capability id: {cap_id}")
                 return 1
             seen.add(cap_id)
+            if item.get("capability_class") not in capability_classes:
+                print(f"error: capability {cap_id} has invalid capability_class")
+                return 1
             if item.get("risk") not in capability_config.get("risk_values", ["low", "medium", "high"]):
                 print(f"error: capability {cap_id} has invalid risk")
                 return 1
@@ -381,6 +462,8 @@ def main() -> int:
             "required_paths",
             "validation",
             "implementation_discipline",
+            "risk_governance",
+            "review_policy",
             "context_budget",
             "session_continuity",
             "memory",

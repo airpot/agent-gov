@@ -23,6 +23,8 @@ openspec/config.yaml
   project-layout.json
   spec.json
   workflow.json
+  risk-zones.json
+  review-policy.json
   worktrees.json
   subagents.json
   hooks.json
@@ -95,6 +97,7 @@ docs/
   SECURITY.md
   TOOLING.md
   QUALITY_SCORE.md
+  AI_CODING_GLOSSARY.md
   tech-debt.md
   adr/
     README.md
@@ -112,21 +115,23 @@ Makefile                   # optional if missing
 - Use `.agent/harness.json` as the project-specific command registry for build, test, lint, typecheck, smoke, logs, and health checks.
 - Use `.agent/project-layout.json` as the fixed directory contract for top-level project structure.
 - Use `.agent/spec.json` and `scripts/agent_spec.py` as the embedded specification policy and command surface.
-- Use `.agent/workflow.json` as the lifecycle gate policy for design/spec approval, plan quality, implementation discipline, isolated work, TDD, debugging, review order, completion proof, and finish choices.
+- Use `.agent/workflow.json` as the lifecycle gate policy for risk classification, design/spec approval, plan quality, implementation discipline, diff traceability, isolated work, TDD, debugging, review order, human review evidence, completion proof, and finish choices.
+- Use `.agent/risk-zones.json` as the task risk and autonomy policy.
+- Use `.agent/review-policy.json` as the diff traceability, automated review boundary, and human review evidence policy.
 - Use `.agent/worktrees.json` as the git worktree isolation and guarded cleanup policy.
 - Use `.agent/subagents.json` as the delegated agent role, boundary, and snapshot contract when subagents are allowed.
 - Use `.agent/hooks.json` as the platform-neutral hook policy, with native Codex and Claude hook adapters treated as generated projections.
 - Use `.agent/knowledge.json` as the durable knowledge manifest for ownership, review dates, source links, and known stale sections.
 - Use `.agent/memory.json` as the cross-session memory policy for summaries, indexes, privacy redaction, and progressive retrieval.
 - Use `.agent/context.json` as the context budget policy for agent-facing docs, bootstrap packets, memory digests, embedded spec change docs, and subagent output size.
-- Use `.agent/capabilities.json` as the capability, integration, permission, and risk registry for agent-visible tools and resources.
+- Use `.agent/capabilities.json` as the capability, skill/tool/MCP taxonomy, integration, permission, and risk registry for agent-visible skills, tools, resources, adapters, and integrations.
 - Use `.agent/runlog.jsonl` as the append-only evidence ledger for session lifecycle events, validation runs, review-fix gates, and high-risk capability use.
 - Use `.agent/tooling.json` as the agent-computer-interface policy for bounded, path-first, line-numbered repository inspection.
 - Use `.agent/security.json` as the optional policy-as-code and supply-chain command registry.
 - Use `.agent/evals.json` and `.agent/evals/latest.md` as the local governance health score configuration and dashboard.
 - Use `.agent/skill-distribution.json` as the skill distribution policy for `.codex/skills`, `.agents/skills`, and `.claude/skills`.
 - Prefer `npx @airpot/agent-gov@latest` as the public one-command installer; it should copy bundled project skills before running the initializer.
-- Use `docs/adr/`, `docs/rfcs/`, and `docs/incidents/` for durable decisions, proposals, and postmortems that should outlive a session.
+- Use `docs/AI_CODING_GLOSSARY.md` for shared AI coding terminology and `docs/adr/`, `docs/rfcs/`, and `docs/incidents/` for durable decisions, proposals, and postmortems that should outlive a session.
 - Capture the technology stack during initialization and prefill harness commands when there is a known safe default.
 - Prefer ignored git worktrees for feature work, implementation-plan execution, and risky refactors; record baseline validation before editing.
 - Require fresh validation evidence before reporting completion, merge readiness, PR readiness, archive readiness, or handoff readiness.
@@ -190,11 +195,14 @@ Agents should run `python3 scripts/agent_validate.py --list` before choosing val
 `.agent/workflow.json` records the project lifecycle gates:
 
 - Design/spec approval for non-trivial changes.
+- Risk classification and autonomy boundary before implementation.
 - Plan quality for multi-step or delegated work.
 - Implementation discipline for assumption surfacing, simplicity-first implementation, surgical diffs, abstraction justification, and success criteria.
+- Diff traceability for requested, necessary-support, incidental, and risky changes.
 - Worktree isolation and clean baseline evidence for feature work.
 - TDD evidence for behavior changes and systematic debugging evidence for failures.
 - Spec compliance review before code quality review.
+- Human review evidence for high and critical risk changes.
 - Fresh validation evidence before completion claims.
 - Explicit finish choices for merge, PR, keep, or discard.
 
@@ -204,7 +212,8 @@ Agents should run `python3 scripts/agent_validate.py --list` before choosing val
 
 `.agent/capabilities.json` records agent-visible capabilities, not just command names:
 
-- Capability id, kind, provider, owner, enabled state, and risk level.
+- Capability id, kind, capability class, provider, owner, enabled state, and risk level.
+- Taxonomy for skill, tool, MCP/integration, and native adapter entries.
 - Permission shape for read, write, network, and secret exposure.
 - Validation commands proving the capability is available or intentionally disabled.
 - Empty extension points for MCP servers and external integrations.
@@ -257,6 +266,8 @@ Use `.agent/templates/adr.md.tmpl`, `.agent/templates/rfc.md.tmpl`, and `.agent/
 
 - Required paths from `.agent/harness.json`.
 - Configured validation commands.
+- Risk autonomy policy.
+- Diff traceability and human review policy.
 - Context budget drift.
 - Session continuity files.
 - Memory taxonomy and procedural review evidence.

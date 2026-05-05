@@ -9,7 +9,9 @@ Review the initialized project before handoff. At minimum, check:
 - `.agent/spec.json`, `openspec/`, and `scripts/agent_spec.py` exist and identify agent-gov embedded spec management as the spec source.
 - `AGENTS.md` is short, stable, and agent-focused.
 - `CLAUDE.md` is thin and does not duplicate long instructions.
-- `.agent/workflow.json` records lifecycle gates for spec approval, plan quality, implementation discipline, worktree isolation, TDD/debugging, review sequence, completion verification, and finish choices.
+- `.agent/workflow.json` records lifecycle gates for risk classification, spec approval, plan quality, implementation discipline, diff traceability, worktree isolation, TDD/debugging, review sequence, human review evidence, completion verification, and finish choices.
+- `.agent/risk-zones.json` records low, medium, high, and critical autonomy rules; high and critical risk require human review, and critical work is not autonomous modification work.
+- `.agent/review-policy.json` records requested, necessary-support, incidental, and risky diff categories plus human review evidence fields.
 - `.agent/worktrees.json` records isolated worktree directory selection, ignore verification, baseline validation, and guarded cleanup.
 - `.agent/sessions/` supports start, checkpoint, resume, status, and archive.
 - `.agent/subagents.json`, `.agent/hooks.json`, `.agent/knowledge.json`, and `.agent/skill-distribution.json` are valid.
@@ -26,6 +28,8 @@ Review the initialized project before handoff. At minimum, check:
 - Substantial changes have fresh completion evidence; skipped checks have explicit reasons and residual risk.
 - Delegated or substantial implementation ran spec compliance review before code quality review, or records an accepted exception.
 - Substantial implementation records assumptions, simplicity/abstraction justification, surgical diff scope, and success criteria, or records an accepted exception.
+- High-risk and critical changes have reviewer, diff range, reviewed files, high-risk paths checked, and conclusion recorded.
+- Incidental diff lines are removed or recorded as accepted exceptions.
 - No secrets or private host credentials are written.
 - Compression does not alter headings, code blocks, inline code, URLs, paths, commands, versions, or technical identifiers.
 - Existing project files were not overwritten without explicit instruction.

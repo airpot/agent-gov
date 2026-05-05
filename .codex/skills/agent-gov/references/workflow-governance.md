@@ -12,6 +12,9 @@ Borrow these practices from mature agent workflow projects:
 - Surface assumptions, ambiguity, and tradeoffs before implementation when a request has multiple plausible meanings.
 - Prefer simple direct code, and justify new abstractions or speculative flexibility before adding them.
 - Keep diffs surgical: every changed line should trace to the request, approved spec, or local cleanup caused by the change.
+- Classify task risk and autonomy before implementation; stop and re-plan when the risk level increases.
+- Separate requested, necessary-support, incidental, and risky diff lines before handoff.
+- Treat automated review as a precheck; high and critical risk changes need recorded human diff or file review evidence.
 - Prefer isolated git worktrees for feature work, plan execution, and risky refactors.
 - Establish a clean baseline before editing so new failures can be attributed.
 - For behavior changes, capture failing-test evidence before production code and passing evidence after the fix.
@@ -34,6 +37,8 @@ Do not adopt these as absolute project rules:
 ```text
 .agent/
   workflow.json
+  risk-zones.json
+  review-policy.json
   worktrees.json
   runlog.jsonl
   templates/
@@ -45,7 +50,7 @@ Do not adopt these as absolute project rules:
       handoff.md
 ```
 
-`.agent/workflow.json` is the lifecycle policy. `.agent/worktrees.json` is the isolation and finish policy. Session files and runlog entries store evidence.
+`.agent/workflow.json` is the lifecycle policy. `.agent/risk-zones.json` is the risk and autonomy policy. `.agent/review-policy.json` is the diff traceability and human review policy. `.agent/worktrees.json` is the isolation and finish policy. Session files and runlog entries store evidence.
 
 ## Lifecycle Stages
 
@@ -66,6 +71,7 @@ Use these stages for substantial work:
 
 Plans should be executable by an agent that has no prior session context:
 
+- Include task risk, autonomy allowed, approval/review requirements, and stop conditions.
 - List exact files to create, modify, test, and document.
 - Split work into small, independently verifiable tasks.
 - Include commands and expected results for red, green, and broader validation.
@@ -87,6 +93,24 @@ Before editing, use the `implementation_discipline` gate for non-trivial impleme
 - Define success criteria as tests, commands, or inspectable evidence before claiming completion.
 
 Reviewers should flag unnecessary abstraction, broad rewrites, speculative extensibility, and unrelated cleanup as findings unless an accepted exception is recorded.
+
+## Risk And Review Evidence
+
+Use `.agent/risk-zones.json` for task risk:
+
+- `low`: agent may implement after a plan; human review is optional.
+- `medium`: agent may implement after a plan; human review is recommended.
+- `high`: agent may implement only after approval; human review is required.
+- `critical`: agent should not autonomously modify; a human owner must drive the plan.
+
+Use `.agent/review-policy.json` for traceability:
+
+- Requested lines are directly asked for by the user, spec, or approved plan.
+- Necessary-support lines are required to make the requested change correct.
+- Incidental lines should be removed or recorded as an exception.
+- Risky lines require risk review and, for high or critical risk, human review evidence.
+
+Human review evidence must name reviewer, review type, diff range, files reviewed, high-risk paths checked, and conclusion. Agent summaries and automated reviews can inform this process but do not replace required tests or human review.
 
 ## TDD And Debugging Evidence
 

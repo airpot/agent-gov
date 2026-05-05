@@ -63,6 +63,19 @@ def main() -> int:
         if "\\" in str(target) and config.get("remote_workspace_path") != str(target.resolve()):
             print(".agent/config.json did not preserve the workspace path", file=sys.stderr)
             return 1
+        expected_schemas = {
+            ".agent/risk-zones.json": "agent-risk-zones-v1",
+            ".agent/review-policy.json": "agent-review-policy-v1",
+        }
+        for relative, schema in expected_schemas.items():
+            path = target / relative
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if data.get("schema") != schema:
+                print(f"{relative} has the wrong schema", file=sys.stderr)
+                return 1
+        if not (target / "docs" / "AI_CODING_GLOSSARY.md").exists():
+            print("docs/AI_CODING_GLOSSARY.md was not created", file=sys.stderr)
+            return 1
 
         run([python, "scripts/agent_check.py"], cwd=target)
         run([python, "scripts/agent_score.py", "doctor"], cwd=target)

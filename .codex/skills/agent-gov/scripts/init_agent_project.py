@@ -135,6 +135,8 @@ def harness_config(
         ".agent/harness.json",
         ".agent/project-layout.json",
         ".agent/workflow.json",
+        ".agent/risk-zones.json",
+        ".agent/review-policy.json",
         ".agent/worktrees.json",
         ".agent/subagents.json",
         ".agent/hooks.json",
@@ -195,6 +197,7 @@ def harness_config(
         "scripts/agent_sync_skills.py",
         "docs/TOOLING.md",
         "docs/QUALITY_SCORE.md",
+        "docs/AI_CODING_GLOSSARY.md",
         "docs/adr/README.md",
         "docs/rfcs/README.md",
         "docs/incidents/README.md",
@@ -257,6 +260,7 @@ def harness_config(
                 "docs/SECURITY.md",
                 "docs/TOOLING.md",
                 "docs/QUALITY_SCORE.md",
+                "docs/AI_CODING_GLOSSARY.md",
                 "docs/tech-debt.md",
                 "docs/adr/README.md",
                 "docs/rfcs/README.md",
@@ -329,17 +333,25 @@ def workflow_config(project_name: str, created_at: str, openspec_enabled: bool) 
         "spec_source": "agent-gov-spec" if openspec_enabled else "project-docs",
         "stages": [
             "intake",
+            "risk_classification",
             "spec",
             "plan",
             "isolation",
             "implementation",
             "spec_review",
             "quality_review",
+            "human_review",
             "verification",
             "handoff",
             "finish",
         ],
         "gates": {
+            "risk_classification": {
+                "required_for": ["implementation", "refactor", "migration", "security_change", "public_api_change"],
+                "policy": ".agent/risk-zones.json",
+                "record_in_plan": True,
+                "stop_when_risk_increases": True,
+            },
             "design_approval": {
                 "required_for": ["non_trivial_change", "architecture_change", "cross_module_behavior_change"],
                 "evidence": ["embedded spec proposal/design approval or recorded project-doc approval"],
@@ -367,6 +379,13 @@ def workflow_config(project_name: str, created_at: str, openspec_enabled: bool) 
                 "success_criteria_required": True,
                 "exceptions_require_session_note": True,
             },
+            "diff_traceability": {
+                "required_for": ["implementation", "refactor", "bugfix", "generated_file_update"],
+                "policy": ".agent/review-policy.json",
+                "every_changed_line_traces_to_request": True,
+                "incidental_changes_require_removal_or_exception": True,
+                "record_in_review": True,
+            },
             "worktree_isolation": {
                 "preferred_for": ["feature_work", "implementation_plan_execution", "risky_refactor"],
                 "policy": ".agent/worktrees.json",
@@ -389,6 +408,12 @@ def workflow_config(project_name: str, created_at: str, openspec_enabled: bool) 
                 "spec_review_must_pass_before_quality_review": True,
                 "re_review_after_fixes": True,
             },
+            "human_review_evidence": {
+                "required_for": ["high_risk_change", "critical_risk_change", "release_claim", "delegated_substantial_change"],
+                "policy": ".agent/review-policy.json",
+                "agent_summary_is_not_review": True,
+                "requires_diff_or_file_review": True,
+            },
             "completion_verification": {
                 "required_for": ["handoff", "merge", "pull_request", "archive"],
                 "fresh_validation_required": True,
@@ -401,6 +426,96 @@ def workflow_config(project_name: str, created_at: str, openspec_enabled: bool) 
             "record_runlog": "python3 scripts/agent_runlog.py record --kind validation --outcome <pass|fail|skipped> --summary <summary>",
             "session_checkpoint": "python3 .agent/tools/agent_session.py checkpoint --summary <summary>",
             "session_compact": "python3 .agent/tools/agent_session.py compact --summary <summary> --next <next>",
+        },
+    }
+
+
+def risk_zones_config(project_name: str, created_at: str) -> dict:
+    return {
+        "schema": "agent-risk-zones-v1",
+        "project_name": project_name,
+        "created_at": created_at,
+        "autonomy_levels": {
+            "low": {
+                "agent_may_implement_after_plan": True,
+                "human_review_required": False,
+                "examples": ["docs-only clarification", "local template update", "narrow test-only change"],
+            },
+            "medium": {
+                "agent_may_implement_after_plan": True,
+                "human_review_required": "recommended",
+                "examples": ["single-module behavior change", "non-public refactor", "new local script"],
+            },
+            "high": {
+                "agent_may_implement_after_approval": True,
+                "human_review_required": True,
+                "examples": ["auth or permission change", "data migration", "public API behavior", "release automation"],
+            },
+            "critical": {
+                "agent_may_not_autonomously_modify": True,
+                "human_review_required": True,
+                "examples": ["secrets handling", "payment flow", "destructive production operation", "legal or compliance policy"],
+            },
+        },
+        "high_risk_patterns": [
+            "auth",
+            "authorization",
+            "permission",
+            "payment",
+            "billing",
+            "migration",
+            "security",
+            "privacy",
+            "public-api",
+            "release",
+            "destructive-operation",
+            "secret",
+        ],
+        "policy": {
+            "classify_before_implementation": True,
+            "record_risk_in_plan_and_review": True,
+            "stop_when_risk_increases": True,
+            "high_requires_user_or_project_approval": True,
+            "critical_requires_human_owner_plan": True,
+        },
+    }
+
+
+def review_policy_config(project_name: str, created_at: str) -> dict:
+    return {
+        "schema": "agent-review-policy-v1",
+        "project_name": project_name,
+        "created_at": created_at,
+        "diff_traceability": {
+            "categories": ["requested", "necessary-support", "incidental", "risky"],
+            "every_changed_line_traces_to_request": True,
+            "incidental_requires_removal_or_exception": True,
+            "risky_requires_risk_review": True,
+            "record_category_per_file": True,
+        },
+        "human_review": {
+            "agent_summary_is_not_review": True,
+            "requires_diff_or_file_review": True,
+            "required_for_risk": ["high", "critical"],
+            "evidence_fields": [
+                "reviewer",
+                "review_type",
+                "diff_range",
+                "files_reviewed",
+                "high_risk_paths_checked",
+                "conclusion",
+            ],
+        },
+        "automated_review": {
+            "allowed_as_precheck": True,
+            "not_a_substitute_for_automated_checks": True,
+            "not_a_substitute_for_required_human_review": True,
+            "record_model_or_tool_when_used": True,
+        },
+        "policy": {
+            "spec_review_before_quality_review": True,
+            "re_review_after_fixes": True,
+            "fresh_validation_after_review_fixes": True,
         },
     }
 
@@ -528,7 +643,7 @@ def subagent_config(project_name: str, created_at: str, claude_enabled: bool) ->
                 "validation",
             ],
             "status_values": ["DONE", "DONE_WITH_CONCERNS", "NEEDS_CONTEXT", "BLOCKED"],
-            "risk_values": ["low", "medium", "high"],
+            "risk_values": ["low", "medium", "high", "critical"],
             "max_supporting_notes_tokens": 700,
             "prefer_path_line_first_findings": True,
         },
@@ -581,6 +696,7 @@ def knowledge_config(project_name: str, created_at: str) -> dict:
         "docs/SECURITY.md",
         "docs/TOOLING.md",
         "docs/QUALITY_SCORE.md",
+        "docs/AI_CODING_GLOSSARY.md",
         "docs/tech-debt.md",
         "docs/adr/README.md",
         "docs/rfcs/README.md",
@@ -686,6 +802,8 @@ def context_budget_config(project_name: str, created_at: str) -> dict:
             ".agent/spec.json",
             ".agent/capabilities.json",
             ".agent/workflow.json",
+            ".agent/risk-zones.json",
+            ".agent/review-policy.json",
             ".agent/worktrees.json",
             ".agent/tooling.json",
             ".agent/security.json",
@@ -693,12 +811,14 @@ def context_budget_config(project_name: str, created_at: str) -> dict:
             ".agent/evals/latest.md",
             "docs/TOOLING.md",
             "docs/QUALITY_SCORE.md",
+            "docs/AI_CODING_GLOSSARY.md",
             "docs/adr/README.md",
             "docs/rfcs/README.md",
             "docs/incidents/README.md",
             ".agent/templates/subagent-task.md.tmpl",
             ".agent/templates/implementation-plan.md.tmpl",
             ".agent/templates/debugging-record.md.tmpl",
+            ".agent/templates/project-review.md.tmpl",
             "openspec/project.md",
         ],
         "tracked_globs": [
@@ -928,17 +1048,87 @@ def capabilities_config(project_name: str, created_at: str, openspec_enabled: bo
             "permissions": {"read": True, "write": "bounded", "network": False, "secrets": False},
             "validation": ["python3 scripts/agent_check.py"],
         },
+        {
+            "id": "skill-distribution",
+            "kind": "skill",
+            "provider": "agent-gov",
+            "enabled": True,
+            "risk": "medium",
+            "owner": "unassigned",
+            "description": "Repo-local skill mirroring and distribution policy for Codex and Claude surfaces.",
+            "permissions": {"read": True, "write": "bounded", "network": False, "secrets": False},
+            "validation": ["python3 scripts/agent_sync_skills.py --dry-run"],
+        },
+        {
+            "id": "ai-coding-glossary",
+            "kind": "knowledge",
+            "provider": "local",
+            "enabled": True,
+            "risk": "low",
+            "owner": "unassigned",
+            "description": "Shared AI coding terminology for consistent agent, reviewer, and maintainer communication.",
+            "permissions": {"read": True, "write": "bounded", "network": False, "secrets": False},
+            "validation": ["test -f docs/AI_CODING_GLOSSARY.md"],
+        },
     ]
+    capability_classes = {
+        "instruction": {
+            "description": "Agent-readable rules, skills, docs, policies, templates, specs, and glossaries.",
+            "examples": ["AGENTS.md", "SKILL.md", ".agent/workflow.json", "docs/AI_CODING_GLOSSARY.md"],
+        },
+        "executable": {
+            "description": "Commands, scripts, local CLIs, validation harnesses, and deterministic checks.",
+            "examples": ["scripts/agent_check.py", "scripts/agent_validate.py", "git status --short"],
+        },
+        "integration": {
+            "description": "Repository resources, MCP servers, external APIs, databases, browsers, and networked systems.",
+            "examples": ["repo filesystem", "mcp server", "external issue tracker"],
+        },
+        "native_adapter": {
+            "description": "Codex, Claude, or other client-specific projections of neutral .agent governance policy.",
+            "examples": [".codex/hooks.json", ".codex/agents/*.toml", ".claude/agents/*.md"],
+        },
+    }
+    class_by_id = {
+        "repo-filesystem": "integration",
+        "git-worktree": "executable",
+        "agent-spec": "executable",
+        "harness-validation": "executable",
+        "workflow-governance": "instruction",
+        "implementation-discipline": "instruction",
+        "worktree-isolation": "instruction",
+        "aci-tooling": "executable",
+        "security-baseline": "executable",
+        "governance-score": "executable",
+        "decision-records": "instruction",
+        "session-memory": "executable",
+        "context-budget": "executable",
+        "subagent-orchestration": "instruction",
+        "native-hooks": "native_adapter",
+        "claude-native-adapters": "native_adapter",
+        "skill-distribution": "instruction",
+        "ai-coding-glossary": "instruction",
+    }
+    for item in capabilities:
+        item["capability_class"] = class_by_id.get(item["id"], "instruction")
     return {
         "schema": "agent-capabilities-v1",
         "project_name": project_name,
         "created_at": created_at,
+        "capability_classes": capability_classes,
         "policy": {
             "registry_is_advisory": True,
             "confirm_current_state_before_use": True,
             "default_external_network": "deny-unless-user-or-project-allows",
             "record_high_risk_tool_use_in_runlog": True,
             "do_not_store_secrets": True,
+            "classify_skill_tool_mcp_before_enabling": True,
+        },
+        "taxonomy": {
+            "skill": "Instruction package loaded by the agent; may include references, scripts, and templates but is activated as guidance.",
+            "tool": "Executable command or callable function; must have permissions, risk, owner, and validation.",
+            "mcp": "External protocol-backed integration; treat as integration class with explicit trust and data boundaries.",
+            "adapter": "Client-native projection of neutral governance policy for Codex, Claude, or another agent surface.",
         },
         "risk_values": ["low", "medium", "high"],
         "capabilities": capabilities,
@@ -1033,15 +1223,17 @@ def evals_config(project_name: str, created_at: str) -> dict:
         },
         "dimensions": {
             "project_integrity": {"weight": 12},
-            "required_paths": {"weight": 18},
+            "required_paths": {"weight": 16},
             "validation": {"weight": 10},
             "implementation_discipline": {"weight": 8},
-            "context_budget": {"weight": 10},
-            "session_continuity": {"weight": 10},
-            "memory": {"weight": 10},
-            "capabilities": {"weight": 10},
-            "security": {"weight": 10},
-            "knowledge": {"weight": 8},
+            "risk_governance": {"weight": 8},
+            "review_policy": {"weight": 8},
+            "context_budget": {"weight": 8},
+            "session_continuity": {"weight": 8},
+            "memory": {"weight": 8},
+            "capabilities": {"weight": 8},
+            "security": {"weight": 8},
+            "knowledge": {"weight": 6},
             "runlog": {"weight": 6},
         },
         "commands": {
@@ -1063,7 +1255,7 @@ Purpose: {purpose}
 
 Follow repository governance:
 - Read AGENTS.md first when available.
-- Respect .agent/subagents.json, .agent/workflow.json, .agent/worktrees.json, .agent/harness.json, and .agent/project-layout.json.
+- Respect .agent/subagents.json, .agent/workflow.json, .agent/risk-zones.json, .agent/review-policy.json, .agent/worktrees.json, .agent/harness.json, and .agent/project-layout.json.
 - Keep work inside the assigned read/write boundary.
 - Prefer the simplest direct implementation and justify new abstractions or speculative flexibility.
 - Keep diffs surgical; do not do unrelated cleanup unless it is part of the assigned task.
@@ -1376,6 +1568,14 @@ def init_project(args: argparse.Namespace) -> int:
         json.dumps(workflow_config(project_name, values["created_at"], openspec_enabled), indent=2) + "\n",
     )
     writer.write(
+        ".agent/risk-zones.json",
+        json.dumps(risk_zones_config(project_name, values["created_at"]), indent=2) + "\n",
+    )
+    writer.write(
+        ".agent/review-policy.json",
+        json.dumps(review_policy_config(project_name, values["created_at"]), indent=2) + "\n",
+    )
+    writer.write(
         ".agent/worktrees.json",
         json.dumps(worktree_config(project_name, values["created_at"]), indent=2) + "\n",
     )
@@ -1486,6 +1686,7 @@ def init_project(args: argparse.Namespace) -> int:
     writer.write("docs/SECURITY.md", render(template("docs-security.md.tmpl"), values))
     writer.write("docs/TOOLING.md", render(template("docs-tooling.md.tmpl"), values))
     writer.write("docs/QUALITY_SCORE.md", render(template("docs-quality-score.md.tmpl"), values))
+    writer.write("docs/AI_CODING_GLOSSARY.md", render(template("docs-ai-coding-glossary.md.tmpl"), values))
     writer.write("docs/tech-debt.md", render(template("docs-tech-debt.md.tmpl"), values))
     writer.write("docs/adr/README.md", render(template("docs-adr-index.md.tmpl"), values))
     writer.write("docs/rfcs/README.md", render(template("docs-rfc-index.md.tmpl"), values))

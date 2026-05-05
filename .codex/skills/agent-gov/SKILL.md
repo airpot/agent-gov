@@ -19,7 +19,7 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
    - Ask for or infer the technology stack before initialization. If unknown, ask whether to continue with `unspecified`.
    - Ask for the fixed project directory layout. Use a built-in layout (`minimal`, `python-app`, `node-app`, `web-app`, `service`, `library`) or explicit extra directories.
    - Use `references/spec-management.md` for embedded OpenSpec-style project specification setup.
-   - Use `references/workflow-governance.md` for lifecycle gates, plan quality, TDD/debugging evidence, worktree isolation, review order, and completion proof.
+   - Use `references/workflow-governance.md` for lifecycle gates, task risk/autonomy, plan quality, TDD/debugging evidence, diff traceability, worktree isolation, review order, human review evidence, and completion proof.
    - Use `references/implementation-discipline.md` for assumption clarification, simplicity-first implementation, surgical diffs, and verifiable goals.
    - Use `references/harness-management.md` for command, validation, capability governance, runlog evidence, ACI tooling, security/supply-chain suites, governance scoring/evals, ADR/RFC/postmortem records, native adapters, context budget, skill distribution, and repo-harness setup.
    - Use `references/session-continuity.md` for `.agent/sessions/`, `.agent/memory/`, rollover, checkpoint, memory retrieval, and resume behavior.
@@ -54,20 +54,21 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
    - Never send sensitive-looking files or private environment files to external compression services.
 
 7. **Create or verify workflow and worktree governance**
-   - Ensure `.agent/workflow.json`, `.agent/worktrees.json`, `.agent/templates/implementation-plan.md.tmpl`, and `.agent/templates/debugging-record.md.tmpl` exist.
-   - Use workflow gates for design/spec approval, plan quality, implementation discipline, isolated execution, TDD evidence, systematic debugging, spec review, quality review, completion verification, handoff, and finish choices.
+   - Ensure `.agent/workflow.json`, `.agent/risk-zones.json`, `.agent/review-policy.json`, `.agent/worktrees.json`, `.agent/templates/implementation-plan.md.tmpl`, and `.agent/templates/debugging-record.md.tmpl` exist.
+   - Use workflow gates for task risk/autonomy, design/spec approval, plan quality, implementation discipline, diff traceability, isolated execution, TDD evidence, systematic debugging, spec review, quality review, human review evidence, completion verification, handoff, and finish choices.
+   - Require high and critical risk work to record approval/review evidence; critical work is not autonomous modification work.
    - Prefer ignored git worktrees for feature work, implementation-plan execution, and risky refactors; record baseline validation before edits.
    - Require fresh validation evidence before completion, merge, PR, archive, or handoff claims.
    - Treat destructive branch/worktree cleanup as explicit-user-confirmation work.
 
 8. **Create or verify capability governance and runlog evidence**
    - Ensure `.agent/capabilities.json`, `.agent/runlog.jsonl`, `.agent/tooling.json`, `.agent/security.json`, `.agent/evals.json`, `.agent/evals/latest.md`, `scripts/agent_capabilities.py`, `scripts/agent_runlog.py`, `scripts/agent_tooling.py`, `scripts/agent_security.py`, and `scripts/agent_score.py` exist.
-   - Use `.agent/capabilities.json` to record enabled tools, resources, native adapters, external integrations, owner, risk, permission shape, and validation commands.
+   - Use `.agent/capabilities.json` to record enabled skills, tools, MCP/integration entries, resources, native adapters, owner, risk, capability class, permission shape, and validation commands.
    - Use `.agent/runlog.jsonl` for compact evidence of validation runs, session lifecycle events, accepted review exceptions, and high-risk capability use.
    - Use `.agent/tooling.json` and `scripts/agent_tooling.py` for bounded, path-first, line-numbered repository inspection.
    - Use `.agent/security.json` and `scripts/agent_security.py` for optional policy-as-code, secret scan, dependency audit, SBOM, and license scan command slots.
    - Use `.agent/evals.json` and `scripts/agent_score.py` for local governance health scoring and `.agent/evals/latest.md` dashboard refresh.
-   - Ensure `docs/adr/`, `docs/rfcs/`, `docs/incidents/`, and their templates exist for durable decisions, proposals, and postmortems.
+   - Ensure `docs/AI_CODING_GLOSSARY.md`, `docs/adr/`, `docs/rfcs/`, `docs/incidents/`, and their templates exist for shared terminology, durable decisions, proposals, and postmortems.
    - Keep runlog entries structured and concise; do not store raw transcripts, terminal scrollback, secrets, or private host data.
 
 9. **Create or verify subagent orchestration**

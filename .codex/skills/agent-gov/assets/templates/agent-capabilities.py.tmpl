@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 CONFIG_PATH = Path(".agent/capabilities.json")
-REQUIRED_FIELDS = {"id", "kind", "provider", "enabled", "risk", "owner", "description", "permissions"}
+REQUIRED_FIELDS = {"id", "kind", "capability_class", "provider", "enabled", "risk", "owner", "description", "permissions"}
 
 
 def load_config() -> dict:
@@ -34,7 +34,7 @@ def cmd_list(args: argparse.Namespace) -> int:
     for row in rows:
         enabled = "enabled" if row.get("enabled") else "disabled"
         print(
-            f"{row.get('id')} | {row.get('kind')} | {row.get('provider')} | "
+            f"{row.get('id')} | {row.get('kind')} | {row.get('capability_class')} | {row.get('provider')} | "
             f"{row.get('risk')} | {enabled} | owner={row.get('owner')}"
         )
         print(f"  {row.get('description', '')}")
@@ -54,6 +54,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if config.get("schema") != "agent-capabilities-v1":
         errors.append(".agent/capabilities.json schema must be agent-capabilities-v1")
     risk_values = set(config.get("risk_values", ["low", "medium", "high"]))
+    capability_classes = set(config.get("capability_classes", {}))
+    for class_name in ("instruction", "executable", "integration", "native_adapter"):
+        if class_name not in capability_classes:
+            errors.append(f".agent/capabilities.json missing capability class: {class_name}")
     seen: set[str] = set()
     for index, item in enumerate(capabilities(config), start=1):
         missing = sorted(REQUIRED_FIELDS - set(item))
@@ -67,6 +71,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         seen.add(cap_id)
         if item.get("risk") not in risk_values:
             errors.append(f"{cap_id} has invalid risk: {item.get('risk')}")
+        if item.get("capability_class") not in capability_classes:
+            errors.append(f"{cap_id} has invalid capability_class: {item.get('capability_class')}")
         permissions = item.get("permissions", {})
         if not isinstance(permissions, dict):
             errors.append(f"{cap_id} permissions must be an object")

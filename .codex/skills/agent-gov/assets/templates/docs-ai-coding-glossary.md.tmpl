@@ -1,0 +1,47 @@
+# AI Coding Glossary
+
+Use this glossary to keep agent, reviewer, and maintainer language precise. Prefer these terms in specs, plans, reviews, handoffs, and session notes.
+
+## Core Terms
+
+- Agent: An AI worker operating in a repository under project instructions, tool permissions, and validation gates.
+- Model: The underlying AI system that reasons and writes text or code. The model is not the same thing as the agent harness.
+- Harness: The executable and procedural environment around the model: repo files, tools, commands, validation, prompts, policies, logs, and review gates.
+- Context: Information currently available to the agent for the task.
+- Context window: The maximum context the current model/client can use at once.
+- Attention budget: The practical amount of context that remains reliable before important facts become hard to use, even if the context window is not full.
+- Session: A bounded work interval with a goal, active state, decisions, changes, validation, and handoff records.
+- Handoff: A compact durable record that lets a later session continue without relying on chat transcript history.
+- Memory: Repo-local summarized records used for retrieval across sessions. Memory is advisory and must be checked against current files.
+- Progressive disclosure: Load summaries first, then targeted details only when needed.
+
+## Governance Terms
+
+- Spec: Durable change intent, design, tasks, and acceptance criteria.
+- Plan: The execution map for a spec or task, including files, commands, expected results, risk, and success criteria.
+- Risk zone: A task risk class that controls how much autonomous action is allowed.
+- Autonomy level: The degree to which an agent may proceed without human approval or human review.
+- Diff traceability: The requirement that each changed line maps to a requested change, necessary support, a recorded exception, or a risky change needing review.
+- Human review: A real reviewer inspecting a diff or file set and recording reviewer, scope, files, risk areas, and conclusion.
+- Automated review: A model or static tool review used as a precheck. It does not replace required tests or human review.
+- Validation evidence: Fresh command output or recorded result proving checks were run for the current change.
+- Runlog: Structured JSONL evidence for validation, evals, session events, accepted exceptions, and high-risk capability use.
+
+## Capability Terms
+
+- Skill: An instruction package loaded by the agent. A skill may include references, scripts, and templates, but its activation shape is guidance.
+- Tool: An executable command, script, function, or local CLI with permissions, owner, risk, and validation.
+- MCP: A protocol-backed external integration. Treat it as an integration with explicit trust, data, and network boundaries.
+- Native adapter: A Codex, Claude, or other client-specific projection of neutral `.agent/` governance policy.
+- Capability: Any agent-visible skill, tool, resource, adapter, or integration registered in `.agent/capabilities.json`.
+- Capability class: The interaction shape of a capability: instruction, executable, integration, or native_adapter.
+- Permission shape: The read, write, network, and secret-access boundary for a capability.
+
+## Workflow Terms
+
+- Subagent: A delegated agent role with bounded input context, write ownership, output budget, and snapshot contract.
+- Snapshot: A structured subagent result, usually marked with `===SNAPSHOT===`, that can be accepted into session state.
+- Spec review: Review that checks whether the implementation matches the requested behavior and scope.
+- Quality review: Review that checks maintainability, tests, safety, project conventions, and residual risk after spec review.
+- Review-fix loop: The cycle of independent review, targeted fix, revalidation, and re-review until the release gate passes or an exception is recorded.
+- Vibe coding: Informal coding driven by conversational momentum. In this project, convert it into specs, plans, evidence, and handoffs before relying on it.

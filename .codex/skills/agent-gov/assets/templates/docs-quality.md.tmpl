@@ -52,7 +52,10 @@ python3 scripts/agent_security.py scan-paths
 ## Expectations
 
 - Follow `.agent/workflow.json` for spec approval, plan quality, implementation discipline, worktree isolation, TDD/debugging, review sequence, and completion verification gates.
+- Classify task risk with `.agent/risk-zones.json` before implementation; stop and re-plan when the risk level increases.
 - Follow the `implementation_discipline` gate for non-trivial implementation: surface assumptions, choose the simplest maintainable approach, keep diffs tied to the request, and define success criteria.
+- Follow `.agent/review-policy.json` before handoff: every changed line should map to requested, necessary-support, incidental, or risky; incidental changes need removal or an explicit exception.
+- Agent-generated summaries and automated review comments are prechecks, not human review evidence. High and critical risk changes need reviewer, diff range, files reviewed, high-risk paths checked, and conclusion.
 - For behavior changes, write or update a failing test first, record the failing command, then record the passing command after implementation.
 - For bugs, build failures, test failures, and unexpected behavior, record reproduction, root cause, hypothesis, and validation with `.agent/templates/debugging-record.md.tmpl`.
 - For multi-step work, use `.agent/templates/implementation-plan.md.tmpl` or an embedded spec task file with exact files, commands, expected results, and no placeholders.

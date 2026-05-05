@@ -97,12 +97,12 @@ Follow it with JSON:
   "exports_added_or_modified": [],
   "critical_finding": "short finding",
   "next_dependency": "recommended next task or none",
-  "estimated_risk_level": "low | medium | high",
+  "estimated_risk_level": "low | medium | high | critical",
   "validation": []
 }
 ```
 
-After the JSON, the subagent may add concise notes. It must separate confirmed facts from inference when reporting risks.
+After the JSON, the subagent may add concise notes. It must separate confirmed facts from inference when reporting risks. Critical-risk work is not autonomous modification work; return `BLOCKED` or `DONE_WITH_CONCERNS` with the reason if the assignment crosses that boundary.
 
 Handle statuses this way:
 

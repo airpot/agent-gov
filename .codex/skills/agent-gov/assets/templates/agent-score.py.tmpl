@@ -37,6 +37,8 @@ SCHEMA_JSON_FILES = {
     ".agent/harness.json": "agent-harness-v1",
     ".agent/project-layout.json": "agent-project-layout-v1",
     ".agent/workflow.json": "agent-workflow-v1",
+    ".agent/risk-zones.json": "agent-risk-zones-v1",
+    ".agent/review-policy.json": "agent-review-policy-v1",
     ".agent/worktrees.json": "agent-worktree-policy-v1",
     ".agent/subagents.json": "agent-subagent-orchestration-v1",
     ".agent/hooks.json": "agent-hooks-v1",
@@ -62,6 +64,8 @@ JSONL_FILES = [
 CRITICAL_JSON_FILES = {
     ".agent/config.json",
     ".agent/harness.json",
+    ".agent/risk-zones.json",
+    ".agent/review-policy.json",
     ".agent/evals.json",
 }
 DEFAULT_DIMENSION_WEIGHTS = {
@@ -69,12 +73,14 @@ DEFAULT_DIMENSION_WEIGHTS = {
     "required_paths": 18,
     "validation": 10,
     "implementation_discipline": 8,
-    "context_budget": 10,
-    "session_continuity": 10,
-    "memory": 10,
-    "capabilities": 10,
-    "security": 10,
-    "knowledge": 8,
+    "risk_governance": 8,
+    "review_policy": 8,
+    "context_budget": 8,
+    "session_continuity": 8,
+    "memory": 8,
+    "capabilities": 8,
+    "security": 8,
+    "knowledge": 6,
     "runlog": 6,
 }
 HARD_FAIL_DIMENSIONS = {"project_integrity"}
@@ -276,6 +282,77 @@ def score_implementation_discipline() -> dict:
     return dimension("implementation_discipline", score, findings, evidence)
 
 
+def score_risk_governance() -> dict:
+    risk = load_json(Path(".agent/risk-zones.json"))
+    workflow = load_json(Path(".agent/workflow.json"))
+    findings: list[str] = []
+    levels = risk.get("autonomy_levels", {})
+    for level in ("low", "medium", "high", "critical"):
+        if level not in levels:
+            findings.append(f"missing autonomy level: {level}")
+    if levels.get("high", {}).get("human_review_required") is not True:
+        findings.append("high risk changes must require human review")
+    if levels.get("critical", {}).get("agent_may_not_autonomously_modify") is not True:
+        findings.append("critical risk changes must block autonomous modification")
+    policy = risk.get("policy", {})
+    for key in ("classify_before_implementation", "record_risk_in_plan_and_review", "stop_when_risk_increases"):
+        if policy.get(key) is not True:
+            findings.append(f"risk policy missing {key}")
+    gate = workflow.get("gates", {}).get("risk_classification", {})
+    if not gate:
+        findings.append("workflow missing risk_classification gate")
+    elif not gate.get("record_in_plan"):
+        findings.append("risk classification must be recorded in the implementation plan")
+    plan_template = Path(".agent/templates/implementation-plan.md.tmpl")
+    review_template = Path(".agent/templates/project-review.md.tmpl")
+    if not plan_template.exists() or "Task Risk and Autonomy" not in plan_template.read_text(encoding="utf-8", errors="ignore"):
+        findings.append("implementation plan template lacks risk and autonomy section")
+    if not review_template.exists() or "Task Risk Review" not in review_template.read_text(encoding="utf-8", errors="ignore"):
+        findings.append("project review template lacks task risk review section")
+    score = 100 - min(90, len(findings) * 15)
+    evidence = [f"{len(levels)}/4 autonomy levels configured", f"{len(risk.get('high_risk_patterns', []))} high-risk patterns"]
+    return dimension("risk_governance", score, findings, evidence)
+
+
+def score_review_policy() -> dict:
+    policy = load_json(Path(".agent/review-policy.json"))
+    workflow = load_json(Path(".agent/workflow.json"))
+    findings: list[str] = []
+    trace = policy.get("diff_traceability", {})
+    categories = trace.get("categories", [])
+    for category in ("requested", "necessary-support", "incidental", "risky"):
+        if category not in categories:
+            findings.append(f"missing diff category: {category}")
+    if trace.get("every_changed_line_traces_to_request") is not True:
+        findings.append("diff traceability must require changed-line request mapping")
+    if trace.get("incidental_requires_removal_or_exception") is not True:
+        findings.append("incidental changes must require removal or exception")
+    human = policy.get("human_review", {})
+    if human.get("agent_summary_is_not_review") is not True:
+        findings.append("human review must not be satisfied by agent summary alone")
+    if "high" not in human.get("required_for_risk", []) or "critical" not in human.get("required_for_risk", []):
+        findings.append("human review must be required for high and critical risk")
+    for field in ("reviewer", "review_type", "diff_range", "files_reviewed", "conclusion"):
+        if field not in human.get("evidence_fields", []):
+            findings.append(f"missing human review evidence field: {field}")
+    gates = workflow.get("gates", {})
+    if "diff_traceability" not in gates:
+        findings.append("workflow missing diff_traceability gate")
+    if "human_review_evidence" not in gates:
+        findings.append("workflow missing human_review_evidence gate")
+    review_template = Path(".agent/templates/project-review.md.tmpl")
+    if not review_template.exists():
+        findings.append("missing project review template")
+    else:
+        text = review_template.read_text(encoding="utf-8", errors="ignore")
+        for marker in ("Diff Traceability", "Human Review Evidence", "Automated Review Boundary"):
+            if marker not in text:
+                findings.append(f"project review template lacks {marker}")
+    score = 100 - min(90, len(findings) * 12)
+    evidence = [f"{len(categories)} diff categories", f"{len(human.get('evidence_fields', []))} human review evidence fields"]
+    return dimension("review_policy", score, findings, evidence)
+
+
 def threshold_for(path: Path, context: dict) -> int:
     budgets = context.get("budgets", {})
     text_path = str(path)
@@ -349,7 +426,11 @@ def score_capabilities() -> dict:
     config = load_json(Path(".agent/capabilities.json"))
     caps = config.get("capabilities", [])
     findings: list[str] = []
-    required = {"id", "kind", "provider", "enabled", "risk", "owner", "permissions", "validation"}
+    required = {"id", "kind", "provider", "enabled", "risk", "owner", "permissions", "validation", "capability_class"}
+    capability_classes = set(config.get("capability_classes", {}))
+    for class_name in ("instruction", "executable", "integration", "native_adapter"):
+        if class_name not in capability_classes:
+            findings.append(f"missing capability class: {class_name}")
     seen: set[str] = set()
     owner_gaps = 0
     for item in caps:
@@ -362,6 +443,8 @@ def score_capabilities() -> dict:
         seen.add(cap_id)
         if item.get("enabled") and item.get("owner") == "unassigned":
             owner_gaps += 1
+        if item.get("capability_class") not in capability_classes:
+            findings.append(f"{cap_id} has invalid capability_class")
         if item.get("enabled") and not item.get("validation"):
             findings.append(f"{cap_id} enabled without validation")
     if not caps:
@@ -471,6 +554,8 @@ def collect_scores(extra_runlog_events: int = 0) -> dict:
         "required_paths": score_required_paths(),
         "validation": score_validation(),
         "implementation_discipline": score_implementation_discipline(),
+        "risk_governance": score_risk_governance(),
+        "review_policy": score_review_policy(),
         "context_budget": score_context_budget(),
         "session_continuity": score_session_continuity(),
         "memory": score_memory(),

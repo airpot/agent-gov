@@ -17,6 +17,7 @@ Use this template only when the active platform and higher-priority instructions
 - Input facts:
 - Expected validation:
 - Workflow gate:
+  - Classify task risk with `.agent/risk-zones.json`; do not autonomously modify critical-risk scope.
   - For worker tasks: report `DONE`, `DONE_WITH_CONCERNS`, `NEEDS_CONTEXT`, or `BLOCKED`.
   - For implementation tasks: prefer the simplest direct change, justify new abstractions, and keep changes inside the declared write boundary.
   - For review tasks: run `spec_reviewer` before `quality_reviewer`.
@@ -44,7 +45,7 @@ Then provide JSON:
   "exports_added_or_modified": [],
   "critical_finding": "short finding",
   "next_dependency": "recommended next task or none",
-  "estimated_risk_level": "low | medium | high",
+  "estimated_risk_level": "low | medium | high | critical",
   "validation": []
 }
 ```

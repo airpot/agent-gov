@@ -21,13 +21,16 @@ Required project directories:
 - Keep long-running session state in `.agent/sessions/`, not in chat history.
 - Use `docs/index.md` as the durable project knowledge map.
 - Use `.agent/harness.json` and `scripts/agent_validate.py` for executable feedback.
-- Use `.agent/workflow.json` for lifecycle gates: spec approval, plan quality, implementation discipline, worktree isolation, TDD/debugging evidence, review order, and completion verification.
+- Use `.agent/workflow.json` for risk, spec, plan, implementation, diff, worktree, TDD/debugging, review, and completion gates.
+- Use `.agent/risk-zones.json` before implementation to classify task risk and agent autonomy.
+- Use `.agent/review-policy.json` before handoff to prove diff traceability, human review evidence, and automated review boundaries.
 - Use `.agent/worktrees.json` for isolated feature work and guarded branch/worktree cleanup.
 - Use `.agent/subagents.json` for delegated work when the active platform allows it.
 - Use `.agent/hooks.json` for advisory bootstrap and checkpoint reminders.
 - Use `.agent/knowledge.json`, `.agent/memory.json`, and `.agent/context.json` for durable docs, memory retrieval, and context budgets.
-- Use `.agent/capabilities.json`, `.agent/runlog.jsonl`, `.agent/tooling.json`, `.agent/security.json`, and `.agent/evals.json` for capability risk, evidence, bounded inspection, security suites, and governance scoring.
+- Use `.agent/capabilities.json`, `.agent/runlog.jsonl`, `.agent/tooling.json`, `.agent/security.json`, and `.agent/evals.json` for capability risk, evidence, bounded inspection, security, and scoring.
 - Use `.agent/skill-distribution.json` when project skills need to be mirrored into current agent skill directories.
+- Use `docs/AI_CODING_GLOSSARY.md` for shared skill/tool/MCP, harness, session, memory, and review terms.
 - Preserve unrelated user changes.
 - Do not store secrets, tokens, SSH keys, or private credentials in repository files.
 - Prefer simple, direct implementations; justify new abstractions, speculative flexibility, or broad cleanup in the active session.
@@ -42,7 +45,7 @@ Required project directories:
 5. Run `python3 scripts/agent_capabilities.py doctor`, `python3 scripts/agent_runlog.py doctor`, `python3 scripts/agent_tooling.py doctor`, `python3 scripts/agent_security.py doctor`, and `python3 scripts/agent_score.py doctor`.
 6. Inspect `git status --short` before editing.
 7. Read `.agent/project-layout.json` before adding top-level directories or moving files.
-8. Read `.agent/workflow.json`; for non-trivial changes, pass the design/spec, plan, and implementation-discipline gates before implementation.
+8. Read `.agent/workflow.json`, `.agent/risk-zones.json`, and `.agent/review-policy.json`; for non-trivial work, pass risk, spec, plan, discipline, and diff gates before implementation.
 9. Read `.agent/worktrees.json`; prefer an ignored isolated worktree for feature work, plan execution, or risky refactors.
 10. {{spec_workflow_step}}
 11. Read `docs/index.md` and the relevant linked doc before making broad changes.
@@ -51,7 +54,7 @@ Required project directories:
 13. For behavior changes, record failing-test evidence before implementation unless an exception is documented.
 14. For bugs, test failures, build failures, or unexpected behavior, record reproduction, root cause, hypothesis, and fix validation before patching.
 15. Before broad implementation, state assumptions and success criteria; ask for clarification when multiple interpretations would change the solution.
-16. For delegated or substantial work, run spec review before quality review and re-review after fixes.
+16. For delegated, substantial, high-risk, or critical work, run spec review before quality review, re-review after fixes, and record risk, diff, human review, and automated review boundaries.
 17. For delegated work, read `.agent/subagents.json`, assign disjoint write boundaries, and require concise `===SNAPSHOT===` JSON reports.
 18. For long-running work, start or continue an agent session:
    `python3 .agent/tools/agent_session.py status`

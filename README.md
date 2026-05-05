@@ -21,6 +21,8 @@
 | caveman | https://github.com/juliusbrussee/caveman | 借鉴上下文经济、token budget、压缩安全检查和精简输出机制；未采纳其 persona 风格。 |
 | superpowers | https://github.com/obra/superpowers | 借鉴可复用 capability / skill 分发、薄说明面和跨工具组织方式。 |
 | andrej-karpathy-skills | https://github.com/forrestchang/andrej-karpathy-skills | 借鉴先澄清、简单优先、精准改动、目标驱动验证，落实为 `implementation_discipline` gate。 |
+| dictionary-of-ai-coding | https://github.com/mattpocock/dictionary-of-ai-coding | 借鉴统一 AI coding 术语表的思想，生成 `docs/AI_CODING_GLOSSARY.md`。 |
+| agent-coding-playbook | https://github.com/bravekingzhang/agent-coding-playbook | 借鉴 task 风险分级、自治边界、human-in-the-loop 和 review 证据化的工作流思想。 |
 
 ## 能力范围
 
@@ -57,31 +59,38 @@
    - 支持本地 token 估算、压缩建议和压缩前后语义校验。
 
 7. 工作流和实现纪律
-   - 生成 `.agent/workflow.json`、`.agent/worktrees.json`、implementation plan 和 debugging record 模板。
-   - 覆盖规格审批、计划质量、实现纪律、TDD/调试证据、审阅顺序、完成证明。
+   - 生成 `.agent/workflow.json`、`.agent/risk-zones.json`、`.agent/review-policy.json`、`.agent/worktrees.json`、implementation plan 和 debugging record 模板。
+   - 覆盖风险分级、自治边界、规格审批、计划质量、实现纪律、diff 可追踪、TDD/调试证据、审阅顺序、人审证据、完成证明。
    - 实现纪律吸收了 `andrej-karpathy-skills` 的核心思想：先澄清假设，优先简单直接实现，避免无根据抽象，保持 diff 精准，定义可验证成功标准。
 
-8. Subagent 编排治理
+8. 审阅-修正闭环
+   - 高风险和 critical 风险工作要求记录 human review evidence。
+   - 每个改动文件需要归类为 requested、necessary-support、incidental 或 risky。
+   - 自动审阅和模型总结只能作为 precheck，不能替代测试、构建或必需的人审。
+
+9. Subagent 编排治理
    - 生成 `.agent/subagents.json` 和 `.agent/templates/subagent-task.md.tmpl`。
    - 支持 searcher、explorer、worker、verifier、spec_reviewer、quality_reviewer、reviewer、coordinator 等角色定义。
    - 要求 disjoint write boundary、`===SNAPSHOT===` JSON 摘要、spec review 先于 quality review。
    - 不强制使用 subagent；只有当前平台和上级指令允许时才使用。
 
-9. Codex / Claude 原生适配
+10. Codex / Claude 原生适配
    - 生成 `.codex/config.toml`、`.codex/hooks.json`、`.codex/agents/governance-*.toml`。
    - 可选生成 `.claude/settings.json`、`.claude/agents/governance-*.md`。
    - 这些原生配置是 `.agent/` 中性治理策略的薄投影。
 
-10. 能力、安全、评估和知识治理
+11. 能力、安全、评估和知识治理
     - 生成 `.agent/capabilities.json`、`.agent/tooling.json`、`.agent/security.json`、`.agent/evals.json`。
     - 生成 `scripts/agent_capabilities.py`、`agent_tooling.py`、`agent_security.py`、`agent_score.py`。
-    - 生成 `docs/` 知识库、ADR/RFC/postmortem 模板和治理健康评分。
+    - 生成 `docs/` 知识库、AI coding 术语表、ADR/RFC/postmortem 模板和治理健康评分。
+    - `.agent/capabilities.json` 明确区分 Skill、Tool、MCP/integration、native adapter，并为每项能力记录 capability class、权限、owner、risk 和验证命令。
     - `agent_score.py` 会把关键治理 JSON / JSONL 的解析和 schema 有效性作为硬门禁，避免基础配置损坏时仍然给出 pass。
 
 ## 不做什么
 
 - 不替代真实测试、构建、人工审查或安全审计。
 - 不把 Codex/Claude 聊天记录当作持久状态。
+- 不把自动审阅、模型总结或 agent 自评当作必需的人审证据。
 - 不保存 npm token、SSH key、API key 等密钥。
 - 不强制安装外部 OpenSpec CLI。
 - 不强制使用 subagent，也不强制指定模型。
