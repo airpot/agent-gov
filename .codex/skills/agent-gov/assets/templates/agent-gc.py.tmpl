@@ -1,0 +1,216 @@
+#!/usr/bin/env python3
+"""Report governance drift without modifying project files."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+CONFIG_PATH = Path(".agent/governance-gc.json")
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def load_json(path: Path, fallback: dict | None = None) -> dict:
+    if not path.exists():
+        if fallback is not None:
+            return fallback
+        raise SystemExit(f"error: missing {path}")
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"error: invalid JSON in {path}: {exc}")
+
+
+def parse_date(value: str) -> datetime | None:
+    for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            return datetime.strptime(value, fmt).replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def days_since(value: str) -> int | None:
+    parsed = parse_date(value)
+    if parsed is None:
+        return None
+    return (datetime.now(timezone.utc) - parsed).days
+
+
+def finding(kind: str, severity: str, summary: str, path: str = "") -> dict:
+    return {"kind": kind, "severity": severity, "summary": summary, "path": path}
+
+
+def validate_schema(path: Path, schema: str) -> list[dict]:
+    data = load_json(path, {})
+    if data.get("schema") != schema:
+        return [finding("schema", "error", f"{path} schema must be {schema}", str(path))]
+    return []
+
+
+def check_knowledge(config: dict) -> list[dict]:
+    results: list[dict] = []
+    knowledge = load_json(Path(".agent/knowledge.json"), {})
+    warn_days = int(config.get("policy", {}).get("stale_docs_warn_after_days", 180))
+    for doc in knowledge.get("documents", []):
+        path = doc.get("path", "")
+        if doc.get("owner") == "unassigned":
+            results.append(finding("knowledge_owner", "warning", "document owner is unassigned", path))
+        age = days_since(doc.get("last_reviewed", ""))
+        if age is None:
+            results.append(finding("knowledge_date", "warning", "document last_reviewed is invalid", path))
+        elif age > warn_days:
+            results.append(finding("stale_doc", "warning", f"document not reviewed for {age} days", path))
+        if path and not Path(path).exists():
+            results.append(finding("missing_doc", "error", "knowledge document is missing", path))
+    return results
+
+
+def check_tasks(config: dict) -> list[dict]:
+    results: list[dict] = []
+    board = load_json(Path(".agent/task-board.json"), {})
+    warn_days = int(config.get("policy", {}).get("active_tasks_warn_after_days", 30))
+    for item in board.get("items", []):
+        state = item.get("state")
+        task_id = item.get("id", "unknown")
+        if state in {"active", "blocked", "review"}:
+            age = days_since(item.get("updated_at", ""))
+            if age is not None and age > warn_days:
+                results.append(finding("stale_task", "warning", f"task {task_id} has been {state} for {age} days", item.get("docs_path", "")))
+        if state == "done" and not item.get("delivery_conclusion"):
+            results.append(finding("task_conclusion", "warning", f"done task {task_id} has no delivery conclusion", item.get("docs_path", "")))
+        docs_path = item.get("docs_path")
+        if docs_path and not Path(docs_path).exists():
+            results.append(finding("task_docs", "error", f"task {task_id} docs_path is missing", docs_path))
+    return results
+
+
+def check_baselines(config: dict) -> list[dict]:
+    results: list[dict] = []
+    baselines = load_json(Path(".agent/baselines.json"), {})
+    warn_days = int(config.get("policy", {}).get("baseline_warn_after_days", 30))
+    for item in baselines.get("snapshots", []):
+        path = item.get("path", "")
+        if path and not Path(path).exists():
+            results.append(finding("missing_baseline", "warning", "baseline snapshot listed but file is missing", path))
+        age = days_since(item.get("created_at", ""))
+        if age is not None and age > warn_days:
+            results.append(finding("stale_baseline", "warning", f"baseline snapshot is {age} days old", path))
+    return results
+
+
+def check_config_pointers() -> list[dict]:
+    results: list[dict] = []
+    manifest = load_json(Path(".agent/manifest.json"), {})
+    manifest_schemas = manifest.get("json_schemas", {})
+    expected = {
+        path: schema
+        for path, schema in manifest_schemas.items()
+        if path
+        in {
+            ".agent/manifest.json",
+            ".agent/dev-map.json",
+            ".agent/harness-evolution.json",
+            ".agent/mcp-policy.json",
+            ".agent/governance-gc.json",
+        }
+    }
+    expected.setdefault(".agent/manifest.json", "agent-governance-manifest-v1")
+    for name, schema in expected.items():
+        path = Path(name)
+        if not path.exists():
+            results.append(finding("missing_config", "error", f"missing {name}", name))
+            continue
+        results.extend(validate_schema(path, schema))
+    harness = load_json(Path(".agent/harness.json"), {})
+    manifest_required = sorted(manifest.get("required_paths", []))
+    harness_required = sorted(harness.get("invariants", {}).get("required_paths", []))
+    if manifest_required and harness_required and manifest_required != harness_required:
+        results.append(finding("manifest", "error", "manifest required_paths differ from harness required_paths", ".agent/manifest.json"))
+    dev_map = load_json(Path(".agent/dev-map.json"), {}) if Path(".agent/dev-map.json").exists() else {}
+    if dev_map.get("doc") and not Path(dev_map["doc"]).exists():
+        results.append(finding("dev_map", "error", "dev map doc is missing", dev_map["doc"]))
+    mcp = load_json(Path(".agent/mcp-policy.json"), {}) if Path(".agent/mcp-policy.json").exists() else {}
+    if mcp and mcp.get("mode") != "optional-disabled-by-default" and not mcp.get("servers"):
+        results.append(finding("mcp_policy", "warning", "MCP policy is not disabled but has no server registry", ".agent/mcp-policy.json"))
+    return results
+
+
+def collect_report() -> dict:
+    config = load_json(CONFIG_PATH)
+    findings: list[dict] = []
+    findings.extend(check_config_pointers())
+    checks = config.get("checks", {})
+    if checks.get("knowledge_owners", True) or checks.get("stale_docs", True):
+        findings.extend(check_knowledge(config))
+    if checks.get("task_board_stale_active_items", True):
+        findings.extend(check_tasks(config))
+    if checks.get("baseline_age", True):
+        findings.extend(check_baselines(config))
+    error_count = sum(1 for item in findings if item["severity"] == "error")
+    warning_count = sum(1 for item in findings if item["severity"] == "warning")
+    return {
+        "schema": "agent-governance-gc-report-v1",
+        "created_at": utc_now(),
+        "status": "fail" if error_count else "warn" if warning_count else "pass",
+        "counts": {"errors": error_count, "warnings": warning_count, "findings": len(findings)},
+        "findings": findings,
+    }
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    report = collect_report()
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        for item in report["findings"]:
+            print(f"{item['severity']}: {item['kind']}: {item['summary']}" + (f" ({item['path']})" if item.get("path") else ""))
+        print(f"agent governance gc {report['status']}: {report['counts']['errors']} error(s), {report['counts']['warnings']} warning(s)")
+    if report["counts"]["errors"]:
+        return 1
+    if args.fail_on_warning and report["counts"]["warnings"]:
+        return 1
+    return 0
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    report = collect_report()
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(f"# Governance GC Report\n\n- Status: {report['status']}\n- Errors: {report['counts']['errors']}\n- Warnings: {report['counts']['warnings']}\n")
+        for item in report["findings"]:
+            path = f" `{item['path']}`" if item.get("path") else ""
+            print(f"- {item['severity']}: {item['kind']}: {item['summary']}{path}")
+    return 1 if report["counts"]["errors"] else 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    doctor = subparsers.add_parser("doctor", help="Check governance drift")
+    doctor.add_argument("--json", action="store_true")
+    doctor.add_argument("--fail-on-warning", action="store_true")
+    doctor.set_defaults(func=cmd_doctor)
+
+    report = subparsers.add_parser("report", help="Print a governance drift report")
+    report.add_argument("--json", action="store_true")
+    report.set_defaults(func=cmd_report)
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

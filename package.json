@@ -1,6 +1,6 @@
 {
   "name": "@airpot/agent-gov",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "One-command project governance initializer for Codex and Claude agent workflows.",
   "license": "MIT",
   "type": "module",
@@ -17,10 +17,6 @@
   },
   "files": [
     ".codex/skills/agent-gov",
-    ".codex/skills/openspec-apply-change",
-    ".codex/skills/openspec-archive-change",
-    ".codex/skills/openspec-explore",
-    ".codex/skills/openspec-propose",
     "npm",
     "README.md",
     "LICENSE",

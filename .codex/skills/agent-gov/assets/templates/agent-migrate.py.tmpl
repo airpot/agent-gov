@@ -1,0 +1,396 @@
+#!/usr/bin/env python3
+"""Check whether the local agent-gov scaffold needs a non-destructive migration."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+LATEST_MANIFEST_VERSION = 1
+PROFILES = {"core", "standard", "full"}
+LEGACY_CONFIG_PATH_KEYS = {
+    "session_root",
+    "governance_manifest",
+    "harness_config",
+    "project_layout",
+    "spec_config",
+    "spec_root",
+    "workflow_config",
+    "workflow_profiles",
+    "worktree_policy",
+    "risk_zones",
+    "review_policy",
+    "subagent_config",
+    "hooks_config",
+    "role_contracts",
+    "task_board",
+    "knowledge_manifest",
+    "dev_map",
+    "memory_config",
+    "context_config",
+    "capabilities_config",
+    "tooling_config",
+    "security_config",
+    "evals_config",
+    "mechanical_checks",
+    "baselines",
+    "harness_evolution",
+    "mcp_policy",
+    "governance_gc",
+    "governance_score",
+    "runlog",
+    "skill_distribution",
+    "codex_config",
+    "codex_hooks",
+    "claude_settings",
+}
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def read_json(path: Path) -> tuple[dict, str | None]:
+    if not path.exists():
+        return {}, f"missing {path}"
+    try:
+        return json.loads(path.read_text(encoding="utf-8")), None
+    except json.JSONDecodeError as exc:
+        return {}, f"invalid JSON in {path}: {exc}"
+    except OSError as exc:
+        return {}, f"cannot read {path}: {exc}"
+
+
+def required_paths(harness: dict) -> list[str]:
+    values = harness.get("invariants", {}).get("required_paths", [])
+    return values if isinstance(values, list) else []
+
+
+def profile_floor_paths(profile: str) -> set[str]:
+    core = {
+        "AGENTS.md",
+        ".agent/config.json",
+        ".agent/manifest.json",
+        ".agent/harness.json",
+        ".agent/project-layout.json",
+        ".agent/evals.json",
+        ".agent/evals/latest.md",
+        ".agent/runlog.jsonl",
+        ".agent/sessions/index.json",
+        ".agent/sessions/active.md",
+        ".agent/sessions/bootstrap.md",
+        ".agent/tools/agent_session.py",
+        "scripts/agent_check.py",
+        "scripts/agent_spec.py",
+        "scripts/agent_validate.py",
+        "scripts/agent_runlog.py",
+        "scripts/agent_score.py",
+        "scripts/agent_migrate.py",
+        "docs/index.md",
+        "docs/QUALITY.md",
+    }
+    standard = {
+        ".agent/workflow.json",
+        ".agent/workflow-profiles.json",
+        ".agent/risk-zones.json",
+        ".agent/review-policy.json",
+        ".agent/worktrees.json",
+        ".agent/role-contracts.json",
+        ".agent/task-board.json",
+        ".agent/knowledge.json",
+        ".agent/dev-map.json",
+        ".agent/memory.json",
+        ".agent/context.json",
+        ".agent/capabilities.json",
+        ".agent/mechanical-checks.json",
+        ".agent/baselines.json",
+        ".agent/harness-evolution.json",
+        ".agent/governance-gc.json",
+        "scripts/agent_knowledge.py",
+        "scripts/agent_invariants.py",
+        "scripts/agent_capabilities.py",
+        "scripts/agent_task.py",
+        "scripts/agent_verify.py",
+        "scripts/agent_gc.py",
+        "docs/ARCHITECTURE.md",
+        "docs/RELIABILITY.md",
+        "docs/QUALITY_SCORE.md",
+        "docs/AI_CODING_GLOSSARY.md",
+        "docs/DEV_MAP.md",
+        "docs/features/INDEX.md",
+        "docs/tech-debt.md",
+        "docs/adr/README.md",
+        "docs/rfcs/README.md",
+        "docs/incidents/README.md",
+    }
+    full = {
+        ".agent/subagents.json",
+        ".agent/hooks.json",
+        ".agent/tooling.json",
+        ".agent/security.json",
+        ".agent/mcp-policy.json",
+        ".agent/skill-distribution.json",
+        ".agent/tools/governance_hook.py",
+        ".codex/config.toml",
+        ".codex/hooks.json",
+        "scripts/agent_tooling.py",
+        "scripts/agent_security.py",
+        "scripts/agent_sync_skills.py",
+        "docs/SECURITY.md",
+        "docs/TOOLING.md",
+    }
+    result = set(core)
+    if profile in {"standard", "full"}:
+        result.update(standard)
+    if profile == "full":
+        result.update(full)
+    return result
+
+
+def config_path_pointers(config: dict) -> dict[str, str]:
+    paths = config.get("paths", {})
+    if isinstance(paths, dict) and paths:
+        return {str(key): str(value) for key, value in paths.items() if isinstance(value, str)}
+    return {
+        key: value
+        for key, value in config.items()
+        if key in LEGACY_CONFIG_PATH_KEYS and isinstance(value, str) and value
+    }
+
+
+def path_exists(path: str) -> bool:
+    return Path(path).exists()
+
+
+def check_path_pointers(source: str, values: dict[str, str], errors: list[str], actions: list[dict]) -> None:
+    missing = sorted(f"{key}: {path}" for key, path in values.items() if not path_exists(path))
+    if not missing:
+        return
+    errors.append(f"{source} has {len(missing)} pointer(s) to missing paths")
+    actions.append(
+        {
+            "kind": "pointer-review",
+            "path": source,
+            "summary": "Remove stale path pointers or generate the referenced profile files.",
+            "paths": missing[:30],
+        }
+    )
+
+
+def harness_path_pointers(harness: dict) -> dict[str, str]:
+    pointers: dict[str, str] = {}
+    for key, value in harness.get("observability", {}).items():
+        if isinstance(value, str):
+            pointers[f"observability.{key}"] = value
+    knowledge = harness.get("knowledge", {})
+    for key in ("index", "manifest"):
+        value = knowledge.get(key)
+        if isinstance(value, str):
+            pointers[f"knowledge.{key}"] = value
+    for index, value in enumerate(knowledge.get("required_docs", [])):
+        if isinstance(value, str):
+            pointers[f"knowledge.required_docs[{index}]"] = value
+    return pointers
+
+
+def collect_plan() -> dict:
+    errors: list[str] = []
+    warnings: list[str] = []
+    actions: list[dict] = []
+
+    config, error = read_json(Path(".agent/config.json"))
+    if error:
+        errors.append(error)
+        config = {}
+    elif config.get("schema") != "agent-project-config-v1":
+        errors.append(".agent/config.json schema must be agent-project-config-v1")
+    else:
+        check_path_pointers(".agent/config.json", config_path_pointers(config), errors, actions)
+
+    profile = config.get("governance_profile")
+    if not profile:
+        warnings.append(".agent/config.json missing governance_profile; assuming full for legacy scaffold")
+        actions.append(
+            {
+                "kind": "manual-edit",
+                "path": ".agent/config.json",
+                "summary": "Add governance_profile as core, standard, or full.",
+            }
+        )
+        profile = "full"
+    elif profile not in PROFILES:
+        errors.append(f".agent/config.json governance_profile must be one of {', '.join(sorted(PROFILES))}")
+
+    manifest, error = read_json(Path(".agent/manifest.json"))
+    if error:
+        errors.append(error)
+        manifest = {}
+        actions.append(
+            {
+                "kind": "regenerate",
+                "path": ".agent/manifest.json",
+                "summary": "Regenerate the manifest with agent-gov initializer or restore it from version control.",
+            }
+        )
+    elif manifest.get("schema") != "agent-governance-manifest-v1":
+        errors.append(".agent/manifest.json schema must be agent-governance-manifest-v1")
+
+    manifest_version = int(manifest.get("manifest_version", 0) or 0)
+    if manifest_version < LATEST_MANIFEST_VERSION:
+        actions.append(
+            {
+                "kind": "upgrade",
+                "path": ".agent/manifest.json",
+                "summary": f"Upgrade manifest_version {manifest_version} to {LATEST_MANIFEST_VERSION}.",
+            }
+        )
+    elif manifest_version > LATEST_MANIFEST_VERSION:
+        warnings.append(f"manifest_version {manifest_version} is newer than this script understands")
+
+    harness, error = read_json(Path(".agent/harness.json"))
+    if error:
+        errors.append(error)
+        harness = {}
+    elif harness.get("schema") != "agent-harness-v1":
+        errors.append(".agent/harness.json schema must be agent-harness-v1")
+    else:
+        check_path_pointers(".agent/harness.json", harness_path_pointers(harness), errors, actions)
+
+    required = required_paths(harness)
+    manifest_required = manifest.get("required_paths", [])
+    if required and manifest_required and sorted(required) != sorted(manifest_required):
+        errors.append(".agent/manifest.json required_paths must match .agent/harness.json invariants.required_paths")
+        actions.append(
+            {
+                "kind": "regenerate",
+                "path": ".agent/manifest.json",
+                "summary": "Refresh manifest required_paths from .agent/harness.json.",
+            }
+        )
+
+    if profile in PROFILES:
+        floor = profile_floor_paths(profile)
+        missing_from_harness = sorted(path for path in floor if path not in required)
+        if missing_from_harness:
+            warnings.append(f"{len(missing_from_harness)} expected {profile} path(s) are not listed in harness required_paths")
+            actions.append(
+                {
+                    "kind": "harness-review",
+                    "path": ".agent/harness.json",
+                    "summary": "Review whether profile-level required paths should be added.",
+                    "paths": missing_from_harness[:20],
+                }
+            )
+
+    missing_required = [path for path in required if not Path(path).exists()]
+    if missing_required:
+        errors.append(f"{len(missing_required)} required path(s) are missing")
+        actions.append(
+            {
+                "kind": "restore-or-generate",
+                "path": ".agent/harness.json",
+                "summary": "Restore missing required files or rerun initialization without overwriting unrelated project files.",
+                "paths": missing_required[:30],
+            }
+        )
+
+    evals, error = read_json(Path(".agent/evals.json"))
+    if error:
+        errors.append(error)
+        evals = {}
+    elif evals.get("schema") != "agent-evals-v1":
+        errors.append(".agent/evals.json schema must be agent-evals-v1")
+
+    score_dimensions = sorted(evals.get("dimensions", {}))
+    manifest_dimensions = sorted(manifest.get("score_dimensions", []))
+    if score_dimensions and manifest_dimensions and score_dimensions != manifest_dimensions:
+        errors.append(".agent/manifest.json score_dimensions must match .agent/evals.json dimensions")
+        actions.append(
+            {
+                "kind": "regenerate",
+                "path": ".agent/manifest.json",
+                "summary": "Refresh manifest score_dimensions from .agent/evals.json.",
+            }
+        )
+
+    json_schemas = manifest.get("json_schemas", {})
+    if isinstance(json_schemas, dict):
+        for path, schema in json_schemas.items():
+            data, json_error = read_json(Path(path))
+            if json_error:
+                errors.append(json_error)
+                continue
+            if schema and data.get("schema") != schema:
+                errors.append(f"{path} schema must be {schema}")
+
+    status = "fail" if errors else "warn" if warnings or actions else "pass"
+    return {
+        "schema": "agent-migration-plan-v1",
+        "created_at": utc_now(),
+        "latest_manifest_version": LATEST_MANIFEST_VERSION,
+        "governance_profile": profile,
+        "status": status,
+        "errors": errors,
+        "warnings": warnings,
+        "actions": actions,
+        "non_destructive": True,
+    }
+
+
+def print_human(plan: dict) -> None:
+    for error in plan["errors"]:
+        print(f"error: {error}")
+    for warning in plan["warnings"]:
+        print(f"warning: {warning}")
+    for action in plan["actions"]:
+        print(f"action: {action['kind']}: {action['summary']} ({action.get('path', 'repo')})")
+        for path in action.get("paths", [])[:10]:
+            print(f"  - {path}")
+    if not plan["errors"] and not plan["warnings"] and not plan["actions"]:
+        print("agent migration doctor passed")
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    plan = collect_plan()
+    if args.json:
+        print(json.dumps(plan, indent=2))
+    else:
+        print_human(plan)
+    return 1 if plan["errors"] else 0
+
+
+def cmd_plan(args: argparse.Namespace) -> int:
+    plan = collect_plan()
+    if args.json:
+        print(json.dumps(plan, indent=2))
+    else:
+        print_human(plan)
+        print(f"migration status: {plan['status']}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    doctor = subparsers.add_parser("doctor", help="Fail when the scaffold is inconsistent")
+    doctor.add_argument("--json", action="store_true")
+    doctor.set_defaults(func=cmd_doctor)
+
+    plan = subparsers.add_parser("plan", help="Print non-destructive migration recommendations")
+    plan.add_argument("--json", action="store_true")
+    plan.set_defaults(func=cmd_plan)
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

@@ -13,10 +13,6 @@ const SKILLS_SOURCE = path.join(PACKAGE_ROOT, ".codex", "skills");
 const INIT_SCRIPT = path.join(SKILLS_SOURCE, "agent-gov", "scripts", "init_agent_project.py");
 const RUNTIME_SKILLS = [
   "agent-gov",
-  "openspec-apply-change",
-  "openspec-archive-change",
-  "openspec-explore",
-  "openspec-propose",
 ];
 const IGNORE_DIRS = new Set(["__pycache__", ".git", ".skvm"]);
 const IGNORE_SUFFIXES = new Set([".pyc", ".pyo", ".log"]);
@@ -38,15 +34,17 @@ Usage:
 Examples:
   npx @airpot/agent-gov@latest
   npx @airpot/agent-gov@latest --tech-stack python,typescript --layout service
+  npx @airpot/agent-gov@latest --governance-profile standard
   npx @airpot/agent-gov@latest init /path/to/repo --remote-kind ssh
 
 Default behavior:
-  Installs bundled project skills into <root>/.codex/skills, then runs the
+  Installs the bundled agent-gov project skill into <root>/.codex/skills, then runs the
   agent-gov initializer for <root>. Existing skill files are preserved unless
-  --force or --force-skill is provided.
+  --force or --force-skill is provided. The initializer defaults to
+  --governance-profile standard.
 
 Local npm-only options:
-  --skip-skill-install   Run the Python initializer without copying skills.
+  --skip-skill-install   Run the Python initializer without copying the bundled skill.
   --force-skill          Overwrite existing bundled skill files.
   --help, -h             Show this help.
   --version, -v          Show the package version.

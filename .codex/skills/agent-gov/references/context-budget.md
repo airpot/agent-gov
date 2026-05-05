@@ -15,13 +15,22 @@ The useful ideas from `caveman` are context economy, measurable token budgets, s
     stats.jsonl
     latest.md
   capabilities.json
+  dev-map.json
   workflow.json
+  workflow-profiles.json
+  task-board.json
+  role-contracts.json
   risk-zones.json
   review-policy.json
   worktrees.json
   tooling.json
   security.json
   evals.json
+  mechanical-checks.json
+  baselines.json
+  harness-evolution.json
+  mcp-policy.json
+  governance-gc.json
   evals/
     latest.md
   templates/
@@ -38,16 +47,16 @@ Use approximate tokens, not provider-specific tokenizer APIs. The generated tool
 
 Default budgets:
 
-- Total tracked governance context: 20000 estimated tokens.
-- `AGENTS.md`: 1600 estimated tokens.
+- Total tracked governance context: 30000 estimated tokens.
+- `AGENTS.md`: 2200 estimated tokens.
 - `CLAUDE.md`: 2500 estimated tokens.
-- Single durable doc: 3000 estimated tokens.
+- Single durable doc: 4000 estimated tokens.
 - Session bootstrap: 5000 estimated tokens.
 - Memory digest: 1200 estimated tokens.
 - Capability registry: 3000 estimated tokens through the single durable doc budget.
 - Tooling and security registries: 3000 estimated tokens each through the single durable doc budget.
-- Workflow, risk, review, and worktree policy: 3000 estimated tokens each through the single durable doc budget.
-- Governance score config and latest dashboard: 3000 estimated tokens each through the single durable doc budget.
+- Workflow, workflow profile, task-board, role-contract, dev-map, harness-evolution, MCP, governance-gc, risk, review, and worktree policy: 4000 estimated tokens each through the single durable doc budget.
+- Governance score, mechanical check, baseline config, and latest dashboard: 4000 estimated tokens each through the single durable doc budget.
 - Subagent supporting notes after the snapshot JSON: 700 estimated tokens.
 - Single review finding: 120 estimated tokens.
 

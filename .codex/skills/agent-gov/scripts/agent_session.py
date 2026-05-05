@@ -19,6 +19,7 @@ INDEX_PATH = SESSION_ROOT / "index.json"
 ACTIVE_PATH = SESSION_ROOT / "active.md"
 BOOTSTRAP_PATH = SESSION_ROOT / "bootstrap.md"
 RUNLOG_PATH = Path(".agent/runlog.jsonl")
+CONFIG_PATH = Path(".agent/config.json")
 
 
 def utc_now() -> str:
@@ -50,6 +51,56 @@ def read(path: Path, fallback: str = "") -> str:
     if not path.exists():
         return fallback
     return path.read_text(encoding="utf-8")
+
+
+def load_project_config() -> dict:
+    if not CONFIG_PATH.exists():
+        return {}
+    try:
+        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def governance_profile() -> str:
+    profile = load_project_config().get("governance_profile", "standard")
+    return profile if profile in {"core", "standard", "full"} else "standard"
+
+
+def resume_steps(session_id: str, workspace: str, openspec_change: str) -> list[str]:
+    profile = governance_profile()
+    steps = [
+        f"`cd {workspace}`",
+        "Read `.agent/sessions/active.md`.",
+        f"Read `.agent/sessions/{session_id}/handoff.md`.",
+        f"Read `.agent/sessions/{session_id}/context.md`.",
+        f"Read `.agent/sessions/{session_id}/changes.md`.",
+        f"Read `.agent/sessions/{session_id}/validation.md`.",
+        f"If linked, read the embedded spec change: `{openspec_change}`.",
+    ]
+    if Path(".agent/workflow.json").exists() and Path(".agent/worktrees.json").exists():
+        steps.append("Read `.agent/workflow.json` and `.agent/worktrees.json` when continuing implementation, validation, or finish work.")
+    else:
+        steps.append("Read `AGENTS.md`, `.agent/config.json`, and `.agent/harness.json` for the generated governance profile and required paths.")
+    if Path(".agent/task-board.json").exists():
+        steps.append("Read `.agent/task-board.json` before non-tiny edits and confirm task state.")
+    if Path(".agent/subagents.json").exists():
+        steps.append("Read accepted or rejected subagent snapshots recorded in handoff, changes, or validation notes.")
+    if Path(".agent/tools/agent_context.py").exists():
+        steps.append("Run `python3 .agent/tools/agent_context.py scan --limit 10` if context size or stale bootstrap state is unclear.")
+    steps.extend(
+        [
+            "Run `git status --short`.",
+            "Confirm current branch, worktree path, dirty files, validation status, workflow gate status, and the next task before editing."
+            if profile != "core"
+            else "Confirm current branch, dirty files, validation status, and the next task before editing.",
+        ]
+    )
+    return steps
+
+
+def numbered_steps(steps: list[str]) -> list[str]:
+    return [f"{index}. {step}" for index, step in enumerate(steps, start=1)]
 
 
 def load_index() -> dict:
@@ -152,22 +203,12 @@ def require_active() -> str:
 
 
 def render_resume_prompt(session_id: str, workspace: str, openspec_change: str) -> str:
+    steps = "\n".join(numbered_steps(resume_steps(session_id, workspace, openspec_change)))
     return f"""# Resume Prompt: {session_id}
 
 Continue the agent development session for this repository.
 
-1. `cd {workspace}`
-2. Read `.agent/sessions/active.md`.
-3. Read `.agent/sessions/{session_id}/handoff.md`.
-4. Read `.agent/sessions/{session_id}/context.md`.
-5. Read `.agent/sessions/{session_id}/changes.md`.
-6. Read `.agent/sessions/{session_id}/validation.md`.
-7. If linked, read the embedded spec change: `{openspec_change}`.
-8. Read `.agent/workflow.json` and `.agent/worktrees.json` when continuing implementation, validation, or finish work.
-9. Read accepted or rejected subagent snapshots recorded in handoff, changes, or validation notes.
-10. Run `python3 .agent/tools/agent_context.py scan --limit 10` if context size or stale bootstrap state is unclear.
-11. Run `git status --short`.
-12. Confirm current branch, worktree path, dirty files, validation status, workflow gate status, and the next task before editing.
+{steps}
 
 Do not rely on prior chat history, VS Code tabs, selected text, or terminal scrollback.
 """
@@ -194,18 +235,27 @@ def write_bootstrap(session_id: str) -> Path:
     openspec_change = artifacts.get("openspec_change", "none")
     goal = artifacts.get("goal", "unknown")
     git_status = run_git(["status", "--short"], fallback="")
+    start_steps = [
+        f"`cd {workspace}`",
+        "Read this file fully.",
+        "Run `git status --short` and compare with the snapshot below.",
+    ]
+    if Path(".agent/workflow.json").exists() and Path(".agent/worktrees.json").exists():
+        start_steps.append("Read `.agent/workflow.json` and `.agent/worktrees.json` when continuing implementation, validation, or finish work.")
+    else:
+        start_steps.append("Read `AGENTS.md`, `.agent/config.json`, and `.agent/harness.json` for the generated governance profile and required paths.")
+    if openspec_change != "none":
+        start_steps.append("Read linked embedded spec artifacts before editing.")
+    if Path(".agent/task-board.json").exists():
+        start_steps.append("Read `.agent/task-board.json` and confirm task state before editing.")
+    start_steps.append("Continue only after confirming the next task and workflow gate status." if governance_profile() != "core" else "Continue only after confirming the next task and current repository state.")
 
     sections = [
         f"# Session Bootstrap: {session_id}",
         "",
         "## Start Here",
         "",
-        f"1. `cd {workspace}`",
-        "2. Read this file fully.",
-        "3. Run `git status --short` and compare with the snapshot below.",
-        "4. Read `.agent/workflow.json` and `.agent/worktrees.json` when continuing implementation, validation, or finish work.",
-        "5. Read linked embedded spec artifacts before editing.",
-        "6. Continue only after confirming the next task and workflow gate status.",
+        *numbered_steps(start_steps),
         "",
         "## Session",
         "",

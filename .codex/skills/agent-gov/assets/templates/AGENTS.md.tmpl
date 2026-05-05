@@ -21,16 +21,9 @@ Required project directories:
 - Keep long-running session state in `.agent/sessions/`, not in chat history.
 - Use `docs/index.md` as the durable project knowledge map.
 - Use `.agent/harness.json` and `scripts/agent_validate.py` for executable feedback.
-- Use `.agent/workflow.json` for risk, spec, plan, implementation, diff, worktree, TDD/debugging, review, and completion gates.
-- Use `.agent/risk-zones.json` before implementation to classify task risk and agent autonomy.
-- Use `.agent/review-policy.json` before handoff to prove diff traceability, human review evidence, and automated review boundaries.
-- Use `.agent/worktrees.json` for isolated feature work and guarded branch/worktree cleanup.
-- Use `.agent/subagents.json` for delegated work when the active platform allows it.
-- Use `.agent/hooks.json` for advisory bootstrap and checkpoint reminders.
-- Use `.agent/knowledge.json`, `.agent/memory.json`, and `.agent/context.json` for durable docs, memory retrieval, and context budgets.
-- Use `.agent/capabilities.json`, `.agent/runlog.jsonl`, `.agent/tooling.json`, `.agent/security.json`, and `.agent/evals.json` for capability risk, evidence, bounded inspection, security, and scoring.
-- Use `.agent/skill-distribution.json` when project skills need to be mirrored into current agent skill directories.
-- Use `docs/AI_CODING_GLOSSARY.md` for shared skill/tool/MCP, harness, session, memory, and review terms.
+- Use `.agent/evals.json`, `.agent/evals/latest.md`, and `.agent/runlog.jsonl` for local governance scoring and compact evidence.
+{{agent_standard_ground_rules}}
+{{agent_full_ground_rules}}
 - Preserve unrelated user changes.
 - Do not store secrets, tokens, SSH keys, or private credentials in repository files.
 - Prefer simple, direct implementations; justify new abstractions, speculative flexibility, or broad cleanup in the active session.
@@ -38,33 +31,9 @@ Required project directories:
 
 ## Workflow
 
-1. If `.agent/sessions/active.md` exists, run `python3 .agent/tools/agent_session.py bootstrap` and read the output before editing.
-2. Run `python3 .agent/tools/agent_session.py doctor`; resolve errors before continuing and note warnings in the active session.
-3. Run `python3 .agent/tools/agent_memory.py doctor`; use `timeline`, `search`, then `detail` for only the memory needed.
-4. Run `python3 .agent/tools/agent_context.py doctor`; keep large docs behind summaries and detail commands.
-5. Run `python3 scripts/agent_capabilities.py doctor`, `python3 scripts/agent_runlog.py doctor`, `python3 scripts/agent_tooling.py doctor`, `python3 scripts/agent_security.py doctor`, and `python3 scripts/agent_score.py doctor`.
-6. Inspect `git status --short` before editing.
-7. Read `.agent/project-layout.json` before adding top-level directories or moving files.
-8. Read `.agent/workflow.json`, `.agent/risk-zones.json`, and `.agent/review-policy.json`; for non-trivial work, pass risk, spec, plan, discipline, and diff gates before implementation.
-9. Read `.agent/worktrees.json`; prefer an ignored isolated worktree for feature work, plan execution, or risky refactors.
-10. {{spec_workflow_step}}
-11. Read `docs/index.md` and the relevant linked doc before making broad changes.
-12. Inspect configured harness commands:
-   `python3 scripts/agent_validate.py --list`
-13. For behavior changes, record failing-test evidence before implementation unless an exception is documented.
-14. For bugs, test failures, build failures, or unexpected behavior, record reproduction, root cause, hypothesis, and fix validation before patching.
-15. Before broad implementation, state assumptions and success criteria; ask for clarification when multiple interpretations would change the solution.
-16. For delegated, substantial, high-risk, or critical work, run spec review before quality review, re-review after fixes, and record risk, diff, human review, and automated review boundaries.
-17. For delegated work, read `.agent/subagents.json`, assign disjoint write boundaries, and require concise `===SNAPSHOT===` JSON reports.
-18. For long-running work, start or continue an agent session:
-   `python3 .agent/tools/agent_session.py status`
-19. Check `.agent/hooks.json` before modifying native hook adapters.
-20. Checkpoint after major decisions, file changes, validation runs, and accepted subagent snapshots.
-21. Before handing off or compacting context, run `python3 .agent/tools/agent_session.py compact`.
-22. For reusable context, run `python3 .agent/tools/agent_memory.py ingest-session --reason handoff`.
-23. For oversized governance docs, run `python3 .agent/tools/agent_context.py suggest` and validate any compressed rewrite with `validate-pair`.
-24. Use ADRs for durable architecture decisions, RFCs for proposals, and postmortems for incidents.
-25. Run `python3 scripts/agent_check.py` after project governance changes and use project review/fix-log templates for substantial work.
+{{agent_core_workflow}}
+{{agent_standard_workflow}}
+{{agent_full_workflow}}
 
 ## Session Continuity
 
@@ -81,16 +50,7 @@ Codex or Claude native session state is temporary. The durable recovery path is:
 ## Harness Commands
 
 ```bash
-python3 scripts/agent_check.py
-python3 scripts/agent_spec.py doctor
-python3 scripts/agent_knowledge.py
-python3 scripts/agent_invariants.py
-python3 scripts/agent_capabilities.py doctor
-python3 scripts/agent_runlog.py doctor
-python3 scripts/agent_tooling.py doctor
-python3 scripts/agent_security.py doctor
-python3 scripts/agent_score.py doctor
-python3 scripts/agent_validate.py --list
+{{agent_harness_commands}}
 ```
 
 Use `docs/QUALITY.md` for the broader command list.

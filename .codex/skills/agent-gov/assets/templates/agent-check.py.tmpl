@@ -16,15 +16,20 @@ except ModuleNotFoundError:  # pragma: no cover - Python < 3.11 fallback
 BASE_REQUIRED = [
     "AGENTS.md",
     ".agent/config.json",
+    ".agent/manifest.json",
     ".agent/harness.json",
     ".agent/project-layout.json",
     ".agent/workflow.json",
+    ".agent/workflow-profiles.json",
     ".agent/risk-zones.json",
     ".agent/review-policy.json",
     ".agent/worktrees.json",
     ".agent/subagents.json",
+    ".agent/role-contracts.json",
+    ".agent/task-board.json",
     ".agent/hooks.json",
     ".agent/knowledge.json",
+    ".agent/dev-map.json",
     ".agent/memory.json",
     ".agent/context.json",
     ".agent/capabilities.json",
@@ -32,7 +37,13 @@ BASE_REQUIRED = [
     ".agent/security.json",
     ".agent/evals.json",
     ".agent/evals/latest.md",
+    ".agent/mechanical-checks.json",
+    ".agent/baselines.json",
+    ".agent/harness-evolution.json",
+    ".agent/mcp-policy.json",
+    ".agent/governance-gc.json",
     ".agent/runlog.jsonl",
+    ".agent/baselines/.gitkeep",
     ".agent/memory/events.jsonl",
     ".agent/memory/latest.md",
     ".agent/memory/summaries/.gitkeep",
@@ -47,6 +58,13 @@ BASE_REQUIRED = [
     ".agent/templates/implementation-plan.md.tmpl",
     ".agent/templates/debugging-record.md.tmpl",
     ".agent/templates/subagent-task.md.tmpl",
+    ".agent/templates/features/01_REQUIREMENT_ANALYSIS.md.tmpl",
+    ".agent/templates/features/02_SOLUTION_DESIGN.md.tmpl",
+    ".agent/templates/features/03_GATE_REVIEW.md.tmpl",
+    ".agent/templates/features/04_DEVELOPMENT.md.tmpl",
+    ".agent/templates/features/05_CODE_REVIEW.md.tmpl",
+    ".agent/templates/features/06_TEST_REPORT.md.tmpl",
+    ".agent/templates/features/07_DELIVERY_SUMMARY.md.tmpl",
     ".agent/templates/memory-summary.md.tmpl",
     ".agent/templates/memory-latest.md.tmpl",
     ".agent/templates/context-summary.md.tmpl",
@@ -78,7 +96,11 @@ BASE_REQUIRED = [
     "scripts/agent_tooling.py",
     "scripts/agent_security.py",
     "scripts/agent_score.py",
+    "scripts/agent_migrate.py",
     "scripts/agent_sync_skills.py",
+    "scripts/agent_task.py",
+    "scripts/agent_verify.py",
+    "scripts/agent_gc.py",
     "docs/index.md",
     "docs/ARCHITECTURE.md",
     "docs/QUALITY.md",
@@ -87,6 +109,9 @@ BASE_REQUIRED = [
     "docs/TOOLING.md",
     "docs/QUALITY_SCORE.md",
     "docs/AI_CODING_GLOSSARY.md",
+    "docs/DEV_MAP.md",
+    "docs/features/INDEX.md",
+    "docs/features/.gitkeep",
     "docs/tech-debt.md",
     "docs/adr/README.md",
     "docs/rfcs/README.md",
@@ -112,6 +137,42 @@ CLAUDE_REQUIRED = [
     ".claude/agents/governance-reviewer.md",
     ".claude/agents/governance-coordinator.md",
 ]
+LEGACY_CONFIG_PATH_KEYS = {
+    "session_root",
+    "governance_manifest",
+    "harness_config",
+    "project_layout",
+    "spec_config",
+    "spec_root",
+    "workflow_config",
+    "workflow_profiles",
+    "worktree_policy",
+    "risk_zones",
+    "review_policy",
+    "subagent_config",
+    "hooks_config",
+    "role_contracts",
+    "task_board",
+    "knowledge_manifest",
+    "dev_map",
+    "memory_config",
+    "context_config",
+    "capabilities_config",
+    "tooling_config",
+    "security_config",
+    "evals_config",
+    "mechanical_checks",
+    "baselines",
+    "harness_evolution",
+    "mcp_policy",
+    "governance_gc",
+    "governance_score",
+    "runlog",
+    "skill_distribution",
+    "codex_config",
+    "codex_hooks",
+    "claude_settings",
+}
 
 
 def load_json(path: Path, label: str) -> dict:
@@ -140,6 +201,17 @@ def load_jsonl(path: Path, label: str) -> list[dict]:
     return rows
 
 
+def config_path_pointers(config: dict) -> dict[str, str]:
+    paths = config.get("paths", {})
+    if isinstance(paths, dict) and paths:
+        return {str(key): str(value) for key, value in paths.items() if isinstance(value, str)}
+    return {
+        key: value
+        for key, value in config.items()
+        if key in LEGACY_CONFIG_PATH_KEYS and isinstance(value, str) and value
+    }
+
+
 def main() -> int:
     root = Path.cwd()
 
@@ -154,14 +226,35 @@ def main() -> int:
             if not config.get(key):
                 print(f"error: .agent/config.json missing required field: {key}")
                 return 1
+        if config.get("governance_profile") not in {"core", "standard", "full"}:
+            print("error: .agent/config.json governance_profile must be core, standard, or full")
+            return 1
+        for key, path in config_path_pointers(config).items():
+            if not (root / path).exists():
+                print(f"error: .agent/config.json path pointer is missing: {key} -> {path}")
+                return 1
+
+    manifest_path = root / ".agent/manifest.json"
+    manifest = {}
+    if manifest_path.exists():
+        manifest = load_json(manifest_path, ".agent/manifest.json")
+        if manifest.get("schema") != "agent-governance-manifest-v1":
+            print("error: .agent/manifest.json schema must be agent-governance-manifest-v1")
+            return 1
+        if not manifest.get("required_paths"):
+            print("error: .agent/manifest.json missing required_paths")
+            return 1
 
     openspec_enabled = bool(config.get("openspec_enabled", config.get("spec_source", "openspec") == "openspec"))
     claude_enabled = bool(config.get("claude_enabled", True))
-    required = list(BASE_REQUIRED)
-    if openspec_enabled:
-        required.extend(OPENSPEC_REQUIRED)
-    if claude_enabled:
-        required.extend(CLAUDE_REQUIRED)
+    if manifest.get("required_paths"):
+        required = list(manifest["required_paths"])
+    else:
+        required = list(BASE_REQUIRED)
+        if openspec_enabled:
+            required.extend(OPENSPEC_REQUIRED)
+        if claude_enabled:
+            required.extend(CLAUDE_REQUIRED)
     missing = [path for path in required if not (root / path).exists()]
 
     index_path = root / ".agent/sessions/index.json"
@@ -192,6 +285,9 @@ def main() -> int:
         if harness.get("schema") != "agent-harness-v1":
             print("error: .agent/harness.json schema must be agent-harness-v1")
             return 1
+        if manifest.get("required_paths") and sorted(manifest["required_paths"]) != sorted(harness.get("invariants", {}).get("required_paths", [])):
+            print("error: .agent/manifest.json required_paths must match .agent/harness.json invariants.required_paths")
+            return 1
 
     layout_path = root / ".agent/project-layout.json"
     if layout_path.exists():
@@ -204,11 +300,32 @@ def main() -> int:
                 missing.append(directory)
 
     workflow_path = root / ".agent/workflow.json"
+    workflow = {}
+    workflow_stages: set[str] = set()
     if workflow_path.exists():
         workflow = load_json(workflow_path, ".agent/workflow.json")
         if workflow.get("schema") != "agent-workflow-v1":
             print("error: .agent/workflow.json schema must be agent-workflow-v1")
             return 1
+        for key in ("profile_source", "task_board", "role_contracts", "feature_docs"):
+            if not workflow.get(key):
+                print(f"error: .agent/workflow.json missing pointer: {key}")
+                return 1
+        workflow_stages = set(workflow.get("stages", []))
+        stage_definitions = workflow.get("stage_definitions", {})
+        for stage in ("intake", "risk_classification", "implementation", "spec_review", "quality_review", "verification", "handoff"):
+            definition = stage_definitions.get(stage, {})
+            if not definition:
+                print(f"error: .agent/workflow.json missing stage definition: {stage}")
+                return 1
+            for key in ("owner_role", "required_inputs", "required_outputs", "allowed_next", "rollback_to", "forbidden_actions"):
+                if key not in definition:
+                    print(f"error: .agent/workflow.json stage {stage} missing {key}")
+                    return 1
+        for stage in stage_definitions:
+            if stage not in workflow_stages:
+                print(f"error: .agent/workflow.json stage definition is not listed in stages: {stage}")
+                return 1
         gates = workflow.get("gates", {})
         for gate in (
             "risk_classification",
@@ -242,6 +359,9 @@ def main() -> int:
         if sequence != ["spec_review", "quality_review"]:
             print("error: .agent/workflow.json review sequence must be spec_review then quality_review")
             return 1
+        if gates.get("review_sequence", {}).get("finder_cannot_fix") is not True:
+            print("error: .agent/workflow.json review sequence must enforce finder_cannot_fix")
+            return 1
         if not gates.get("risk_classification", {}).get("record_in_plan"):
             print("error: .agent/workflow.json risk classification must be recorded in plans")
             return 1
@@ -251,6 +371,72 @@ def main() -> int:
         if not gates.get("human_review_evidence", {}).get("requires_diff_or_file_review"):
             print("error: .agent/workflow.json human review evidence must require diff or file review")
             return 1
+
+    profiles_path = root / ".agent/workflow-profiles.json"
+    if profiles_path.exists():
+        profiles = load_json(profiles_path, ".agent/workflow-profiles.json")
+        if profiles.get("schema") != "agent-workflow-profiles-v1":
+            print("error: .agent/workflow-profiles.json schema must be agent-workflow-profiles-v1")
+            return 1
+        configured = profiles.get("profiles", {})
+        for profile in ("tiny", "bugfix", "standard", "full"):
+            if profile not in configured:
+                print(f"error: .agent/workflow-profiles.json missing profile: {profile}")
+                return 1
+            spec = configured[profile]
+            for key in ("stages", "max_risk", "task_board_record", "feature_doc_templates", "required_evidence"):
+                if key not in spec:
+                    print(f"error: workflow profile {profile} missing {key}")
+                    return 1
+            for stage in spec.get("stages", []):
+                if workflow_stages and stage not in workflow_stages:
+                    print(f"error: workflow profile {profile} references unknown stage: {stage}")
+                    return 1
+        if profiles.get("policy", {}).get("choose_lightest_profile_that_covers_risk") is not True:
+            print("error: workflow profiles must choose the lightest profile that covers risk")
+            return 1
+
+    task_board_path = root / ".agent/task-board.json"
+    if task_board_path.exists():
+        task_board = load_json(task_board_path, ".agent/task-board.json")
+        if task_board.get("schema") != "agent-task-board-v1":
+            print("error: .agent/task-board.json schema must be agent-task-board-v1")
+            return 1
+        for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path", "delivery_conclusion", "related_tasks"):
+            if field not in task_board.get("required_fields", []):
+                print(f"error: .agent/task-board.json missing required field declaration: {field}")
+                return 1
+        if task_board.get("policy", {}).get("new_session_reads_board_before_edits") is not True:
+            print("error: .agent/task-board.json must require new sessions to read the task board")
+            return 1
+        seen_tasks: set[str] = set()
+        allowed_states = set(task_board.get("states", []))
+        allowed_profiles = set(load_json(root / ".agent/workflow-profiles.json", ".agent/workflow-profiles.json").get("profiles", {})) if profiles_path.exists() else set()
+        for item in task_board.get("items", []):
+            task_id = item.get("id")
+            if not task_id:
+                print("error: .agent/task-board.json item missing id")
+                return 1
+            if task_id in seen_tasks:
+                print(f"error: duplicate task-board id: {task_id}")
+                return 1
+            seen_tasks.add(task_id)
+            if item.get("state") not in allowed_states:
+                print(f"error: task {task_id} has invalid state")
+                return 1
+            if allowed_profiles and item.get("profile") not in allowed_profiles:
+                print(f"error: task {task_id} has invalid workflow profile")
+                return 1
+            if allowed_profiles:
+                profile = load_json(root / ".agent/workflow-profiles.json", ".agent/workflow-profiles.json").get("profiles", {}).get(item.get("profile"), {})
+                allowed_stages = set(profile.get("stages", []))
+                if allowed_stages and item.get("current_stage") not in allowed_stages:
+                    print(f"error: task {task_id} has invalid current_stage for profile {item.get('profile')}: {item.get('current_stage')}")
+                    return 1
+            if item.get("state") == "done" and task_board.get("policy", {}).get("done_requires_delivery_conclusion") is True:
+                if not str(item.get("delivery_conclusion", "")).strip():
+                    print(f"error: task {task_id} is done without delivery_conclusion")
+                    return 1
 
     risk_path = root / ".agent/risk-zones.json"
     if risk_path.exists():
@@ -291,7 +477,7 @@ def main() -> int:
             print("error: .agent/review-policy.json must require changed-line traceability")
             return 1
         human = review_policy.get("human_review", {})
-        for field in ("reviewer", "review_type", "diff_range", "files_reviewed", "conclusion"):
+        for field in ("reviewer", "review_type", "diff_range", "files_reviewed", "high_risk_paths_checked", "conclusion"):
             if field not in human.get("evidence_fields", []):
                 print(f"error: .agent/review-policy.json missing human review evidence field: {field}")
                 return 1
@@ -336,6 +522,40 @@ def main() -> int:
         if workflow.get("review_sequence") != ["spec_reviewer", "quality_reviewer"]:
             print("error: .agent/subagents.json review sequence must be spec_reviewer then quality_reviewer")
             return 1
+        if subagents.get("policy", {}).get("finder_cannot_fix") is not True:
+            print("error: .agent/subagents.json must enforce finder_cannot_fix")
+            return 1
+        if subagents.get("role_contracts") != ".agent/role-contracts.json":
+            print("error: .agent/subagents.json must point to .agent/role-contracts.json")
+            return 1
+
+    role_contracts_path = root / ".agent/role-contracts.json"
+    if role_contracts_path.exists():
+        contracts = load_json(role_contracts_path, ".agent/role-contracts.json")
+        if contracts.get("schema") != "agent-role-contracts-v1":
+            print("error: .agent/role-contracts.json schema must be agent-role-contracts-v1")
+            return 1
+        if contracts.get("policy", {}).get("finder_cannot_fix") is not True:
+            print("error: .agent/role-contracts.json must enforce finder_cannot_fix")
+            return 1
+        separation = contracts.get("separation_of_duties", {})
+        if separation.get("finder_cannot_modify_files") is not True:
+            print("error: .agent/role-contracts.json must block finder file modification")
+            return 1
+        for role in ("coordinator", "worker", "verifier", "spec_reviewer", "quality_reviewer", "reviewer"):
+            contract = contracts.get("contracts", {}).get(role, {})
+            if not contract:
+                print(f"error: .agent/role-contracts.json missing contract: {role}")
+                return 1
+            for key in ("owner_for_stages", "must_read", "may_write", "must_write", "forbidden_actions", "blocking_conditions"):
+                if key not in contract:
+                    print(f"error: role contract {role} missing {key}")
+                    return 1
+        for role in ("verifier", "spec_reviewer", "quality_reviewer", "reviewer"):
+            forbidden = " ".join(contracts.get("contracts", {}).get(role, {}).get("forbidden_actions", []))
+            if "fix" not in forbidden and "implementation" not in forbidden:
+                print(f"error: finder role {role} must forbid direct fixes")
+                return 1
 
     hooks_path = root / ".agent/hooks.json"
     if hooks_path.exists():
@@ -349,6 +569,22 @@ def main() -> int:
         knowledge = load_json(knowledge_path, ".agent/knowledge.json")
         if knowledge.get("schema") != "agent-knowledge-v1":
             print("error: .agent/knowledge.json schema must be agent-knowledge-v1")
+            return 1
+
+    dev_map_path = root / ".agent/dev-map.json"
+    if dev_map_path.exists():
+        dev_map = load_json(dev_map_path, ".agent/dev-map.json")
+        if dev_map.get("schema") != "agent-dev-map-v1":
+            print("error: .agent/dev-map.json schema must be agent-dev-map-v1")
+            return 1
+        if dev_map.get("doc") != "docs/DEV_MAP.md":
+            print("error: .agent/dev-map.json must point to docs/DEV_MAP.md")
+            return 1
+        if dev_map.get("policy", {}).get("map_is_index_not_inventory") is not True:
+            print("error: .agent/dev-map.json must mark dev map as index, not inventory")
+            return 1
+        if not dev_map.get("areas"):
+            print("error: .agent/dev-map.json must define at least one area")
             return 1
 
     memory_path = root / ".agent/memory.json"
@@ -450,6 +686,88 @@ def main() -> int:
                 print(f"error: .agent/security.json suite must be a list: {key}")
                 return 1
 
+    mechanical_path = root / ".agent/mechanical-checks.json"
+    if mechanical_path.exists():
+        mechanical = load_json(mechanical_path, ".agent/mechanical-checks.json")
+        if mechanical.get("schema") != "agent-mechanical-checks-v1":
+            print("error: .agent/mechanical-checks.json schema must be agent-mechanical-checks-v1")
+            return 1
+        checks = mechanical.get("checks", {})
+        required_mechanical_checks = [
+            "json_integrity",
+            "jsonl_integrity",
+            "required_paths",
+            "feature_templates",
+            "task_board",
+            "role_contracts",
+            "manifest",
+            "dev_map",
+            "harness_evolution",
+            "governance_gc",
+            "markdown_links",
+        ]
+        if (root / ".agent/mcp-policy.json").exists():
+            required_mechanical_checks.append("mcp_policy")
+        for key in required_mechanical_checks:
+            if key not in checks:
+                print(f"error: .agent/mechanical-checks.json missing check: {key}")
+                return 1
+        if checks.get("role_contracts", {}).get("enforce_finder_cannot_fix") is not True:
+            print("error: mechanical role contract check must enforce finder_cannot_fix")
+            return 1
+        baseline_policy = mechanical.get("baseline_policy", {})
+        if baseline_policy.get("fail_on_new_invalid_json") is not True:
+            print("error: mechanical baseline policy must fail on new invalid JSON")
+            return 1
+
+    baselines_path = root / ".agent/baselines.json"
+    if baselines_path.exists():
+        baselines = load_json(baselines_path, ".agent/baselines.json")
+        if baselines.get("schema") != "agent-baselines-v1":
+            print("error: .agent/baselines.json schema must be agent-baselines-v1")
+            return 1
+        if not baselines.get("snapshot_dir"):
+            print("error: .agent/baselines.json missing snapshot_dir")
+            return 1
+
+    evolution_path = root / ".agent/harness-evolution.json"
+    if evolution_path.exists():
+        evolution = load_json(evolution_path, ".agent/harness-evolution.json")
+        if evolution.get("schema") != "agent-harness-evolution-v1":
+            print("error: .agent/harness-evolution.json schema must be agent-harness-evolution-v1")
+            return 1
+        for category in ("rule_gap", "skill_gap", "script_gap", "workflow_gap", "role_contract_gap", "tool_or_mcp_gap", "knowledge_gap", "session_gap", "context_gap"):
+            if category not in evolution.get("incident_categories", {}):
+                print(f"error: .agent/harness-evolution.json missing incident category: {category}")
+                return 1
+        if evolution.get("policy", {}).get("turn_repeat_failures_into_harness_changes") is not True:
+            print("error: harness evolution must promote repeat failures into harness changes")
+            return 1
+
+    mcp_policy_path = root / ".agent/mcp-policy.json"
+    if mcp_policy_path.exists():
+        mcp_policy = load_json(mcp_policy_path, ".agent/mcp-policy.json")
+        if mcp_policy.get("schema") != "agent-mcp-policy-v1":
+            print("error: .agent/mcp-policy.json schema must be agent-mcp-policy-v1")
+            return 1
+        if mcp_policy.get("policy", {}).get("credentials_must_not_be_stored_in_repo") is not True:
+            print("error: .agent/mcp-policy.json must forbid storing credentials in repo")
+            return 1
+        if "release_or_signing" not in mcp_policy.get("trust_boundaries", {}):
+            print("error: .agent/mcp-policy.json missing release_or_signing trust boundary")
+            return 1
+
+    gc_path = root / ".agent/governance-gc.json"
+    if gc_path.exists():
+        gc_config = load_json(gc_path, ".agent/governance-gc.json")
+        if gc_config.get("schema") != "agent-governance-gc-v1":
+            print("error: .agent/governance-gc.json schema must be agent-governance-gc-v1")
+            return 1
+        for key in ("knowledge_owners", "stale_docs", "task_board_stale_active_items", "baseline_age", "config_pointer_consistency", "dev_map_presence", "mcp_policy_disabled_or_audited"):
+            if key not in gc_config.get("checks", {}):
+                print(f"error: .agent/governance-gc.json missing check: {key}")
+                return 1
+
     evals_path = root / ".agent/evals.json"
     if evals_path.exists():
         evals = load_json(evals_path, ".agent/evals.json")
@@ -457,21 +775,11 @@ def main() -> int:
             print("error: .agent/evals.json schema must be agent-evals-v1")
             return 1
         dimensions = evals.get("dimensions", {})
-        for key in (
-            "project_integrity",
-            "required_paths",
-            "validation",
-            "implementation_discipline",
-            "risk_governance",
-            "review_policy",
-            "context_budget",
-            "session_continuity",
-            "memory",
-            "capabilities",
-            "security",
-            "knowledge",
-            "runlog",
-        ):
+        expected_dimensions = manifest.get("score_dimensions") or list(dimensions)
+        if not expected_dimensions:
+            print("error: .agent/evals.json must declare at least one score dimension")
+            return 1
+        for key in expected_dimensions:
             if key not in dimensions:
                 print(f"error: .agent/evals.json missing dimension: {key}")
                 return 1

@@ -12,7 +12,7 @@ VS Code UI and Codex extension
 ```
 
 The repository state is authoritative. Native Codex threads, plugin state, open editor tabs, selections, and terminal scrollback are temporary.
-Long-term memory is a retrieval aid layered on top of session files. It never replaces `.agent/sessions/` as the source of truth.
+Long-term memory is a retrieval aid layered on top of durable project files. It never replaces embedded specs, `.agent/task-board.json`, `docs/DEV_MAP.md`, feature docs, ADR/RFC/postmortem records, runlog entries, validation notes, or `.agent/sessions/` as sources of truth.
 
 ## Required Session Files
 
@@ -40,6 +40,15 @@ Long-term memory is a retrieval aid layered on top of session files. It never re
   stats.jsonl
   latest.md
 .agent/runlog.jsonl
+.agent/task-board.json
+.agent/workflow-profiles.json
+.agent/role-contracts.json
+.agent/mechanical-checks.json
+.agent/baselines.json
+.agent/dev-map.json
+.agent/harness-evolution.json
+docs/features/
+docs/DEV_MAP.md
 ```
 
 ## Lifecycle
@@ -53,12 +62,14 @@ Long-term memory is a retrieval aid layered on top of session files. It never re
    - Update handoff, changed files, decisions, and validation results after a meaningful work block.
    - Checkpoint before compaction, large tool runs, branch switches, or leaving the workstation.
    - Record workflow gate evidence: spec/design approval, plan quality, implementation discipline, baseline validation, TDD/debugging evidence, review sequence, and completion verification.
+   - Record task-board id, workflow profile, current stage, feature-doc path, and before/after baseline snapshot names when they apply.
    - If subagents were used, record accepted snapshots, rejected snapshots, integration decisions, and follow-up validation.
    - Capture a concise memory record when the checkpoint changes future behavior or saves rediscovery work; repeated identical session ingests should dedupe by session/reason/content hash.
    - Ensure validation and session lifecycle evidence is present in `.agent/runlog.jsonl`.
 
 3. **pre-compact**
    - Summarize task state into files before the session becomes too large.
+   - Update `.agent/task-board.json` and relevant `docs/features/<task-id>/` stage documents before compaction.
    - Do not wait for OOM or context failure.
    - Run `python3 .agent/tools/agent_session.py compact`.
    - Run `python3 .agent/tools/agent_memory.py ingest-session --reason compact` to refresh searchable long-term memory; identical compact summaries should not create duplicate memory records.
@@ -95,7 +106,7 @@ Long-term memory is a retrieval aid layered on top of session files. It never re
 4. Read linked embedded spec artifacts.
 5. Run `git status --short`.
 6. Continue only after confirming current branch, dirty files, and remaining task.
-7. Read `.agent/workflow.json` and `.agent/worktrees.json` when the remaining task involves implementation, validation, or branch/worktree finish.
+7. Read `.agent/workflow.json`, `.agent/workflow-profiles.json`, `.agent/task-board.json`, `.agent/role-contracts.json`, `docs/DEV_MAP.md`, and `.agent/worktrees.json` when the remaining task involves implementation, validation, review, delegation, or branch/worktree finish.
 8. Read any accepted subagent snapshots recorded in `handoff.md`, `changes.md`, or `validation.md`.
 9. Run `python3 .agent/tools/agent_memory.py timeline --limit 10`, then search/detail only if needed.
 10. Run `python3 .agent/tools/agent_context.py scan --limit 10` when bootstrap, docs, or memory digest look large.
@@ -112,6 +123,9 @@ python3 .agent/tools/agent_session.py doctor
 python3 .agent/tools/agent_memory.py doctor
 python3 .agent/tools/agent_context.py doctor
 python3 .agent/tools/agent_memory.py search "<query>"
+python3 scripts/agent_task.py list
+python3 scripts/agent_verify.py doctor
+python3 scripts/agent_gc.py report
 python3 scripts/agent_runlog.py tail --limit 10
 python3 .agent/tools/governance_hook.py --event session-start
 ```

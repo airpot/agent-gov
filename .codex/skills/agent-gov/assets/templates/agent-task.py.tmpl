@@ -1,0 +1,264 @@
+#!/usr/bin/env python3
+"""Manage the agent-gov task board and feature-stage documents."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+TASK_BOARD_PATH = Path(".agent/task-board.json")
+PROFILES_PATH = Path(".agent/workflow-profiles.json")
+TASK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,80}$")
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def load_json(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise SystemExit(f"error: missing {path}")
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"error: invalid JSON in {path}: {exc}")
+
+
+def write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def render(text: str, values: dict[str, str]) -> str:
+    for key, value in values.items():
+        text = text.replace("{{" + key + "}}", value)
+    return text
+
+
+def load_board() -> dict:
+    board = load_json(TASK_BOARD_PATH)
+    if board.get("schema") != "agent-task-board-v1":
+        raise SystemExit("error: .agent/task-board.json schema must be agent-task-board-v1")
+    return board
+
+
+def load_profiles() -> dict:
+    profiles = load_json(PROFILES_PATH)
+    if profiles.get("schema") != "agent-workflow-profiles-v1":
+        raise SystemExit("error: .agent/workflow-profiles.json schema must be agent-workflow-profiles-v1")
+    return profiles
+
+
+def validate_board(board: dict, profiles: dict) -> list[str]:
+    errors: list[str] = []
+    states = set(board.get("states", []))
+    required_fields = set(board.get("required_fields", []))
+    policy = board.get("policy", {})
+    for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path"):
+        if field not in required_fields:
+            errors.append(f"missing required field declaration: {field}")
+    seen: set[str] = set()
+    profile_names = set(profiles.get("profiles", {}))
+    for item in board.get("items", []):
+        task_id = item.get("id")
+        if not task_id:
+            errors.append("task item missing id")
+            continue
+        if task_id in seen:
+            errors.append(f"duplicate task id: {task_id}")
+        seen.add(task_id)
+        for field in required_fields:
+            if field not in item:
+                errors.append(f"{task_id} missing field: {field}")
+        if item.get("state") not in states:
+            errors.append(f"{task_id} has invalid state: {item.get('state')}")
+        if item.get("profile") not in profile_names:
+            errors.append(f"{task_id} has invalid profile: {item.get('profile')}")
+            continue
+        docs_path = item.get("docs_path")
+        profile = profiles.get("profiles", {}).get(item.get("profile"), {})
+        allowed_stages = set(profile.get("stages", []))
+        if allowed_stages and item.get("current_stage") not in allowed_stages:
+            errors.append(f"{task_id} has invalid current_stage for profile {item.get('profile')}: {item.get('current_stage')}")
+        if item.get("state") == "done" and policy.get("done_requires_delivery_conclusion") is True:
+            if not str(item.get("delivery_conclusion", "")).strip():
+                errors.append(f"{task_id} is done without delivery_conclusion")
+        if profile.get("feature_doc_templates") and (not docs_path or not Path(docs_path).exists()):
+            errors.append(f"{task_id} docs_path missing or absent: {docs_path}")
+    return errors
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    board = load_board()
+    profiles = load_profiles()
+    errors = validate_board(board, profiles)
+    template_dir = Path(board.get("paths", {}).get("feature_template_dir", ".agent/templates/features"))
+    for profile in profiles.get("profiles", {}).values():
+        for doc_name in profile.get("feature_doc_templates", []):
+            template_path = template_dir / f"{doc_name}.tmpl"
+            if not template_path.exists():
+                errors.append(f"missing feature template: {template_path}")
+    if errors:
+        for error in errors:
+            print(f"error: {error}")
+        return 1
+    print("agent task board doctor passed")
+    return 0
+
+
+def cmd_list(args: argparse.Namespace) -> int:
+    board = load_board()
+    items = board.get("items", [])
+    if args.json:
+        print(json.dumps({"schema": "agent-task-list-v1", "items": items}, indent=2))
+        return 0
+    if not items:
+        print("no tasks")
+        return 0
+    for item in items:
+        print(
+            f"{item.get('id')} | {item.get('state')} | {item.get('profile')} | "
+            f"{item.get('risk')} | {item.get('current_stage')} | {item.get('title')}"
+        )
+    return 0
+
+
+def create_feature_docs(board: dict, profile: dict, values: dict[str, str], force: bool) -> str:
+    doc_names = profile.get("feature_doc_templates", [])
+    if not doc_names:
+        return ""
+    features_dir = Path(board.get("paths", {}).get("features_dir", "docs/features"))
+    template_dir = Path(board.get("paths", {}).get("feature_template_dir", ".agent/templates/features"))
+    task_dir = features_dir / values["task_id"]
+    task_dir.mkdir(parents=True, exist_ok=True)
+    for doc_name in doc_names:
+        template_path = template_dir / f"{doc_name}.tmpl"
+        if not template_path.exists():
+            raise SystemExit(f"error: missing feature template: {template_path}")
+        target = task_dir / doc_name
+        if target.exists() and not force:
+            continue
+        target.write_text(render(template_path.read_text(encoding="utf-8"), values), encoding="utf-8")
+    return str(task_dir)
+
+
+def cmd_new(args: argparse.Namespace) -> int:
+    if not TASK_ID_RE.match(args.task_id):
+        print("error: task id must be lowercase letters, numbers, dot, underscore, or hyphen", file=sys.stderr)
+        return 2
+    board = load_board()
+    profiles = load_profiles()
+    profile = profiles.get("profiles", {}).get(args.profile)
+    if not profile:
+        print(f"error: unknown profile: {args.profile}", file=sys.stderr)
+        return 2
+    if any(item.get("id") == args.task_id for item in board.get("items", [])):
+        print(f"error: task already exists: {args.task_id}", file=sys.stderr)
+        return 2
+    now = utc_now()
+    values = {
+        "task_id": args.task_id,
+        "task_title": args.title,
+        "task_profile": args.profile,
+        "task_risk": args.risk,
+        "created_at": now,
+    }
+    docs_path = create_feature_docs(board, profile, values, args.force)
+    item = {
+        "id": args.task_id,
+        "title": args.title,
+        "state": "proposed",
+        "risk": args.risk,
+        "profile": args.profile,
+        "current_stage": "intake",
+        "docs_path": docs_path,
+        "created_at": now,
+        "updated_at": now,
+        "delivery_conclusion": "",
+        "related_tasks": [],
+    }
+    board.setdefault("items", []).append(item)
+    write_json(TASK_BOARD_PATH, board)
+    print(f"created task: {args.task_id}")
+    if docs_path:
+        print(f"docs: {docs_path}")
+    return 0
+
+
+def cmd_update(args: argparse.Namespace) -> int:
+    board = load_board()
+    profiles = load_profiles()
+    items = board.get("items", [])
+    item = next((entry for entry in items if entry.get("id") == args.task_id), None)
+    if not item:
+        print(f"error: task not found: {args.task_id}", file=sys.stderr)
+        return 2
+    profile = profiles.get("profiles", {}).get(item.get("profile"), {})
+    if args.state:
+        if args.state not in board.get("states", []):
+            print(f"error: invalid state: {args.state}", file=sys.stderr)
+            return 2
+        item["state"] = args.state
+    if args.stage:
+        allowed_stages = set(profile.get("stages", []))
+        if allowed_stages and args.stage not in allowed_stages:
+            print(f"error: invalid stage for profile {item.get('profile')}: {args.stage}", file=sys.stderr)
+            return 2
+        item["current_stage"] = args.stage
+    if args.conclusion is not None:
+        item["delivery_conclusion"] = args.conclusion
+    if item.get("state") == "done" and board.get("policy", {}).get("done_requires_delivery_conclusion") is True:
+        if not str(item.get("delivery_conclusion", "")).strip():
+            print("error: done tasks require --conclusion", file=sys.stderr)
+            return 2
+    errors = validate_board(board, profiles)
+    if errors:
+        for error in errors:
+            print(f"error: {error}", file=sys.stderr)
+        return 2
+    item["updated_at"] = utc_now()
+    write_json(TASK_BOARD_PATH, board)
+    print(f"updated task: {args.task_id}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    doctor = subparsers.add_parser("doctor", help="Validate the task board")
+    doctor.set_defaults(func=cmd_doctor)
+
+    list_cmd = subparsers.add_parser("list", help="List tasks")
+    list_cmd.add_argument("--json", action="store_true")
+    list_cmd.set_defaults(func=cmd_list)
+
+    new = subparsers.add_parser("new", help="Create a task and feature docs")
+    new.add_argument("task_id")
+    new.add_argument("--title", required=True)
+    new.add_argument("--profile", default="standard")
+    new.add_argument("--risk", default="medium", choices=["low", "medium", "high", "critical"])
+    new.add_argument("--force", action="store_true", help="Overwrite existing feature docs for this task")
+    new.set_defaults(func=cmd_new)
+
+    update = subparsers.add_parser("update", help="Update task state")
+    update.add_argument("task_id")
+    update.add_argument("--state")
+    update.add_argument("--stage")
+    update.add_argument("--conclusion")
+    update.set_defaults(func=cmd_update)
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

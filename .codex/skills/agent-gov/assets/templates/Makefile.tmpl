@@ -1,6 +1,7 @@
 .PHONY: agent-check
 .PHONY: agent-validate
 .PHONY: agent-spec
+.PHONY: agent-migrate
 .PHONY: agent-sync-skills
 .PHONY: agent-memory
 .PHONY: agent-context
@@ -9,20 +10,27 @@
 .PHONY: agent-tooling
 .PHONY: agent-security
 .PHONY: agent-score
+.PHONY: agent-task
+.PHONY: agent-verify
+.PHONY: agent-gc
 
 agent-check:
 	python3 scripts/agent_check.py
-	python3 scripts/agent_spec.py doctor
-	python3 scripts/agent_knowledge.py
-	python3 scripts/agent_invariants.py
-	python3 scripts/agent_capabilities.py doctor
-	python3 scripts/agent_runlog.py doctor
-	python3 scripts/agent_tooling.py doctor
-	python3 scripts/agent_security.py doctor
-	python3 scripts/agent_score.py doctor
-	python3 .agent/tools/agent_memory.py doctor
-	python3 .agent/tools/agent_context.py doctor
-	python3 .agent/tools/agent_session.py status
+	@test ! -f scripts/agent_spec.py || python3 scripts/agent_spec.py doctor
+	@test ! -f scripts/agent_knowledge.py || python3 scripts/agent_knowledge.py
+	@test ! -f scripts/agent_invariants.py || python3 scripts/agent_invariants.py
+	@test ! -f scripts/agent_capabilities.py || python3 scripts/agent_capabilities.py doctor
+	@test ! -f scripts/agent_runlog.py || python3 scripts/agent_runlog.py doctor
+	@test ! -f scripts/agent_migrate.py || python3 scripts/agent_migrate.py doctor
+	@test ! -f scripts/agent_tooling.py || python3 scripts/agent_tooling.py doctor
+	@test ! -f scripts/agent_security.py || python3 scripts/agent_security.py doctor
+	@test ! -f scripts/agent_task.py || python3 scripts/agent_task.py doctor
+	@test ! -f scripts/agent_verify.py || python3 scripts/agent_verify.py doctor
+	@test ! -f scripts/agent_gc.py || python3 scripts/agent_gc.py doctor
+	@test ! -f scripts/agent_score.py || python3 scripts/agent_score.py doctor
+	@test ! -f .agent/tools/agent_memory.py || python3 .agent/tools/agent_memory.py doctor
+	@test ! -f .agent/tools/agent_context.py || python3 .agent/tools/agent_context.py doctor
+	@test ! -f .agent/tools/agent_session.py || python3 .agent/tools/agent_session.py status
 
 agent-validate:
 	python3 scripts/agent_validate.py
@@ -30,27 +38,38 @@ agent-validate:
 agent-spec:
 	python3 scripts/agent_spec.py list --json
 
+agent-migrate:
+	python3 scripts/agent_migrate.py plan
+
 agent-sync-skills:
-	python3 scripts/agent_sync_skills.py
+	@if [ -f scripts/agent_sync_skills.py ]; then python3 scripts/agent_sync_skills.py; else echo "agent_sync_skills.py not available in this governance profile"; fi
 
 agent-memory:
-	python3 .agent/tools/agent_memory.py timeline --limit 10
+	@if [ -f .agent/tools/agent_memory.py ]; then python3 .agent/tools/agent_memory.py timeline --limit 10; else echo "agent_memory.py not available in this governance profile"; fi
 
 agent-context:
-	python3 .agent/tools/agent_context.py scan --limit 10
+	@if [ -f .agent/tools/agent_context.py ]; then python3 .agent/tools/agent_context.py scan --limit 10; else echo "agent_context.py not available in this governance profile"; fi
 
 agent-capabilities:
-	python3 scripts/agent_capabilities.py list --enabled
+	@if [ -f scripts/agent_capabilities.py ]; then python3 scripts/agent_capabilities.py list --enabled; else echo "agent_capabilities.py not available in this governance profile"; fi
 
 agent-runlog:
 	python3 scripts/agent_runlog.py tail --limit 10
 
 agent-tooling:
-	python3 scripts/agent_tooling.py doctor
+	@if [ -f scripts/agent_tooling.py ]; then python3 scripts/agent_tooling.py doctor; else echo "agent_tooling.py not available in this governance profile"; fi
 
 agent-security:
-	python3 scripts/agent_security.py list
-	python3 scripts/agent_security.py scan-paths
+	@if [ -f scripts/agent_security.py ]; then python3 scripts/agent_security.py list && python3 scripts/agent_security.py scan-paths; else echo "agent_security.py not available in this governance profile"; fi
 
 agent-score:
 	python3 scripts/agent_score.py score --write
+
+agent-task:
+	@if [ -f scripts/agent_task.py ]; then python3 scripts/agent_task.py list; else echo "agent_task.py not available in this governance profile"; fi
+
+agent-verify:
+	@if [ -f scripts/agent_verify.py ]; then python3 scripts/agent_verify.py doctor; else echo "agent_verify.py not available in this governance profile"; fi
+
+agent-gc:
+	@if [ -f scripts/agent_gc.py ]; then python3 scripts/agent_gc.py report; else echo "agent_gc.py not available in this governance profile"; fi

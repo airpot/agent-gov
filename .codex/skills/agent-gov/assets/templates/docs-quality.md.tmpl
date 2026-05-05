@@ -5,73 +5,29 @@
 Configure executable feedback commands in `.agent/harness.json`.
 
 ```bash
-python3 scripts/agent_validate.py --list
-python3 scripts/agent_validate.py
-python3 scripts/agent_runlog.py tail --limit 10
-```
-
-Workflow policy:
-
-```bash
 python3 scripts/agent_check.py
+python3 scripts/agent_migrate.py doctor
 python3 scripts/agent_spec.py doctor
 python3 scripts/agent_validate.py --list
+python3 scripts/agent_validate.py
+python3 scripts/agent_runlog.py doctor
+python3 scripts/agent_runlog.py tail --limit 10
+python3 scripts/agent_score.py doctor
+python3 scripts/agent_score.py score --write
 ```
 
 Technology stack: {{tech_stack}}
 
-Skill distribution checks:
-
-```bash
-python3 scripts/agent_sync_skills.py --dry-run
-```
-
-Context budget checks:
-
-```bash
-python3 .agent/tools/agent_context.py scan --limit 10
-python3 .agent/tools/agent_context.py suggest
-```
-
-Capability checks:
-
-```bash
-python3 scripts/agent_capabilities.py doctor
-python3 scripts/agent_capabilities.py list --enabled
-```
-
-Tooling and security checks:
-
-```bash
-python3 scripts/agent_tooling.py doctor
-python3 scripts/agent_security.py doctor
-python3 scripts/agent_score.py score --write
-python3 scripts/agent_security.py scan-paths
-```
+{{quality_standard_commands}}
+{{quality_full_commands}}
 
 ## Expectations
 
-- Follow `.agent/workflow.json` for spec approval, plan quality, implementation discipline, worktree isolation, TDD/debugging, review sequence, and completion verification gates.
-- Classify task risk with `.agent/risk-zones.json` before implementation; stop and re-plan when the risk level increases.
-- Follow the `implementation_discipline` gate for non-trivial implementation: surface assumptions, choose the simplest maintainable approach, keep diffs tied to the request, and define success criteria.
-- Follow `.agent/review-policy.json` before handoff: every changed line should map to requested, necessary-support, incidental, or risky; incidental changes need removal or an explicit exception.
-- Agent-generated summaries and automated review comments are prechecks, not human review evidence. High and critical risk changes need reviewer, diff range, files reviewed, high-risk paths checked, and conclusion.
 - For behavior changes, write or update a failing test first, record the failing command, then record the passing command after implementation.
-- For bugs, build failures, test failures, and unexpected behavior, record reproduction, root cause, hypothesis, and validation with `.agent/templates/debugging-record.md.tmpl`.
-- For multi-step work, use `.agent/templates/implementation-plan.md.tmpl` or an embedded spec task file with exact files, commands, expected results, and no placeholders.
-- Prefer an ignored isolated worktree for feature work and substantial plan execution; record baseline validation before edits.
 - Record skipped validation in the active session's `validation.md`.
-- Run review-fix loops for substantial changes.
-- Review unnecessary abstractions, speculative features, drive-by cleanup, and broad rewrites as findings unless an exception is recorded.
-- Run spec compliance review before code quality review for delegated or substantial implementation, and re-review after fixes.
 - Do not report completion, merge readiness, or PR readiness without fresh command evidence.
-- When subagents are used, validate integrated changes after accepting their snapshots.
 - Validation commands should append compact pass/fail evidence to `.agent/runlog.jsonl`.
-- Use `scripts/agent_tooling.py` when normal shell output would be too large or ambiguous.
-- Configure optional security suites in `.agent/security.json`; record skipped suites in runlog or validation notes.
 - Run `scripts/agent_score.py score --write` periodically to catch governance drift.
-- Keep native Codex/Claude adapters consistent with `.agent/subagents.json`, `.agent/hooks.json`, and `.agent/skill-distribution.json`.
-- Before relying on remembered context, retrieve it through `agent_memory.py search` or `detail` and distinguish stored facts from current repository state.
-- Promote memory deliberately: `episodic` for session history, `semantic` for sourced facts, and `procedural` only after review.
-- Keep `AGENTS.md`, `CLAUDE.md`, docs, session bootstraps, and subagent outputs within `.agent/context.json` budgets.
-- Use ADRs for accepted long-term decisions, RFCs for broad proposals, and postmortems for incidents.
+- Review unnecessary abstractions, speculative features, drive-by cleanup, and broad rewrites as findings unless an exception is recorded.
+{{quality_standard_expectations}}
+{{quality_full_expectations}}

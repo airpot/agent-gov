@@ -1,0 +1,25 @@
+# Feature Work Index
+
+This directory stores durable feature/task records created from `.agent/task-board.json`.
+
+Use it for work that needs cross-session continuity, delegated handoff, review evidence, or delivery history. Tiny low-risk changes may only need a session note, but bugfix, standard, and full workflow profiles should create a task-board record.
+
+## Task Board
+
+```bash
+python3 scripts/agent_task.py list
+python3 scripts/agent_task.py new <task-id> --title "<title>" --profile standard --risk medium
+python3 scripts/agent_task.py update <task-id> --state review --stage verification
+python3 scripts/agent_task.py doctor
+```
+
+## Stage Documents
+
+Profiles choose how many stage documents are required:
+
+- `tiny`: no feature document required by default.
+- `bugfix`: requirement, development, test report, delivery summary.
+- `standard`: requirement, design, development, code review, test report, delivery summary.
+- `full`: requirement, design, gate review, development, code review, test report, delivery summary.
+
+Generated feature directories should be named `docs/features/<task-id>/`.

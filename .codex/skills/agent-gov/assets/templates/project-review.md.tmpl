@@ -69,13 +69,37 @@ status: needs-fix
 
 - None.
 
+## Loop Decision
+
+- If any blocker, major, or minor finding is listed above, keep this review as `needs-fix`, create a project fix log, revalidate, then create the next review round.
+- Mark `status: pass` only when Blocker, Major, and Minor all say `None found.`
+- Use accepted exceptions only when residual risk, skipped checks, and owner/date are documented in session or runlog evidence.
+
 ## Revalidation
 
 ```bash
 python3 scripts/agent_check.py
-python3 scripts/agent_capabilities.py doctor
-python3 scripts/agent_tooling.py doctor
-python3 scripts/agent_security.py doctor
+python3 scripts/agent_migrate.py doctor
+python3 scripts/agent_spec.py doctor
+python3 scripts/agent_validate.py --list
 python3 scripts/agent_runlog.py doctor
-python3 .agent/tools/agent_context.py doctor
+python3 scripts/agent_score.py doctor
+python3 scripts/agent_score.py score --write
+
+for tool in \
+  scripts/agent_capabilities.py \
+  scripts/agent_verify.py \
+  scripts/agent_gc.py \
+  .agent/tools/agent_memory.py \
+  .agent/tools/agent_context.py \
+  scripts/agent_tooling.py \
+  scripts/agent_security.py; do
+  if [ -f "$tool" ]; then
+    python3 "$tool" doctor
+  fi
+done
+
+if [ -f scripts/agent_sync_skills.py ]; then
+  python3 scripts/agent_sync_skills.py --dry-run
+fi
 ```

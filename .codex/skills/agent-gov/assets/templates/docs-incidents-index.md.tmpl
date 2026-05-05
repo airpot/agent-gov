@@ -6,12 +6,15 @@ Use incident notes and postmortems for reliability, security, data, or agent-gov
 
 - A validation failure escaped a review-fix gate.
 - Session state, memory, context, or subagent handoff caused lost work.
+- A governance failure exposes a missing rule, skill, script, workflow gate, role contract, tool/MCP boundary, knowledge entry, session handoff, or context budget rule.
 - A security or supply-chain issue required remediation.
 - A production or user-visible reliability issue occurred.
 
 ## Template
 
 Copy `.agent/templates/postmortem.md.tmpl` into this directory with a sortable name such as `2026-05-04-incident-title.md`.
+
+Classify harness gaps with `.agent/harness-evolution.json`, then promote the fix into the appropriate rule, skill, script, workflow, role contract, tool/MCP policy, knowledge doc, session protocol, or context budget.
 
 ## Index
 

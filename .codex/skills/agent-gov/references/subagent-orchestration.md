@@ -30,6 +30,7 @@ Do not adopt these as absolute project rules:
 ```text
 .agent/
   subagents.json
+  role-contracts.json
   templates/
     subagent-task.md.tmpl
   sessions/
@@ -40,7 +41,7 @@ Do not adopt these as absolute project rules:
   runlog.jsonl
 ```
 
-`.agent/subagents.json` is the durable policy. `.agent/templates/subagent-task.md.tmpl` is the dispatch shape. Session files record accepted snapshots and integration decisions.
+`.agent/subagents.json` is the durable delegation policy. `.agent/role-contracts.json` is the machine-checkable role contract layer for inputs, outputs, forbidden actions, and separation of duties. `.agent/templates/subagent-task.md.tmpl` is the dispatch shape. Session files record accepted snapshots and integration decisions.
 
 Native adapters are generated projections:
 
@@ -129,6 +130,7 @@ For reviews, one line per finding is preferred unless security or architecture r
 - Reject or summarize snapshots that ignore the output budget before storing them in session handoff files.
 - Reconcile conflicts through a reviewer role or local review.
 - For implementation, run `spec_reviewer` and resolve findings before `quality_reviewer`.
+- Enforce finder-cannot-fix: verifier, spec reviewer, quality reviewer, and risk reviewer roles report findings and route fixes back to a coordinator or worker. They do not modify implementation files to resolve their own findings.
 - Run relevant harness commands after integrating worker changes.
 - Add a checkpoint that records the accepted snapshots, rejected snapshots, validation, and remaining risks.
 - Add runlog evidence for accepted high-risk snapshots and any skipped post-integration validation.

@@ -28,6 +28,16 @@
 
 `agent-gov` 当前主要提供以下能力。
 
+### 治理体量 profile
+
+初始化时可以用 `--governance-profile core|standard|full` 控制生成规模。
+
+- `core`：最小治理面，包含内嵌规格、harness、项目目录契约、会话接续、runlog、基础评分和迁移检查。
+- `standard`：默认档，推荐给多数已有项目，增加 workflow profiles、task-board、feature 阶段文档、memory、context budget、dev map、mechanical checks、baseline、governance-gc 和 harness evolution。
+- `full`：完整框架，额外增加 subagent 编排、Codex/Claude 原生适配、hooks、tooling/security 配置、MCP policy 和 skill distribution。
+
+默认是 `standard`。只需要最小接续能力时用 `core`，明确需要 subagent / Codex Claude 原生适配 / tooling security / MCP / skill distribution 时再用 `full`。
+
 1. 项目治理初始化
    - 生成 `AGENTS.md`，可选生成 `CLAUDE.md`。
    - 记录技术栈、固定目录结构、远程开发环境类型。
@@ -59,7 +69,9 @@
    - 支持本地 token 估算、压缩建议和压缩前后语义校验。
 
 7. 工作流和实现纪律
-   - 生成 `.agent/workflow.json`、`.agent/risk-zones.json`、`.agent/review-policy.json`、`.agent/worktrees.json`、implementation plan 和 debugging record 模板。
+   - 生成 `.agent/workflow.json`、`.agent/workflow-profiles.json`、`.agent/task-board.json`、`.agent/risk-zones.json`、`.agent/review-policy.json`、`.agent/worktrees.json`、implementation plan、debugging record 和 feature stage 模板。
+   - 支持 `tiny`、`bugfix`、`standard`、`full` 四种 workflow profile，让流程重量匹配任务风险和规模。
+   - 生成 `scripts/agent_task.py` 和 `docs/features/`，把非 tiny 任务的状态、阶段文档和交付结论固化到仓库。
    - 覆盖风险分级、自治边界、规格审批、计划质量、实现纪律、diff 可追踪、TDD/调试证据、审阅顺序、人审证据、完成证明。
    - 实现纪律吸收了 `andrej-karpathy-skills` 的核心思想：先澄清假设，优先简单直接实现，避免无根据抽象，保持 diff 精准，定义可验证成功标准。
 
@@ -69,9 +81,10 @@
    - 自动审阅和模型总结只能作为 precheck，不能替代测试、构建或必需的人审。
 
 9. Subagent 编排治理
-   - 生成 `.agent/subagents.json` 和 `.agent/templates/subagent-task.md.tmpl`。
+   - 生成 `.agent/subagents.json`、`.agent/role-contracts.json` 和 `.agent/templates/subagent-task.md.tmpl`。
    - 支持 searcher、explorer、worker、verifier、spec_reviewer、quality_reviewer、reviewer、coordinator 等角色定义。
    - 要求 disjoint write boundary、`===SNAPSHOT===` JSON 摘要、spec review 先于 quality review。
+   - 固化“发现问题的人不能自己修”：verifier/reviewer 只报告和路由 findings，不直接修改实现文件。
    - 不强制使用 subagent；只有当前平台和上级指令允许时才使用。
 
 10. Codex / Claude 原生适配
@@ -80,16 +93,24 @@
    - 这些原生配置是 `.agent/` 中性治理策略的薄投影。
 
 11. 能力、安全、评估和知识治理
-    - 生成 `.agent/capabilities.json`、`.agent/tooling.json`、`.agent/security.json`、`.agent/evals.json`。
-    - 生成 `scripts/agent_capabilities.py`、`agent_tooling.py`、`agent_security.py`、`agent_score.py`。
+    - 生成 `.agent/manifest.json`，集中记录 required paths、JSON schema、JSONL store 和评分维度，减少多脚本重复维护。
+    - 生成 `.agent/capabilities.json`、`.agent/tooling.json`、`.agent/security.json`、`.agent/evals.json`、`.agent/mechanical-checks.json`、`.agent/baselines.json`。
+    - 生成 `.agent/dev-map.json`、`.agent/harness-evolution.json`、`.agent/mcp-policy.json`、`.agent/governance-gc.json`。
+    - 生成 `scripts/agent_capabilities.py`、`agent_tooling.py`、`agent_security.py`、`agent_score.py`、`agent_verify.py`、`agent_gc.py`。
     - 生成 `docs/` 知识库、AI coding 术语表、ADR/RFC/postmortem 模板和治理健康评分。
     - `.agent/capabilities.json` 明确区分 Skill、Tool、MCP/integration、native adapter，并为每项能力记录 capability class、权限、owner、risk 和验证命令。
-    - `agent_score.py` 会把关键治理 JSON / JSONL 的解析和 schema 有效性作为硬门禁，避免基础配置损坏时仍然给出 pass。
+    - `docs/DEV_MAP.md` 和 `.agent/dev-map.json` 提供项目级入口地图：从哪里读起、哪些模块归谁、改动前先看什么、常见模式是什么；它是导航索引，不是全仓库文件清单。
+    - `.agent/harness-evolution.json` 把低级错误和重复失败归类为 rule gap、skill gap、script gap、workflow gap、role contract gap、tool/MCP gap、knowledge gap、session gap 或 context gap，并反向推动框架修订。
+    - `.agent/mcp-policy.json` 默认 `optional-disabled-by-default`，只定义 MCP 接入的信任边界、审批、凭据和审计规则，不默认启用外部集成。
+    - `agent_gc.py` 提供非破坏性的 doc-gardening / governance-gc，用于发现过期文档、owner 缺口、过期任务、过期 baseline、配置指针漂移和 MCP policy 风险。
+    - `agent_score.py` 会把关键治理 JSON / JSONL 的解析、schema 有效性、`agent_verify.py` 机械快照和 `agent_gc.py` 漂移报告作为门禁，避免基础配置或治理漂移损坏时仍然给出 pass。
+    - `agent_verify.py` 提供硬机械检查和 before/after baseline 对比，覆盖 JSON/JSONL、required paths、feature templates、task-board、role contracts、本地 Markdown links。
 
 ## 不做什么
 
 - 不替代真实测试、构建、人工审查或安全审计。
 - 不把 Codex/Claude 聊天记录当作持久状态。
+- 不把 `.agent/memory/` 当作团队规范真相源；真相源应落在 spec、task-board、feature docs、ADR/RFC/postmortem、runlog 和 validation 里。
 - 不把自动审阅、模型总结或 agent 自评当作必需的人审证据。
 - 不保存 npm token、SSH key、API key 等密钥。
 - 不强制安装外部 OpenSpec CLI。
@@ -110,13 +131,19 @@ npx @airpot/agent-gov@latest
 npx @airpot/agent-gov@latest --tech-stack python,typescript --layout service
 ```
 
+使用更轻量的标准治理档：
+
+```bash
+npx @airpot/agent-gov@latest --tech-stack python,typescript --layout service --governance-profile standard
+```
+
 初始化指定路径：
 
 ```bash
 npx @airpot/agent-gov@latest init /path/to/repo --remote-kind ssh
 ```
 
-只安装 bundled skills，不初始化治理文件：
+只安装 bundled agent-gov skill，不初始化治理文件：
 
 ```bash
 npx @airpot/agent-gov@latest install-skill /path/to/repo
@@ -137,13 +164,13 @@ npx @airpot/agent-gov@latest doctor /path/to/repo
 1. 在独立分支或干净 worktree 中先做 dry run：
 
 ```bash
-npx @airpot/agent-gov@latest init . --tech-stack python,typescript --layout service --dry-run
+npx @airpot/agent-gov@latest init . --tech-stack python,typescript --layout service --governance-profile standard --dry-run
 ```
 
 2. 确认将要创建的文件后再初始化：
 
 ```bash
-npx @airpot/agent-gov@latest init . --tech-stack python,typescript --layout service
+npx @airpot/agent-gov@latest init . --tech-stack python,typescript --layout service --governance-profile standard
 ```
 
 3. 如果已有项目目录结构已经固定，不希望创建新目录：
@@ -158,7 +185,7 @@ npx @airpot/agent-gov@latest init . --layout minimal --no-create-layout
 npx @airpot/agent-gov@latest init . --layout existing --dir cmd,pkg,internal --no-create-layout
 ```
 
-默认不会覆盖已有文件。遇到已有 `AGENTS.md`、`CLAUDE.md`、`Makefile`、`docs/` 或 `.agent/` 文件时，先人工合并差异；只有确认要替换生成文件时才使用 `--force`。如果只是更新 bundled skills，使用：
+默认不会覆盖已有文件。遇到已有 `AGENTS.md`、`CLAUDE.md`、`Makefile`、`docs/` 或 `.agent/` 文件时，先人工合并差异；只有确认要替换生成文件时才使用 `--force`。如果只是更新 bundled agent-gov skill，使用：
 
 ```bash
 npx @airpot/agent-gov@latest install-skill . --force-skill
@@ -170,8 +197,11 @@ npx @airpot/agent-gov@latest install-skill . --force-skill
 python3 scripts/agent_check.py
 python3 scripts/agent_score.py doctor
 python3 scripts/agent_validate.py --list
+python3 scripts/agent_gc.py doctor
 python3 scripts/agent_score.py score --write
 ```
+
+随后优先补齐 `docs/DEV_MAP.md`、`.agent/harness.json` 和 `.agent/project-layout.json`，让后续新会话可以先读项目入口地图，再按真实验证命令推进。
 
 ## 常用初始化参数
 
@@ -183,6 +213,7 @@ npx @airpot/agent-gov@latest [root] [options]
 
 - `--tech-stack python,typescript`：记录技术栈，并预填常见验证命令。
 - `--layout existing|minimal|python-app|node-app|web-app|service|library`：选择固定目录结构；`existing` 不附加默认目录，适合老项目配合 `--dir` 使用。
+- `--governance-profile core|standard|full`：选择初始化体量；默认 `standard`。
 - `--dir path`：追加需要创建和治理的目录，可重复使用。
 - `--remote-kind ssh|devcontainer|wsl|local|unknown`：记录远程开发环境类型。
 - `--no-claude`：不生成 Claude 相关适配文件。
@@ -190,8 +221,8 @@ npx @airpot/agent-gov@latest [root] [options]
 - `--no-create-layout`：不创建固定目录结构，只记录配置。
 - `--force`：允许覆盖已有生成文件。
 - `--dry-run`：只展示将要创建或跳过的文件。
-- `--skip-skill-install`：npm wrapper 专用，只运行初始化脚本，不复制 bundled skills。
-- `--force-skill`：npm wrapper 专用，覆盖目标仓库中的 bundled skills。
+- `--skip-skill-install`：npm wrapper 专用，只运行初始化脚本，不复制 bundled agent-gov skill。
+- `--force-skill`：npm wrapper 专用，覆盖目标仓库中的 bundled agent-gov skill。
 
 ## 初始化后常用命令
 
@@ -199,6 +230,7 @@ npx @airpot/agent-gov@latest [root] [options]
 
 ```bash
 python3 scripts/agent_check.py
+python3 scripts/agent_migrate.py doctor
 python3 scripts/agent_spec.py doctor
 python3 scripts/agent_spec.py list --json
 python3 scripts/agent_validate.py --list
@@ -206,7 +238,37 @@ python3 scripts/agent_capabilities.py doctor
 python3 scripts/agent_runlog.py doctor
 python3 scripts/agent_tooling.py doctor
 python3 scripts/agent_security.py doctor
+python3 scripts/agent_task.py doctor
+python3 scripts/agent_verify.py doctor
+python3 scripts/agent_gc.py doctor
 python3 scripts/agent_score.py score --write
+```
+
+`core` 档不会生成 `agent_task.py`、`agent_verify.py`、`agent_gc.py`、memory/context 工具或原生 adapter；`standard` 档不会生成 subagent/native adapter/tooling/security/MCP/skill distribution 相关文件。运行命令时以实际生成的脚本为准。
+
+任务看板和 feature 文档：
+
+```bash
+python3 scripts/agent_task.py list
+python3 scripts/agent_task.py new feature-id --title "功能标题" --profile standard --risk medium
+python3 scripts/agent_task.py update feature-id --state review --stage verification
+```
+
+机械检查和 baseline 对比：
+
+```bash
+python3 scripts/agent_verify.py doctor
+python3 scripts/agent_verify.py snapshot --name before-change --fail-on-issue
+python3 scripts/agent_verify.py snapshot --name after-change --fail-on-issue
+python3 scripts/agent_verify.py compare --before .agent/baselines/before-change.json --after .agent/baselines/after-change.json
+```
+
+治理 GC / 文档园艺：
+
+```bash
+python3 scripts/agent_gc.py doctor
+python3 scripts/agent_gc.py doctor --fail-on-warning
+python3 scripts/agent_gc.py report --json
 ```
 
 会话接续：

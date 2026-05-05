@@ -1,0 +1,38 @@
+# Development Map
+
+Use this map to find the right entry points before broad edits. Keep it concise: this is an index, not a full file inventory.
+
+Metadata lives in `.agent/dev-map.json`.
+
+## Project Shape
+
+- Technology stack: {{tech_stack}}
+- Directory layout: {{layout_name}}
+
+## Required Directories
+
+{{layout_dirs}}
+
+## Areas
+
+### Agent Governance
+
+- Entry points: `AGENTS.md`, `.agent/config.json`, `.agent/harness.json`
+- Read before editing: `docs/index.md`, `docs/QUALITY.md`, `docs/DEV_MAP.md`
+- Owned paths: `.agent/`, `docs/`, `scripts/agent_*.py`
+- Pattern: durable project truth lives in repository files, not chat history.
+
+### Application Code
+
+- Entry points: fill in after project structure is known.
+- Read before editing: `docs/ARCHITECTURE.md`, `docs/QUALITY.md`
+- Owned paths: project-specific.
+- Pattern: update this section when module ownership, entry points, or common implementation patterns change.
+
+## Before Broad Changes
+
+1. Read `AGENTS.md`.
+2. Read `.agent/task-board.json` and relevant `docs/features/<task-id>/` files.
+3. Read the area entry in `.agent/dev-map.json`.
+4. Read linked architecture, quality, or security docs.
+5. Update this map when the edit changes entry points, module boundaries, or read-before-edit guidance.

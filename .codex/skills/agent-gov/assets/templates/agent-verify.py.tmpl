@@ -1,0 +1,366 @@
+#!/usr/bin/env python3
+"""Run mechanical governance checks and compare before/after baselines."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+CONFIG_PATH = Path(".agent/mechanical-checks.json")
+BASELINES_PATH = Path(".agent/baselines.json")
+MARKDOWN_LINK_RE = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def load_json(path: Path, fallback: dict | None = None) -> dict:
+    if not path.exists():
+        if fallback is not None:
+            return fallback
+        raise SystemExit(f"error: missing {path}")
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"error: invalid JSON in {path}: {exc}")
+
+
+def write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def check_json(paths: list[str]) -> list[str]:
+    invalid: list[str] = []
+    for name in paths:
+        path = Path(name)
+        if not path.exists():
+            invalid.append(f"missing json: {name}")
+            continue
+        try:
+            json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            invalid.append(f"invalid json: {name}: {exc}")
+    return invalid
+
+
+def check_jsonl(paths: list[str]) -> list[str]:
+    invalid: list[str] = []
+    for name in paths:
+        path = Path(name)
+        if not path.exists():
+            invalid.append(f"missing jsonl: {name}")
+            continue
+        for index, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
+                json.loads(line)
+            except json.JSONDecodeError as exc:
+                invalid.append(f"invalid jsonl: {name}:{index}: {exc}")
+    return invalid
+
+
+def required_paths() -> list[str]:
+    harness = load_json(Path(".agent/harness.json"), {})
+    return list(harness.get("invariants", {}).get("required_paths", []))
+
+
+def check_required_paths() -> list[str]:
+    return [name for name in required_paths() if not Path(name).exists()]
+
+
+def check_feature_templates(config: dict) -> list[str]:
+    spec = config.get("checks", {}).get("feature_templates", {})
+    template_dir = Path(spec.get("template_dir", ".agent/templates/features"))
+    missing: list[str] = []
+    for name in spec.get("required_templates", []):
+        if not (template_dir / name).exists():
+            missing.append(str(template_dir / name))
+    return missing
+
+
+def check_task_board() -> list[str]:
+    board = load_json(Path(".agent/task-board.json"), {})
+    profiles = load_json(Path(".agent/workflow-profiles.json"), {})
+    errors: list[str] = []
+    if board.get("schema") != "agent-task-board-v1":
+        errors.append(".agent/task-board.json schema must be agent-task-board-v1")
+    required_fields = set(board.get("required_fields", []))
+    ids: set[str] = set()
+    states = set(board.get("states", []))
+    profile_names = set(profiles.get("profiles", {}))
+    policy = board.get("policy", {})
+    for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path"):
+        if field not in required_fields:
+            errors.append(f"task board missing required field declaration: {field}")
+    for item in board.get("items", []):
+        task_id = item.get("id")
+        if not task_id:
+            errors.append("task missing id")
+            continue
+        for field in required_fields:
+            if field not in item:
+                errors.append(f"{task_id} missing field: {field}")
+        if task_id in ids:
+            errors.append(f"duplicate task id: {task_id}")
+        ids.add(task_id)
+        if item.get("state") not in states:
+            errors.append(f"{task_id} invalid state: {item.get('state')}")
+        if item.get("profile") not in profile_names:
+            errors.append(f"{task_id} invalid profile: {item.get('profile')}")
+            continue
+        profile = profiles.get("profiles", {}).get(item.get("profile"), {})
+        allowed_stages = set(profile.get("stages", []))
+        if allowed_stages and item.get("current_stage") not in allowed_stages:
+            errors.append(f"{task_id} invalid current_stage for profile {item.get('profile')}: {item.get('current_stage')}")
+        if item.get("state") == "done" and policy.get("done_requires_delivery_conclusion") is True:
+            if not str(item.get("delivery_conclusion", "")).strip():
+                errors.append(f"{task_id} done without delivery_conclusion")
+        docs_path = item.get("docs_path")
+        if profile.get("feature_doc_templates") and (not docs_path or not Path(docs_path).exists()):
+            errors.append(f"{task_id} docs_path missing or absent: {docs_path}")
+    return errors
+
+
+def check_role_contracts() -> list[str]:
+    contracts = load_json(Path(".agent/role-contracts.json"), {})
+    errors: list[str] = []
+    if contracts.get("schema") != "agent-role-contracts-v1":
+        errors.append(".agent/role-contracts.json schema must be agent-role-contracts-v1")
+    policy = contracts.get("policy", {})
+    separation = contracts.get("separation_of_duties", {})
+    if policy.get("finder_cannot_fix") is not True:
+        errors.append("role policy must enable finder_cannot_fix")
+    if separation.get("finder_cannot_modify_files") is not True:
+        errors.append("separation_of_duties must block finder file modification")
+    for role in ("worker", "verifier", "spec_reviewer", "quality_reviewer", "reviewer", "coordinator"):
+        if role not in contracts.get("contracts", {}):
+            errors.append(f"missing role contract: {role}")
+    return errors
+
+
+def check_enabled(config: dict, name: str) -> bool:
+    return config.get("checks", {}).get(name, {}).get("enabled", name in config.get("checks", {})) is not False
+
+
+def check_governance_configs(config: dict) -> list[str]:
+    manifest = load_json(Path(".agent/manifest.json"), {})
+    manifest_schemas = manifest.get("json_schemas", {})
+    expected = {
+        path: schema
+        for path, schema in manifest_schemas.items()
+        if path
+        in {
+            ".agent/manifest.json",
+            ".agent/dev-map.json",
+            ".agent/harness-evolution.json",
+            ".agent/mcp-policy.json",
+            ".agent/governance-gc.json",
+        }
+    }
+    expected.setdefault(".agent/manifest.json", "agent-governance-manifest-v1")
+    errors: list[str] = []
+    for name, schema in expected.items():
+        data = load_json(Path(name), {})
+        if data.get("schema") != schema:
+            errors.append(f"{name} schema must be {schema}")
+    harness = load_json(Path(".agent/harness.json"), {})
+    manifest_required = sorted(manifest.get("required_paths", []))
+    harness_required = sorted(harness.get("invariants", {}).get("required_paths", []))
+    if manifest_required and harness_required and manifest_required != harness_required:
+        errors.append(".agent/manifest.json required_paths must match .agent/harness.json invariants.required_paths")
+    workflow = load_json(Path(".agent/workflow.json"), {})
+    profiles = load_json(Path(".agent/workflow-profiles.json"), {})
+    workflow_stages = set(workflow.get("stages", []))
+    if workflow_stages:
+        for name, profile in profiles.get("profiles", {}).items():
+            for stage in profile.get("stages", []):
+                if stage not in workflow_stages:
+                    errors.append(f"workflow profile {name} references unknown stage: {stage}")
+    if check_enabled(config, "dev_map") and not Path("docs/DEV_MAP.md").exists():
+        errors.append("docs/DEV_MAP.md is missing")
+    return errors
+
+
+def iter_markdown_roots(roots: list[str]) -> list[Path]:
+    files: list[Path] = []
+    for root in roots:
+        path = Path(root)
+        if not path.exists():
+            continue
+        if path.is_file() and path.suffix.lower() in {".md", ".tmpl"}:
+            files.append(path)
+        elif path.is_dir():
+            files.extend(item for item in path.rglob("*") if item.is_file() and item.suffix.lower() in {".md", ".tmpl"})
+    return files
+
+
+def check_markdown_links(config: dict) -> list[str]:
+    spec = config.get("checks", {}).get("markdown_links", {})
+    broken: list[str] = []
+    for path in iter_markdown_roots(spec.get("roots", [])):
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        for match in MARKDOWN_LINK_RE.finditer(text):
+            target = match.group(1).split("#", 1)[0].strip()
+            if not target or target.startswith(("http://", "https://", "mailto:", "tel:")):
+                continue
+            if target.startswith("<") and target.endswith(">"):
+                target = target[1:-1]
+            if "://" in target:
+                continue
+            resolved = (path.parent / target).resolve()
+            try:
+                resolved.relative_to(Path.cwd().resolve())
+            except ValueError:
+                continue
+            if not resolved.exists():
+                broken.append(f"{path}: broken local link: {target}")
+    return broken
+
+
+def collect_snapshot() -> dict:
+    config = load_json(CONFIG_PATH, {})
+    checks = config.get("checks", {})
+    json_invalid = check_json(checks.get("json_integrity", {}).get("paths", [])) if check_enabled(config, "json_integrity") else []
+    jsonl_invalid = check_jsonl(checks.get("jsonl_integrity", {}).get("paths", [])) if check_enabled(config, "jsonl_integrity") else []
+    missing_required = check_required_paths() if check_enabled(config, "required_paths") else []
+    missing_templates = check_feature_templates(config) if check_enabled(config, "feature_templates") else []
+    task_board_errors = check_task_board() if check_enabled(config, "task_board") else []
+    role_contract_errors = check_role_contracts() if check_enabled(config, "role_contracts") else []
+    governance_config_errors = check_governance_configs(config) if check_enabled(config, "manifest") else []
+    broken_links = check_markdown_links(config) if check_enabled(config, "markdown_links") else []
+    findings = {
+        "invalid_json": json_invalid,
+        "invalid_jsonl": jsonl_invalid,
+        "missing_required_paths": missing_required,
+        "missing_feature_templates": missing_templates,
+        "task_board": task_board_errors,
+        "role_contracts": role_contract_errors,
+        "governance_configs": governance_config_errors,
+        "broken_local_links": broken_links,
+    }
+    counts = {key: len(value) for key, value in findings.items()}
+    return {
+        "schema": "agent-verify-snapshot-v1",
+        "created_at": utc_now(),
+        "counts": counts,
+        "findings": findings,
+    }
+
+
+def snapshot_has_hard_fail(snapshot: dict) -> bool:
+    counts = snapshot.get("counts", {})
+    hard_keys = [
+        "invalid_json",
+        "invalid_jsonl",
+        "missing_required_paths",
+        "missing_feature_templates",
+        "task_board",
+        "role_contracts",
+        "governance_configs",
+    ]
+    return any(counts.get(key, 0) > 0 for key in hard_keys)
+
+
+def print_snapshot(snapshot: dict) -> None:
+    print(json.dumps(snapshot, indent=2))
+
+
+def write_snapshot(name: str, snapshot: dict) -> Path:
+    if not re.match(r"^[a-zA-Z0-9._-]{1,80}$", name):
+        raise SystemExit("error: snapshot name must be alphanumeric with dot, underscore, or hyphen")
+    baselines = load_json(BASELINES_PATH, {"schema": "agent-baselines-v1", "snapshots": []})
+    snapshot_dir = Path(baselines.get("snapshot_dir", ".agent/baselines"))
+    path = snapshot_dir / f"{name}.json"
+    write_json(path, snapshot)
+    item = {"name": name, "path": str(path), "created_at": snapshot["created_at"]}
+    existing = [entry for entry in baselines.get("snapshots", []) if entry.get("name") != name]
+    existing.append(item)
+    baselines["snapshots"] = existing
+    baselines["latest_snapshot"] = str(path)
+    write_json(BASELINES_PATH, baselines)
+    return path
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    config = load_json(CONFIG_PATH)
+    if config.get("schema") != "agent-mechanical-checks-v1":
+        print("error: .agent/mechanical-checks.json schema must be agent-mechanical-checks-v1")
+        return 1
+    snapshot = collect_snapshot()
+    if args.json:
+        print_snapshot(snapshot)
+    if snapshot_has_hard_fail(snapshot):
+        for category, findings in snapshot["findings"].items():
+            for finding in findings:
+                print(f"error: {category}: {finding}")
+        return 1
+    print("agent mechanical verification doctor passed")
+    return 0
+
+
+def cmd_snapshot(args: argparse.Namespace) -> int:
+    snapshot = collect_snapshot()
+    if args.name:
+        path = write_snapshot(args.name, snapshot)
+        print(f"snapshot: {path}")
+    if args.json or not args.name:
+        print_snapshot(snapshot)
+    return 1 if args.fail_on_issue and snapshot_has_hard_fail(snapshot) else 0
+
+
+def cmd_compare(args: argparse.Namespace) -> int:
+    before = load_json(Path(args.before))
+    after = load_json(Path(args.after))
+    regressions: list[str] = []
+    for key in ("invalid_json", "invalid_jsonl", "missing_required_paths", "broken_local_links"):
+        before_count = int(before.get("counts", {}).get(key, 0))
+        after_count = int(after.get("counts", {}).get(key, 0))
+        if after_count > before_count:
+            regressions.append(f"{key}: {before_count} -> {after_count}")
+    report = {
+        "schema": "agent-verify-compare-v1",
+        "created_at": utc_now(),
+        "before": args.before,
+        "after": args.after,
+        "regressions": regressions,
+    }
+    print(json.dumps(report, indent=2))
+    return 1 if regressions else 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    doctor = subparsers.add_parser("doctor", help="Run hard mechanical checks")
+    doctor.add_argument("--json", action="store_true")
+    doctor.set_defaults(func=cmd_doctor)
+
+    snapshot = subparsers.add_parser("snapshot", help="Capture a baseline snapshot")
+    snapshot.add_argument("--name", help="Write snapshot to .agent/baselines/<name>.json")
+    snapshot.add_argument("--json", action="store_true")
+    snapshot.add_argument("--fail-on-issue", action="store_true")
+    snapshot.set_defaults(func=cmd_snapshot)
+
+    compare = subparsers.add_parser("compare", help="Compare two snapshots")
+    compare.add_argument("--before", required=True)
+    compare.add_argument("--after", required=True)
+    compare.set_defaults(func=cmd_compare)
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

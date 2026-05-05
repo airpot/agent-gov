@@ -19,24 +19,35 @@ openspec/config.yaml
     governance-*.md
 .agent/
   config.json
+  manifest.json
   harness.json
   project-layout.json
   spec.json
   workflow.json
+  workflow-profiles.json
+  task-board.json
   risk-zones.json
   review-policy.json
   worktrees.json
   subagents.json
+  role-contracts.json
   hooks.json
   knowledge.json
+  dev-map.json
   memory.json
   context.json
   capabilities.json
   tooling.json
   security.json
   evals.json
+  mechanical-checks.json
+  baselines.json
+  harness-evolution.json
+  mcp-policy.json
+  governance-gc.json
   skill-distribution.json
   runlog.jsonl
+  baselines/
   context/
     stats.jsonl
     latest.md
@@ -65,6 +76,14 @@ openspec/config.yaml
     implementation-plan.md.tmpl
     debugging-record.md.tmpl
     subagent-task.md.tmpl
+    features/
+      01_REQUIREMENT_ANALYSIS.md.tmpl
+      02_SOLUTION_DESIGN.md.tmpl
+      03_GATE_REVIEW.md.tmpl
+      04_DEVELOPMENT.md.tmpl
+      05_CODE_REVIEW.md.tmpl
+      06_TEST_REPORT.md.tmpl
+      07_DELIVERY_SUMMARY.md.tmpl
     memory-summary.md.tmpl
     memory-latest.md.tmpl
     context-summary.md.tmpl
@@ -89,6 +108,9 @@ scripts/
   agent_security.py
   agent_score.py
   agent_sync_skills.py
+  agent_task.py
+  agent_verify.py
+  agent_gc.py
 docs/
   index.md
   ARCHITECTURE.md
@@ -98,6 +120,9 @@ docs/
   TOOLING.md
   QUALITY_SCORE.md
   AI_CODING_GLOSSARY.md
+  DEV_MAP.md
+  features/
+    INDEX.md
   tech-debt.md
   adr/
     README.md
@@ -113,15 +138,20 @@ Makefile                   # optional if missing
 - Make the remote repository filesystem the source of truth.
 - Use scripts for deterministic checks and session state operations.
 - Use `.agent/harness.json` as the project-specific command registry for build, test, lint, typecheck, smoke, logs, and health checks.
+- Use `.agent/manifest.json` as the generated governance manifest for required paths, JSON schemas, JSONL stores, and score dimensions; generated checks should prefer it over duplicated static lists.
 - Use `.agent/project-layout.json` as the fixed directory contract for top-level project structure.
 - Use `.agent/spec.json` and `scripts/agent_spec.py` as the embedded specification policy and command surface.
 - Use `.agent/workflow.json` as the lifecycle gate policy for risk classification, design/spec approval, plan quality, implementation discipline, diff traceability, isolated work, TDD, debugging, review order, human review evidence, completion proof, and finish choices.
 - Use `.agent/risk-zones.json` as the task risk and autonomy policy.
 - Use `.agent/review-policy.json` as the diff traceability, automated review boundary, and human review evidence policy.
 - Use `.agent/worktrees.json` as the git worktree isolation and guarded cleanup policy.
+- Use `.agent/workflow-profiles.json` to choose a task-size-aware process: `tiny`, `bugfix`, `standard`, or `full`.
+- Use `.agent/task-board.json`, `scripts/agent_task.py`, and `docs/features/` as the cross-session task index and feature-stage document store.
 - Use `.agent/subagents.json` as the delegated agent role, boundary, and snapshot contract when subagents are allowed.
+- Use `.agent/role-contracts.json` to enforce role inputs, outputs, forbidden actions, and finder-cannot-fix separation.
 - Use `.agent/hooks.json` as the platform-neutral hook policy, with native Codex and Claude hook adapters treated as generated projections.
 - Use `.agent/knowledge.json` as the durable knowledge manifest for ownership, review dates, source links, and known stale sections.
+- Use `.agent/dev-map.json` and `docs/DEV_MAP.md` as a concise repository navigation map for entry points, ownership, read-before-edit docs, and common patterns.
 - Use `.agent/memory.json` as the cross-session memory policy for summaries, indexes, privacy redaction, and progressive retrieval.
 - Use `.agent/context.json` as the context budget policy for agent-facing docs, bootstrap packets, memory digests, embedded spec change docs, and subagent output size.
 - Use `.agent/capabilities.json` as the capability, skill/tool/MCP taxonomy, integration, permission, and risk registry for agent-visible skills, tools, resources, adapters, and integrations.
@@ -129,6 +159,10 @@ Makefile                   # optional if missing
 - Use `.agent/tooling.json` as the agent-computer-interface policy for bounded, path-first, line-numbered repository inspection.
 - Use `.agent/security.json` as the optional policy-as-code and supply-chain command registry.
 - Use `.agent/evals.json` and `.agent/evals/latest.md` as the local governance health score configuration and dashboard.
+- Use `.agent/mechanical-checks.json`, `.agent/baselines.json`, and `scripts/agent_verify.py` for hard mechanical checks and before/after baseline comparison.
+- Use `.agent/harness-evolution.json` as the incident taxonomy and promotion policy for repeated failures.
+- Use `.agent/mcp-policy.json` as the optional MCP trust-boundary and approval policy; it is disabled by default.
+- Use `.agent/governance-gc.json` and `scripts/agent_gc.py` for periodic governance gardening.
 - Use `.agent/skill-distribution.json` as the skill distribution policy for `.codex/skills`, `.agents/skills`, and `.claude/skills`.
 - Prefer `npx @airpot/agent-gov@latest` as the public one-command installer; it should copy bundled project skills before running the initializer.
 - Use `docs/AI_CODING_GLOSSARY.md` for shared AI coding terminology and `docs/adr/`, `docs/rfcs/`, and `docs/incidents/` for durable decisions, proposals, and postmortems that should outlive a session.
@@ -154,6 +188,9 @@ python3 scripts/agent_capabilities.py doctor
 python3 scripts/agent_runlog.py doctor
 python3 scripts/agent_tooling.py doctor
 python3 scripts/agent_security.py doctor
+python3 scripts/agent_task.py doctor
+python3 scripts/agent_verify.py doctor
+python3 scripts/agent_gc.py doctor
 python3 scripts/agent_score.py doctor
 python3 scripts/agent_validate.py --list
 python3 scripts/agent_sync_skills.py --dry-run
@@ -266,6 +303,7 @@ Use `.agent/templates/adr.md.tmpl`, `.agent/templates/rfc.md.tmpl`, and `.agent/
 
 - Required paths from `.agent/harness.json`.
 - Configured validation commands.
+- Workflow profile, task-board, role-contract, and mechanical baseline health.
 - Risk autonomy policy.
 - Diff traceability and human review policy.
 - Context budget drift.

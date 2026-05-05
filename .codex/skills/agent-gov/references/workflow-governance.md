@@ -37,20 +37,53 @@ Do not adopt these as absolute project rules:
 ```text
 .agent/
   workflow.json
+  workflow-profiles.json
+  task-board.json
   risk-zones.json
   review-policy.json
   worktrees.json
+  role-contracts.json
+  mechanical-checks.json
+  baselines.json
   runlog.jsonl
   templates/
     implementation-plan.md.tmpl
     debugging-record.md.tmpl
+    features/
+      01_REQUIREMENT_ANALYSIS.md.tmpl
+      02_SOLUTION_DESIGN.md.tmpl
+      03_GATE_REVIEW.md.tmpl
+      04_DEVELOPMENT.md.tmpl
+      05_CODE_REVIEW.md.tmpl
+      06_TEST_REPORT.md.tmpl
+      07_DELIVERY_SUMMARY.md.tmpl
   sessions/
     <session-id>/
       validation.md
       handoff.md
+docs/
+  features/
+    INDEX.md
 ```
 
-`.agent/workflow.json` is the lifecycle policy. `.agent/risk-zones.json` is the risk and autonomy policy. `.agent/review-policy.json` is the diff traceability and human review policy. `.agent/worktrees.json` is the isolation and finish policy. Session files and runlog entries store evidence.
+`.agent/workflow.json` is the lifecycle policy. `.agent/workflow-profiles.json` maps task size and risk to process weight. `.agent/task-board.json` is the cross-session task index. `.agent/role-contracts.json` makes role inputs, outputs, forbidden actions, and finder-cannot-fix separation machine-checkable. `.agent/risk-zones.json` is the risk and autonomy policy. `.agent/review-policy.json` is the diff traceability and human review policy. `.agent/worktrees.json` is the isolation and finish policy. Session files and runlog entries store evidence.
+
+## Workflow Profiles
+
+Use the lightest profile that covers the risk:
+
+- `tiny`: low-risk small changes; no feature document required by default.
+- `bugfix`: reproducible bug or failed check; record requirement, development, test report, and delivery summary.
+- `standard`: normal multi-file or behavior work; record requirement, design, development, code review, test report, and delivery summary.
+- `full`: architecture, migration, release, critical risk, or cross-team handoff; record all seven stage documents.
+
+Escalate the profile when task risk increases. Do not force a full flow for tiny changes.
+
+## Task Board And Feature Docs
+
+Use `.agent/task-board.json` for durable task state across sessions. It records task id, title, state, risk, profile, current stage, docs path, delivery conclusion, and related tasks. Use `scripts/agent_task.py new` to create a task and scaffold `docs/features/<task-id>/` from the profile-specific stage templates.
+
+The task board is not a casual TODO list. It is the project-local source for current and historical agent work when a new session starts.
 
 ## Lifecycle Stages
 
@@ -147,6 +180,7 @@ Use `.agent/worktrees.json` to keep isolation predictable:
 For delegated or substantial work:
 
 - Use a `worker` for bounded implementation only when delegation is allowed.
+- Enforce `.agent/role-contracts.json`: verifier and reviewer roles report findings and route fixes back; they do not fix their own findings directly.
 - Treat `DONE_WITH_CONCERNS`, `NEEDS_CONTEXT`, and `BLOCKED` as workflow states that need handling before review.
 - Run `spec_reviewer` first and resolve missing or extra behavior.
 - Run `quality_reviewer` only after spec review passes.
@@ -159,6 +193,7 @@ Before saying work is complete:
 
 - Identify the command or checklist that proves the claim.
 - Run the command fresh or inspect fresh recorded evidence.
+- For standard and full work, compare before/after mechanical snapshots when available.
 - Read the output and exit status.
 - Record the command, result, and runlog id or session validation note.
 - State skipped checks plainly with reasons and residual risk.

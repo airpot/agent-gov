@@ -1,4 +1,0 @@
-interface:
-  display_name: "Spec Apply"
-  short_description: "Implement embedded spec task lists"
-  default_prompt: "Use $openspec-apply-change to implement tasks from an embedded spec change."
