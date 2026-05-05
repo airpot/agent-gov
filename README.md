@@ -33,10 +33,10 @@
 初始化时可以用 `--governance-profile core|standard|full` 控制生成规模。
 
 - `core`：最小治理面，包含内嵌规格、harness、项目目录契约、会话接续、runlog、基础评分和迁移检查。
-- `standard`：默认档，推荐给多数已有项目，增加 workflow profiles、task-board、feature 阶段文档、memory、context budget、dev map、mechanical checks、baseline、governance-gc 和 harness evolution。
-- `full`：完整框架，额外增加 subagent 编排、Codex/Claude 原生适配、hooks、tooling/security 配置、MCP policy 和 skill distribution。
+- `standard`：默认档，推荐给多数已有项目，增加 workflow profiles、task-board、feature 阶段文档、memory、context budget、dev map、mechanical checks、baseline、禁用态 MCP policy、governance-gc 和 harness evolution。
+- `full`：完整框架，额外增加 subagent 编排、Codex/Claude 原生适配、hooks、tooling/security 配置和 skill distribution。
 
-默认是 `standard`。只需要最小接续能力时用 `core`，明确需要 subagent / Codex Claude 原生适配 / tooling security / MCP / skill distribution 时再用 `full`。
+默认是 `standard`。只需要最小接续能力时用 `core`，明确需要 subagent / Codex Claude 原生适配 / tooling security / skill distribution 或真实外部集成编排时再用 `full`。
 
 1. 项目治理初始化
    - 生成 `AGENTS.md`，可选生成 `CLAUDE.md`。
@@ -100,11 +100,11 @@
     - 生成 `docs/` 知识库、AI coding 术语表、ADR/RFC/postmortem 模板和治理健康评分。
     - `.agent/capabilities.json` 明确区分 Skill、Tool、MCP/integration、native adapter，并为每项能力记录 capability class、权限、owner、risk 和验证命令。
     - `docs/DEV_MAP.md` 和 `.agent/dev-map.json` 提供项目级入口地图：从哪里读起、哪些模块归谁、改动前先看什么、常见模式是什么；它是导航索引，不是全仓库文件清单。
-    - `.agent/harness-evolution.json` 把低级错误和重复失败归类为 rule gap、skill gap、script gap、workflow gap、role contract gap、tool/MCP gap、knowledge gap、session gap 或 context gap，并反向推动框架修订。
+    - `.agent/harness-evolution.json` 把低级错误和重复失败归类为 rule gap、skill gap、script gap、workflow gap、role contract gap、tool/MCP gap、knowledge gap、session gap 或 context gap，并可用 `agent_gc.py classify` 记录 incident，反向推动框架修订。
     - `.agent/mcp-policy.json` 默认 `optional-disabled-by-default`，只定义 MCP 接入的信任边界、审批、凭据和审计规则，不默认启用外部集成。
     - `agent_gc.py` 提供非破坏性的 doc-gardening / governance-gc，用于发现过期文档、owner 缺口、过期任务、过期 baseline、配置指针漂移和 MCP policy 风险。
     - `agent_score.py` 会把关键治理 JSON / JSONL 的解析、schema 有效性、`agent_verify.py` 机械快照和 `agent_gc.py` 漂移报告作为门禁，避免基础配置或治理漂移损坏时仍然给出 pass。
-    - `agent_verify.py` 提供硬机械检查和 before/after baseline 对比，覆盖 JSON/JSONL、required paths、feature templates、task-board、role contracts、本地 Markdown links。
+    - `agent_verify.py` 提供硬机械检查和 before/after baseline 对比，覆盖 JSON/JSONL、required paths、feature templates、task-board、role contracts、模板渲染、测试数量基线和本地 Markdown links。
 
 ## 不做什么
 
@@ -244,7 +244,7 @@ python3 scripts/agent_gc.py doctor
 python3 scripts/agent_score.py score --write
 ```
 
-`core` 档不会生成 `agent_task.py`、`agent_verify.py`、`agent_gc.py`、memory/context 工具或原生 adapter；`standard` 档不会生成 subagent/native adapter/tooling/security/MCP/skill distribution 相关文件。运行命令时以实际生成的脚本为准。
+`core` 档不会生成 `agent_task.py`、`agent_verify.py`、`agent_gc.py`、memory/context 工具或原生 adapter；`standard` 档会生成禁用态 `.agent/mcp-policy.json`，但不会生成 subagent/native adapter/tooling/security/skill distribution 相关文件。运行命令时以实际生成的脚本为准。
 
 任务看板和 feature 文档：
 
@@ -269,6 +269,7 @@ python3 scripts/agent_verify.py compare --before .agent/baselines/before-change.
 python3 scripts/agent_gc.py doctor
 python3 scripts/agent_gc.py doctor --fail-on-warning
 python3 scripts/agent_gc.py report --json
+python3 scripts/agent_gc.py classify --category script_gap --summary "失败原因和应补的治理能力"
 ```
 
 会话接续：

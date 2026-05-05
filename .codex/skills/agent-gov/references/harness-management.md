@@ -159,9 +159,9 @@ Makefile                   # optional if missing
 - Use `.agent/tooling.json` as the agent-computer-interface policy for bounded, path-first, line-numbered repository inspection.
 - Use `.agent/security.json` as the optional policy-as-code and supply-chain command registry.
 - Use `.agent/evals.json` and `.agent/evals/latest.md` as the local governance health score configuration and dashboard.
-- Use `.agent/mechanical-checks.json`, `.agent/baselines.json`, and `scripts/agent_verify.py` for hard mechanical checks and before/after baseline comparison.
-- Use `.agent/harness-evolution.json` as the incident taxonomy and promotion policy for repeated failures.
-- Use `.agent/mcp-policy.json` as the optional MCP trust-boundary and approval policy; it is disabled by default.
+- Use `.agent/mechanical-checks.json`, `.agent/baselines.json`, and `scripts/agent_verify.py` for hard mechanical checks, template rendering checks, test-count baselines, and before/after regression comparison.
+- Use `.agent/harness-evolution.json` as the incident taxonomy and promotion policy for repeated failures; record classifications with `python3 scripts/agent_gc.py classify --category <category> --summary <summary>`.
+- Use `.agent/mcp-policy.json` as the optional MCP trust-boundary and approval policy; it is generated disabled by default before any MCP server is enabled.
 - Use `.agent/governance-gc.json` and `scripts/agent_gc.py` for periodic governance gardening.
 - Use `.agent/skill-distribution.json` as the skill distribution policy for `.codex/skills`, `.agents/skills`, and `.claude/skills`.
 - Prefer `npx @airpot/agent-gov@latest` as the public one-command installer; it should copy bundled project skills before running the initializer.

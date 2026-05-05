@@ -14,6 +14,7 @@ from pathlib import Path
 TASK_BOARD_PATH = Path(".agent/task-board.json")
 PROFILES_PATH = Path(".agent/workflow-profiles.json")
 TASK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,80}$")
+REVIEW_STATUSES = {"pending", "needs-fix", "pass", "accepted-with-exceptions", "not-required"}
 
 
 def utc_now() -> str:
@@ -54,12 +55,63 @@ def load_profiles() -> dict:
     return profiles
 
 
+def profile_requires_review_gate(profile_name: str, profile: dict, policy: dict) -> bool:
+    required_profiles = set(policy.get("done_requires_review_gate_pass_for_profiles", []))
+    return profile.get("review_gate_required") is True or profile_name in required_profiles
+
+
+def default_review_gate(required: bool) -> dict:
+    return {
+        "required": required,
+        "status": "pending" if required else "not-required",
+        "latest_review": "",
+        "latest_fix": "",
+        "open_findings": [],
+        "accepted_exception": "",
+    }
+
+
+def normalized_review_gate(item: dict, profile: dict, policy: dict) -> dict:
+    required = profile_requires_review_gate(str(item.get("profile", "")), profile, policy)
+    gate = item.get("review_gate")
+    if not isinstance(gate, dict):
+        gate = {}
+    merged = default_review_gate(required)
+    merged.update(gate)
+    merged["required"] = bool(required or merged.get("required") is True)
+    if merged.get("status") not in REVIEW_STATUSES:
+        merged["status"] = "pending" if merged["required"] else "not-required"
+    if not isinstance(merged.get("open_findings"), list):
+        merged["open_findings"] = [str(merged.get("open_findings"))]
+    return merged
+
+
+def review_gate_errors(task_id: str, item: dict, profile: dict, policy: dict) -> list[str]:
+    errors: list[str] = []
+    gate = normalized_review_gate(item, profile, policy)
+    if gate.get("status") not in REVIEW_STATUSES:
+        errors.append(f"{task_id} review_gate has invalid status: {gate.get('status')}")
+    open_findings = [finding for finding in gate.get("open_findings", []) if str(finding).strip()]
+    if item.get("state") == "done" and gate.get("required"):
+        pass_status = policy.get("review_gate_pass_status", "pass")
+        if gate.get("status") != pass_status:
+            errors.append(f"{task_id} done without review_gate status {pass_status}")
+        if policy.get("review_gate_open_findings_must_be_empty") is True and open_findings:
+            errors.append(f"{task_id} done with open review findings")
+        latest_review = str(gate.get("latest_review", "")).strip()
+        if not latest_review:
+            errors.append(f"{task_id} done without review_gate latest_review")
+        elif policy.get("review_gate_latest_review_must_exist") is True and not Path(latest_review).exists():
+            errors.append(f"{task_id} review_gate latest_review path is missing: {latest_review}")
+    return errors
+
+
 def validate_board(board: dict, profiles: dict) -> list[str]:
     errors: list[str] = []
     states = set(board.get("states", []))
     required_fields = set(board.get("required_fields", []))
     policy = board.get("policy", {})
-    for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path"):
+    for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path", "review_gate"):
         if field not in required_fields:
             errors.append(f"missing required field declaration: {field}")
     seen: set[str] = set()
@@ -88,6 +140,7 @@ def validate_board(board: dict, profiles: dict) -> list[str]:
         if item.get("state") == "done" and policy.get("done_requires_delivery_conclusion") is True:
             if not str(item.get("delivery_conclusion", "")).strip():
                 errors.append(f"{task_id} is done without delivery_conclusion")
+        errors.extend(review_gate_errors(task_id, item, profile, policy))
         if profile.get("feature_doc_templates") and (not docs_path or not Path(docs_path).exists()):
             errors.append(f"{task_id} docs_path missing or absent: {docs_path}")
     return errors
@@ -180,6 +233,7 @@ def cmd_new(args: argparse.Namespace) -> int:
         "created_at": now,
         "updated_at": now,
         "delivery_conclusion": "",
+        "review_gate": default_review_gate(profile_requires_review_gate(args.profile, profile, board.get("policy", {}))),
         "related_tasks": [],
     }
     board.setdefault("items", []).append(item)
@@ -212,6 +266,21 @@ def cmd_update(args: argparse.Namespace) -> int:
         item["current_stage"] = args.stage
     if args.conclusion is not None:
         item["delivery_conclusion"] = args.conclusion
+    gate = normalized_review_gate(item, profile, board.get("policy", {}))
+    if args.review_status:
+        gate["status"] = args.review_status
+    if args.review_path is not None:
+        gate["latest_review"] = args.review_path
+    if args.fix_path is not None:
+        gate["latest_fix"] = args.fix_path
+    if args.clear_open_findings:
+        gate["open_findings"] = []
+    if args.open_finding:
+        gate.setdefault("open_findings", [])
+        gate["open_findings"].extend(args.open_finding)
+    if args.accepted_exception is not None:
+        gate["accepted_exception"] = args.accepted_exception
+    item["review_gate"] = gate
     if item.get("state") == "done" and board.get("policy", {}).get("done_requires_delivery_conclusion") is True:
         if not str(item.get("delivery_conclusion", "")).strip():
             print("error: done tasks require --conclusion", file=sys.stderr)
@@ -251,6 +320,12 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--state")
     update.add_argument("--stage")
     update.add_argument("--conclusion")
+    update.add_argument("--review-status", choices=sorted(REVIEW_STATUSES))
+    update.add_argument("--review-path")
+    update.add_argument("--fix-path")
+    update.add_argument("--open-finding", action="append", default=[])
+    update.add_argument("--clear-open-findings", action="store_true")
+    update.add_argument("--accepted-exception")
     update.set_defaults(func=cmd_update)
     return parser
 

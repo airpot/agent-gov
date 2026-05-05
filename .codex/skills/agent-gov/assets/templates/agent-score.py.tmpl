@@ -112,6 +112,7 @@ DEFAULT_DIMENSION_WEIGHTS = {
     "runlog": 6,
 }
 HARD_FAIL_DIMENSIONS = {"project_integrity", "required_paths", "workflow_profiles", "task_board", "mechanical_verification", "governance_gc"}
+REVIEW_STATUSES = {"pending", "needs-fix", "pass", "accepted-with-exceptions", "not-required"}
 
 
 def utc_now() -> str:
@@ -345,7 +346,7 @@ def score_workflow_profiles() -> dict:
         if not spec:
             findings.append(f"missing workflow profile: {name}")
             continue
-        for key in ("stages", "max_risk", "task_board_record", "feature_doc_templates", "required_evidence"):
+        for key in ("stages", "max_risk", "task_board_record", "review_gate_required", "feature_doc_templates", "required_evidence"):
             if key not in spec:
                 findings.append(f"profile {name} missing {key}")
         for stage in spec.get("stages", []):
@@ -362,9 +363,58 @@ def score_workflow_profiles() -> dict:
         findings.append("standard profile should require durable feature docs")
     if len(full_docs) < 7:
         findings.append("full profile should require all seven stage docs")
+    if configured.get("standard", {}).get("review_gate_required") is not True:
+        findings.append("standard profile must require review gate")
+    if configured.get("full", {}).get("review_gate_required") is not True:
+        findings.append("full profile must require review gate")
     score = 100 - min(90, len(findings) * 15)
     evidence = [f"{len(configured)} profiles", f"default={profiles.get('default_profile') or 'none'}"]
     return dimension("workflow_profiles", score, findings, evidence)
+
+
+def profile_requires_review_gate(profile_name: str, profile: dict, policy: dict) -> bool:
+    required_profiles = set(policy.get("done_requires_review_gate_pass_for_profiles", []))
+    return profile.get("review_gate_required") is True or profile_name in required_profiles
+
+
+def normalized_review_gate(item: dict, profile: dict, policy: dict) -> dict:
+    required = profile_requires_review_gate(str(item.get("profile", "")), profile, policy)
+    gate = item.get("review_gate")
+    if not isinstance(gate, dict):
+        gate = {}
+    merged = {
+        "required": required,
+        "status": "pending" if required else "not-required",
+        "latest_review": "",
+        "latest_fix": "",
+        "open_findings": [],
+        "accepted_exception": "",
+    }
+    merged.update(gate)
+    merged["required"] = bool(required or merged.get("required") is True)
+    if not isinstance(merged.get("open_findings"), list):
+        merged["open_findings"] = [str(merged.get("open_findings"))]
+    return merged
+
+
+def review_gate_findings(task_id: str, item: dict, profile: dict, policy: dict) -> list[str]:
+    findings: list[str] = []
+    gate = normalized_review_gate(item, profile, policy)
+    if gate.get("status") not in REVIEW_STATUSES:
+        findings.append(f"{task_id} review_gate invalid status: {gate.get('status')}")
+    open_findings = [finding for finding in gate.get("open_findings", []) if str(finding).strip()]
+    if item.get("state") == "done" and gate.get("required"):
+        pass_status = policy.get("review_gate_pass_status", "pass")
+        if gate.get("status") != pass_status:
+            findings.append(f"{task_id} done without review_gate status {pass_status}")
+        if policy.get("review_gate_open_findings_must_be_empty") is True and open_findings:
+            findings.append(f"{task_id} done with open review findings")
+        latest_review = str(gate.get("latest_review", "")).strip()
+        if not latest_review:
+            findings.append(f"{task_id} done without review_gate latest_review")
+        elif policy.get("review_gate_latest_review_must_exist") is True and not Path(latest_review).exists():
+            findings.append(f"{task_id} review_gate latest_review path missing: {latest_review}")
+    return findings
 
 
 def score_task_board() -> dict:
@@ -373,7 +423,7 @@ def score_task_board() -> dict:
     findings: list[str] = []
     if board.get("schema") != "agent-task-board-v1":
         findings.append("invalid task-board schema")
-    for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path", "delivery_conclusion", "related_tasks"):
+    for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path", "delivery_conclusion", "review_gate", "related_tasks"):
         if field not in board.get("required_fields", []):
             findings.append(f"task board missing required field declaration: {field}")
     policy = board.get("policy", {})
@@ -381,6 +431,10 @@ def score_task_board() -> dict:
         findings.append("task board must require records for non-tiny work")
     if policy.get("new_session_reads_board_before_edits") is not True:
         findings.append("new sessions must read task board before edits")
+    if set(policy.get("done_requires_review_gate_pass_for_profiles", [])) != {"standard", "full"}:
+        findings.append("task board must require review_gate pass for standard and full done tasks")
+    if policy.get("review_gate_open_findings_must_be_empty") is not True:
+        findings.append("task board must require empty review_gate open findings")
     if not Path("docs/features/INDEX.md").exists():
         findings.append("missing docs/features/INDEX.md")
     if not Path("scripts/agent_task.py").exists():
@@ -406,6 +460,7 @@ def score_task_board() -> dict:
         if item.get("state") == "done" and policy.get("done_requires_delivery_conclusion") is True:
             if not str(item.get("delivery_conclusion", "")).strip():
                 findings.append(f"{task_id} is done without delivery_conclusion")
+        findings.extend(review_gate_findings(task_id, item, profile, policy))
         docs_path = item.get("docs_path")
         if profile.get("feature_doc_templates") and (not docs_path or not Path(docs_path).exists()):
             findings.append(f"{task_id} docs_path missing or absent: {docs_path}")
@@ -454,7 +509,19 @@ def score_mechanical_verification() -> dict:
     if config.get("schema") != "agent-mechanical-checks-v1":
         findings.append("invalid mechanical-checks schema")
     checks = config.get("checks", {})
-    for name in ("json_integrity", "jsonl_integrity", "required_paths", "feature_templates", "task_board", "role_contracts", "manifest", "markdown_links"):
+    for name in (
+        "json_integrity",
+        "jsonl_integrity",
+        "required_paths",
+        "feature_templates",
+        "task_board",
+        "role_contracts",
+        "manifest",
+        "mcp_policy",
+        "template_rendering",
+        "test_baseline",
+        "markdown_links",
+    ):
         if name not in checks:
             findings.append(f"missing mechanical check: {name}")
     if checks.get("json_integrity", {}).get("fail_on_invalid") is not True:
@@ -488,6 +555,7 @@ def score_mechanical_verification() -> dict:
             "task_board",
             "role_contracts",
             "governance_configs",
+            "template_rendering",
         )
         soft_keys = ("broken_local_links",)
         hard_count += sum(int(counts.get(key, 0)) for key in hard_keys)
@@ -501,6 +569,7 @@ def score_mechanical_verification() -> dict:
         f"{len(baselines.get('snapshots', []))} baseline snapshot(s)",
         f"{hard_count} hard issue(s)",
         f"{soft_count} soft issue(s)",
+        f"{snapshot.get('counts', {}).get('test_files', 0) if isinstance(snapshot, dict) else 0} test file(s)",
     ]
     return dimension("mechanical_verification", score, findings, evidence)
 
@@ -543,6 +612,11 @@ def score_harness_evolution() -> dict:
     for key in ("classify_governance_failures", "turn_repeat_failures_into_harness_changes", "prefer_script_for_mechanical_rules"):
         if policy.get(key) is not True:
             findings.append(f"harness evolution policy missing {key}")
+    commands = evolution.get("commands", {})
+    if "classify" not in commands:
+        findings.append("harness evolution missing classify command")
+    if not isinstance(evolution.get("incidents", []), list):
+        findings.append("harness evolution incidents must be a list")
     postmortem = Path(".agent/templates/postmortem.md.tmpl")
     if not postmortem.exists() or "Harness Evolution" not in postmortem.read_text(encoding="utf-8", errors="ignore"):
         findings.append("postmortem template lacks Harness Evolution section")
@@ -701,12 +775,22 @@ def score_review_policy() -> dict:
         findings.append("workflow missing diff_traceability gate")
     if "human_review_evidence" not in gates:
         findings.append("workflow missing human_review_evidence gate")
+    review_fix = gates.get("review_fix_gate", {})
+    if not review_fix:
+        findings.append("workflow missing review_fix_gate")
+    else:
+        if review_fix.get("latest_review_status_must_be") != "pass":
+            findings.append("review_fix_gate must require latest review status pass")
+        if review_fix.get("open_findings_must_be_empty") is not True:
+            findings.append("review_fix_gate must require empty open findings")
+        if review_fix.get("fix_requires_next_review_round") is not True:
+            findings.append("review_fix_gate must require a next review after fixes")
     review_template = Path(".agent/templates/project-review.md.tmpl")
     if not review_template.exists():
         findings.append("missing project review template")
     else:
         text = review_template.read_text(encoding="utf-8", errors="ignore")
-        for marker in ("Diff Traceability", "Human Review Evidence", "Automated Review Boundary"):
+        for marker in ("Diff Traceability", "Human Review Evidence", "Automated Review Boundary", "Loop Decision"):
             if marker not in text:
                 findings.append(f"project review template lacks {marker}")
     score = 100 - min(90, len(findings) * 12)
@@ -771,6 +855,23 @@ def score_memory() -> dict:
     findings: list[str] = []
     if memory.get("schema") != "agent-memory-v1":
         findings.append("invalid memory schema")
+    policy = memory.get("policy", {})
+    if policy.get("memory_is_advisory_not_authoritative") is not True:
+        findings.append("memory must be advisory, not authoritative")
+    truth_sources = [str(item) for item in policy.get("truth_sources_in_order", [])]
+    required_truth_tokens = [
+        ".agent/spec.json",
+        ".agent/task-board.json",
+        "docs/DEV_MAP.md",
+        "docs/features",
+        "docs/adr",
+        ".agent/runlog.jsonl",
+    ]
+    for token in required_truth_tokens:
+        if not any(token in item for item in truth_sources):
+            findings.append(f"memory truth source missing {token}")
+    if truth_sources and ".agent/memory" not in truth_sources[-1]:
+        findings.append("memory summaries must be the last truth source")
     taxonomy = memory.get("taxonomy", {})
     for name in ("episodic", "semantic", "procedural"):
         if name not in taxonomy:

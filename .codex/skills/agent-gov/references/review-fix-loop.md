@@ -49,6 +49,21 @@ The initializer places target-project templates at:
 .agent/templates/project-fix-log.md.tmpl
 ```
 
+For task-managed work, the pass gate is also recorded in `.agent/task-board.json`:
+
+```json
+"review_gate": {
+  "required": true,
+  "status": "pass",
+  "latest_review": "docs/features/<task-id>/05_CODE_REVIEW.md",
+  "latest_fix": "docs/features/<task-id>/04_DEVELOPMENT.md",
+  "open_findings": [],
+  "accepted_exception": ""
+}
+```
+
+`standard` and `full` tasks cannot be marked `done` unless the review gate is `pass`, the latest review path exists, and open blocker/major/minor findings are empty.
+
 ## Findings
 
 Use four severities:
@@ -74,5 +89,7 @@ review
 ```
 
 Do not convert a finding-bearing review to `pass`. Keep it as `needs-fix`, record the fix log, and use the next review round as proof that the fixes held.
+
+Generated projects enforce this through `scripts/agent_task.py`, `scripts/agent_check.py`, `scripts/agent_verify.py`, and `scripts/agent_score.py`.
 
 For skill development in this repository, use `skill_lifecycle.py review`, `fix-log`, and `review-status`.

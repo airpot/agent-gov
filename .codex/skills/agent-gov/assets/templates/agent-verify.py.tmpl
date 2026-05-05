@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import json
 import re
 import sys
@@ -14,6 +15,7 @@ from pathlib import Path
 CONFIG_PATH = Path(".agent/mechanical-checks.json")
 BASELINES_PATH = Path(".agent/baselines.json")
 MARKDOWN_LINK_RE = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
+REVIEW_STATUSES = {"pending", "needs-fix", "pass", "accepted-with-exceptions", "not-required"}
 
 
 def utc_now() -> str:
@@ -86,6 +88,51 @@ def check_feature_templates(config: dict) -> list[str]:
     return missing
 
 
+def profile_requires_review_gate(profile_name: str, profile: dict, policy: dict) -> bool:
+    required_profiles = set(policy.get("done_requires_review_gate_pass_for_profiles", []))
+    return profile.get("review_gate_required") is True or profile_name in required_profiles
+
+
+def normalized_review_gate(item: dict, profile: dict, policy: dict) -> dict:
+    required = profile_requires_review_gate(str(item.get("profile", "")), profile, policy)
+    gate = item.get("review_gate")
+    if not isinstance(gate, dict):
+        gate = {}
+    merged = {
+        "required": required,
+        "status": "pending" if required else "not-required",
+        "latest_review": "",
+        "latest_fix": "",
+        "open_findings": [],
+        "accepted_exception": "",
+    }
+    merged.update(gate)
+    merged["required"] = bool(required or merged.get("required") is True)
+    if not isinstance(merged.get("open_findings"), list):
+        merged["open_findings"] = [str(merged.get("open_findings"))]
+    return merged
+
+
+def review_gate_errors(task_id: str, item: dict, profile: dict, policy: dict) -> list[str]:
+    errors: list[str] = []
+    gate = normalized_review_gate(item, profile, policy)
+    if gate.get("status") not in REVIEW_STATUSES:
+        errors.append(f"{task_id} review_gate invalid status: {gate.get('status')}")
+    open_findings = [finding for finding in gate.get("open_findings", []) if str(finding).strip()]
+    if item.get("state") == "done" and gate.get("required"):
+        pass_status = policy.get("review_gate_pass_status", "pass")
+        if gate.get("status") != pass_status:
+            errors.append(f"{task_id} done without review_gate status {pass_status}")
+        if policy.get("review_gate_open_findings_must_be_empty") is True and open_findings:
+            errors.append(f"{task_id} done with open review findings")
+        latest_review = str(gate.get("latest_review", "")).strip()
+        if not latest_review:
+            errors.append(f"{task_id} done without review_gate latest_review")
+        elif policy.get("review_gate_latest_review_must_exist") is True and not Path(latest_review).exists():
+            errors.append(f"{task_id} review_gate latest_review path missing: {latest_review}")
+    return errors
+
+
 def check_task_board() -> list[str]:
     board = load_json(Path(".agent/task-board.json"), {})
     profiles = load_json(Path(".agent/workflow-profiles.json"), {})
@@ -97,9 +144,11 @@ def check_task_board() -> list[str]:
     states = set(board.get("states", []))
     profile_names = set(profiles.get("profiles", {}))
     policy = board.get("policy", {})
-    for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path"):
+    for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path", "review_gate"):
         if field not in required_fields:
             errors.append(f"task board missing required field declaration: {field}")
+    if set(policy.get("done_requires_review_gate_pass_for_profiles", [])) != {"standard", "full"}:
+        errors.append("task board must require review_gate pass for standard and full done tasks")
     for item in board.get("items", []):
         task_id = item.get("id")
         if not task_id:
@@ -123,6 +172,7 @@ def check_task_board() -> list[str]:
         if item.get("state") == "done" and policy.get("done_requires_delivery_conclusion") is True:
             if not str(item.get("delivery_conclusion", "")).strip():
                 errors.append(f"{task_id} done without delivery_conclusion")
+        errors.extend(review_gate_errors(task_id, item, profile, policy))
         docs_path = item.get("docs_path")
         if profile.get("feature_doc_templates") and (not docs_path or not Path(docs_path).exists()):
             errors.append(f"{task_id} docs_path missing or absent: {docs_path}")
@@ -179,13 +229,31 @@ def check_governance_configs(config: dict) -> list[str]:
     workflow = load_json(Path(".agent/workflow.json"), {})
     profiles = load_json(Path(".agent/workflow-profiles.json"), {})
     workflow_stages = set(workflow.get("stages", []))
+    review_fix = workflow.get("gates", {}).get("review_fix_gate", {})
+    if review_fix.get("latest_review_status_must_be") != "pass":
+        errors.append("workflow review_fix_gate must require latest review status pass")
+    if review_fix.get("open_findings_must_be_empty") is not True:
+        errors.append("workflow review_fix_gate must require empty open findings")
     if workflow_stages:
         for name, profile in profiles.get("profiles", {}).items():
+            if name in {"standard", "full"} and profile.get("review_gate_required") is not True:
+                errors.append(f"workflow profile {name} must require review gate")
             for stage in profile.get("stages", []):
                 if stage not in workflow_stages:
                     errors.append(f"workflow profile {name} references unknown stage: {stage}")
     if check_enabled(config, "dev_map") and not Path("docs/DEV_MAP.md").exists():
         errors.append("docs/DEV_MAP.md is missing")
+    if check_enabled(config, "mcp_policy"):
+        mcp_path = Path(config.get("checks", {}).get("mcp_policy", {}).get("path", ".agent/mcp-policy.json"))
+        mcp = load_json(mcp_path, {})
+        if mcp.get("schema") != "agent-mcp-policy-v1":
+            errors.append(f"{mcp_path} schema must be agent-mcp-policy-v1")
+        if mcp.get("mode") != "optional-disabled-by-default" and not mcp.get("servers"):
+            errors.append(f"{mcp_path} must stay disabled by default or define audited servers")
+        rules = mcp.get("policy", {})
+        for key in ("credentials_must_not_be_stored_in_repo", "destructive_or_release_operations_need_human_approval", "record_high_risk_mcp_use_in_runlog"):
+            if rules.get(key) is not True:
+                errors.append(f"{mcp_path} missing policy: {key}")
     return errors
 
 
@@ -225,6 +293,43 @@ def check_markdown_links(config: dict) -> list[str]:
     return broken
 
 
+def render_json_template_errors(config: dict) -> list[str]:
+    spec = config.get("checks", {}).get("template_rendering", {})
+    placeholder = str(spec.get("placeholder_value", "agent-gov-placeholder"))
+    errors: list[str] = []
+    for name in spec.get("json_templates", []):
+        path = Path(name)
+        if not path.exists():
+            errors.append(f"missing json template: {name}")
+            continue
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        rendered = re.sub(r"\{\{[A-Za-z0-9_. -]+\}\}", placeholder, text)
+        try:
+            json.loads(rendered)
+        except json.JSONDecodeError as exc:
+            errors.append(f"invalid rendered json template: {name}: {exc}")
+    return errors
+
+
+def is_ignored(path: Path, ignore_dirs: list[str]) -> bool:
+    parts = set(path.parts)
+    return any(part in parts for part in ignore_dirs)
+
+
+def count_test_files(config: dict) -> int:
+    spec = config.get("checks", {}).get("test_baseline", {})
+    ignore_dirs = list(spec.get("ignore_dirs", []))
+    matches: set[Path] = set()
+    for pattern in spec.get("globs", []):
+        for path in Path(".").rglob("*"):
+            if not path.is_file() or is_ignored(path, ignore_dirs):
+                continue
+            relative = path.as_posix().removeprefix("./")
+            if fnmatch.fnmatch(relative, pattern):
+                matches.add(path)
+    return len(matches)
+
+
 def collect_snapshot() -> dict:
     config = load_json(CONFIG_PATH, {})
     checks = config.get("checks", {})
@@ -235,7 +340,9 @@ def collect_snapshot() -> dict:
     task_board_errors = check_task_board() if check_enabled(config, "task_board") else []
     role_contract_errors = check_role_contracts() if check_enabled(config, "role_contracts") else []
     governance_config_errors = check_governance_configs(config) if check_enabled(config, "manifest") else []
+    template_errors = render_json_template_errors(config) if check_enabled(config, "template_rendering") else []
     broken_links = check_markdown_links(config) if check_enabled(config, "markdown_links") else []
+    test_file_count = count_test_files(config) if check_enabled(config, "test_baseline") else 0
     findings = {
         "invalid_json": json_invalid,
         "invalid_jsonl": jsonl_invalid,
@@ -244,9 +351,11 @@ def collect_snapshot() -> dict:
         "task_board": task_board_errors,
         "role_contracts": role_contract_errors,
         "governance_configs": governance_config_errors,
+        "template_rendering": template_errors,
         "broken_local_links": broken_links,
     }
     counts = {key: len(value) for key, value in findings.items()}
+    counts["test_files"] = test_file_count
     return {
         "schema": "agent-verify-snapshot-v1",
         "created_at": utc_now(),
@@ -265,6 +374,7 @@ def snapshot_has_hard_fail(snapshot: dict) -> bool:
         "task_board",
         "role_contracts",
         "governance_configs",
+        "template_rendering",
     ]
     return any(counts.get(key, 0) > 0 for key in hard_keys)
 
@@ -320,11 +430,16 @@ def cmd_compare(args: argparse.Namespace) -> int:
     before = load_json(Path(args.before))
     after = load_json(Path(args.after))
     regressions: list[str] = []
-    for key in ("invalid_json", "invalid_jsonl", "missing_required_paths", "broken_local_links"):
+    issue_keys = sorted(set(before.get("findings", {})) | set(after.get("findings", {})))
+    for key in issue_keys:
         before_count = int(before.get("counts", {}).get(key, 0))
         after_count = int(after.get("counts", {}).get(key, 0))
         if after_count > before_count:
             regressions.append(f"{key}: {before_count} -> {after_count}")
+    before_tests = int(before.get("counts", {}).get("test_files", 0))
+    after_tests = int(after.get("counts", {}).get("test_files", 0))
+    if before_tests and after_tests < before_tests:
+        regressions.append(f"test_files: {before_tests} -> {after_tests}")
     report = {
         "schema": "agent-verify-compare-v1",
         "created_at": utc_now(),

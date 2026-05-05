@@ -145,6 +145,7 @@ def config_path_pointers(governance_profile: str, openspec_enabled: bool, claude
                 "mechanical_checks": ".agent/mechanical-checks.json",
                 "baselines": ".agent/baselines.json",
                 "harness_evolution": ".agent/harness-evolution.json",
+                "mcp_policy": ".agent/mcp-policy.json",
                 "governance_gc": ".agent/governance-gc.json",
             }
         )
@@ -245,6 +246,7 @@ def harness_config(
                 ".agent/mechanical-checks.json",
                 ".agent/baselines.json",
                 ".agent/harness-evolution.json",
+                ".agent/mcp-policy.json",
                 ".agent/governance-gc.json",
                 ".agent/baselines/.gitkeep",
                 ".agent/memory/events.jsonl",
@@ -298,7 +300,6 @@ def harness_config(
                 ".agent/hooks.json",
                 ".agent/tooling.json",
                 ".agent/security.json",
-                ".agent/mcp-policy.json",
                 ".agent/skill-distribution.json",
                 ".agent/templates/subagent-task.md.tmpl",
                 ".agent/tools/governance_hook.py",
@@ -481,6 +482,7 @@ def workflow_profiles_config(project_name: str, created_at: str) -> dict:
                 "description": "Small, low-risk documentation, template, or local cleanup work.",
                 "max_risk": "low",
                 "task_board_record": "optional",
+                "review_gate_required": False,
                 "feature_doc_templates": [],
                 "stages": ["intake", "risk_classification", "implementation", "verification", "handoff"],
                 "required_evidence": ["risk note", "fresh validation or explicit skip reason"],
@@ -489,6 +491,7 @@ def workflow_profiles_config(project_name: str, created_at: str) -> dict:
                 "description": "A reproducible bug or failed check with a bounded fix.",
                 "max_risk": "medium",
                 "task_board_record": "required",
+                "review_gate_required": False,
                 "feature_doc_templates": [
                     "01_REQUIREMENT_ANALYSIS.md",
                     "04_DEVELOPMENT.md",
@@ -509,6 +512,7 @@ def workflow_profiles_config(project_name: str, created_at: str) -> dict:
                 "description": "Normal multi-file project work with clear scope and review needs.",
                 "max_risk": "high",
                 "task_board_record": "required",
+                "review_gate_required": True,
                 "feature_doc_templates": [
                     "01_REQUIREMENT_ANALYSIS.md",
                     "02_SOLUTION_DESIGN.md",
@@ -534,6 +538,7 @@ def workflow_profiles_config(project_name: str, created_at: str) -> dict:
                 "description": "Cross-module, architectural, release, migration, or high coordination work.",
                 "max_risk": "critical",
                 "task_board_record": "required",
+                "review_gate_required": True,
                 "feature_doc_templates": [name.replace(".tmpl", "") for name in FEATURE_STAGE_TEMPLATES],
                 "stages": [
                     "intake",
@@ -604,6 +609,7 @@ def task_board_config(project_name: str, created_at: str) -> dict:
             "created_at",
             "updated_at",
             "delivery_conclusion",
+            "review_gate",
             "related_tasks",
         ],
         "policy": {
@@ -611,6 +617,10 @@ def task_board_config(project_name: str, created_at: str) -> dict:
             "new_session_reads_board_before_edits": True,
             "stage_changes_update_current_stage": True,
             "done_requires_delivery_conclusion": True,
+            "done_requires_review_gate_pass_for_profiles": ["standard", "full"],
+            "review_gate_pass_status": "pass",
+            "review_gate_open_findings_must_be_empty": True,
+            "review_gate_latest_review_must_exist": True,
             "docs_path_required_when_profile_requires_docs": True,
         },
         "items": [],
@@ -826,6 +836,15 @@ def workflow_config(project_name: str, created_at: str, openspec_enabled: bool) 
                 "re_review_after_fixes": True,
                 "finder_cannot_fix": True,
             },
+            "review_fix_gate": {
+                "required_for": ["standard_task_done", "full_task_done", "handoff", "merge", "pull_request", "archive", "release_claim"],
+                "source": ".agent/task-board.json#/items/*/review_gate",
+                "latest_review_status_must_be": "pass",
+                "open_findings_must_be_empty": True,
+                "latest_review_path_must_exist": True,
+                "finding_bearing_review_must_remain_needs_fix": True,
+                "fix_requires_next_review_round": True,
+            },
             "human_review_evidence": {
                 "required_for": ["high_risk_change", "critical_risk_change", "release_claim", "delegated_substantial_change"],
                 "policy": ".agent/review-policy.json",
@@ -835,6 +854,7 @@ def workflow_config(project_name: str, created_at: str, openspec_enabled: bool) 
             "completion_verification": {
                 "required_for": ["handoff", "merge", "pull_request", "archive"],
                 "fresh_validation_required": True,
+                "review_fix_gate_required_for_profiles": ["standard", "full"],
                 "record_results_in_runlog": True,
                 "no_completion_claim_without_command_evidence": True,
             },
@@ -1319,8 +1339,10 @@ def harness_evolution_config(project_name: str, created_at: str) -> dict:
         },
         "commands": {
             "gc_report": "python3 scripts/agent_gc.py report",
+            "classify": "python3 scripts/agent_gc.py classify --category <category> --summary <summary>",
             "postmortem_template": ".agent/templates/postmortem.md.tmpl",
         },
+        "incidents": [],
     }
 
 
@@ -1402,14 +1424,14 @@ def memory_config(project_name: str, created_at: str) -> dict:
             "memory_is_advisory_not_authoritative": True,
             "procedural_memory_requires_review": True,
             "truth_sources_in_order": [
-                "repository files",
-                "embedded spec",
-                "task board",
-                "dev map",
-                "feature docs",
-                "ADR/RFC/postmortem records",
-                "runlog and validation evidence",
-                "memory summaries",
+                ".agent/spec.json and openspec/",
+                ".agent/task-board.json",
+                "docs/DEV_MAP.md and .agent/dev-map.json",
+                "docs/features/<task-id>/",
+                "docs/adr/, docs/rfcs/, docs/incidents/",
+                ".agent/runlog.jsonl and validation.md",
+                ".agent/sessions/ for active handoff state",
+                ".agent/memory/ summaries",
             ],
         },
         "taxonomy": {
@@ -1929,6 +1951,7 @@ def capabilities_config(
         "mechanical-verification",
         "dev-map",
         "harness-evolution",
+        "mcp-policy",
         "governance-gc",
         "decision-records",
         "session-memory",
@@ -2046,6 +2069,7 @@ def evals_config(project_name: str, created_at: str, governance_profile: str) ->
                 "mechanical_verification": {"weight": 10},
                 "dev_map": {"weight": 6},
                 "harness_evolution": {"weight": 6},
+                "mcp_policy": {"weight": 4},
                 "governance_gc": {"weight": 6},
                 "implementation_discipline": {"weight": 8},
                 "risk_governance": {"weight": 8},
@@ -2057,12 +2081,7 @@ def evals_config(project_name: str, created_at: str, governance_profile: str) ->
             }
         )
     if profile_at_least(governance_profile, "full"):
-        dimensions.update(
-            {
-                "mcp_policy": {"weight": 4},
-                "security": {"weight": 8},
-            }
-        )
+        dimensions.update({"security": {"weight": 8}})
     return {
         "schema": "agent-evals-v1",
         "project_name": project_name,
@@ -2116,6 +2135,7 @@ def mechanical_checks_config(project_name: str, created_at: str, governance_prof
         ".agent/mechanical-checks.json",
         ".agent/baselines.json",
         ".agent/harness-evolution.json",
+        ".agent/mcp-policy.json",
         ".agent/governance-gc.json",
         ".agent/sessions/index.json",
     ]
@@ -2126,7 +2146,6 @@ def mechanical_checks_config(project_name: str, created_at: str, governance_prof
                 ".agent/hooks.json",
                 ".agent/tooling.json",
                 ".agent/security.json",
-                ".agent/mcp-policy.json",
                 ".agent/skill-distribution.json",
             ]
         )
@@ -2176,10 +2195,39 @@ def mechanical_checks_config(project_name: str, created_at: str, governance_prof
             "path": ".agent/harness-evolution.json",
             "require_incident_categories": True,
         },
+        "mcp_policy": {
+            "enabled": True,
+            "path": ".agent/mcp-policy.json",
+            "must_be_disabled_or_audited": True,
+        },
         "governance_gc": {
             "enabled": True,
             "path": ".agent/governance-gc.json",
             "script": "scripts/agent_gc.py",
+        },
+        "template_rendering": {
+            "enabled": True,
+            "json_templates": [".agent/templates/artifacts.json.tmpl"],
+            "placeholder_value": "agent-gov-placeholder",
+            "fail_on_invalid_render": True,
+        },
+        "test_baseline": {
+            "enabled": True,
+            "globs": [
+                "tests/*.py",
+                "tests/**/*.py",
+                "test/*.py",
+                "test/**/*.py",
+                "**/*_test.py",
+                "**/*.test.ts",
+                "**/*.spec.ts",
+                "**/*.test.js",
+                "**/*.spec.js",
+                "**/*_test.go",
+                "**/*Test.java",
+            ],
+            "ignore_dirs": [".git", ".agent", "node_modules", "dist", "build", "target", "__pycache__"],
+            "fail_on_count_decrease": True,
         },
         "markdown_links": {
             "enabled": True,
@@ -2187,12 +2235,6 @@ def mechanical_checks_config(project_name: str, created_at: str, governance_prof
             "fail_on_missing_local_file": False,
         },
     }
-    if profile_at_least(governance_profile, "full"):
-        checks["mcp_policy"] = {
-            "enabled": True,
-            "path": ".agent/mcp-policy.json",
-            "must_be_disabled_or_audited": True,
-        }
     return {
         "schema": "agent-mechanical-checks-v1",
         "project_name": project_name,
@@ -2531,6 +2573,7 @@ def agent_ground_rules(governance_profile: str) -> tuple[str, str]:
             "- Use `.agent/dev-map.json` and `docs/DEV_MAP.md` to find entry points, ownership, and read-before-edit docs before broad changes.",
             "- Use `.agent/capabilities.json`, `.agent/mechanical-checks.json`, and `.agent/baselines.json` for capability risk, hard checks, and before/after baselines.",
             "- Use `.agent/harness-evolution.json` for incident taxonomy and for promoting repeated failures into rules, skills, scripts, workflow gates, role contracts, tools, or docs.",
+            "- Use `.agent/mcp-policy.json` as the disabled-by-default trust-boundary policy before enabling any MCP or external integration.",
             "- Use `.agent/governance-gc.json` and `scripts/agent_gc.py` for periodic governance gardening.",
             "- Use `docs/AI_CODING_GLOSSARY.md` for shared skill/tool/MCP, harness, session, memory, and review terms.",
         ]
@@ -2539,7 +2582,6 @@ def agent_ground_rules(governance_profile: str) -> tuple[str, str]:
             "- Use `.agent/subagents.json` for delegated work when the active platform allows it; require disjoint write boundaries and concise `===SNAPSHOT===` JSON reports.",
             "- Use `.agent/hooks.json` for advisory bootstrap and checkpoint reminders.",
             "- Use `.agent/tooling.json` and `.agent/security.json` for bounded inspection and optional security/supply-chain suites.",
-            "- Use `.agent/mcp-policy.json` before enabling any MCP or external integration.",
             "- Use `.agent/skill-distribution.json` when project skills need to be mirrored into current agent skill directories.",
         ]
     return lines(standard), lines(full)
@@ -2575,6 +2617,7 @@ def agent_workflow(governance_profile: str, spec_workflow_step: str) -> tuple[st
             "- For bugs, test failures, build failures, unexpected behavior, or governance failures, classify the harness gap with `.agent/harness-evolution.json`.",
             "- For non-tiny work, create or update a task-board record with `python3 scripts/agent_task.py` and keep `docs/features/<task-id>/` stage documents current.",
             "- For standard or full work, capture before/after snapshots with `python3 scripts/agent_verify.py snapshot --name <name>` and compare regressions before handoff.",
+            "- Before enabling MCP or external integrations, update `.agent/mcp-policy.json`, keep credentials outside the repo, and record high-risk use in runlog.",
             "- For reusable context, run `python3 .agent/tools/agent_memory.py ingest-session --reason handoff`.",
             "- For oversized governance docs, run `python3 .agent/tools/agent_context.py suggest` and validate any compressed rewrite with `validate-pair`.",
             "- Use ADRs for durable architecture decisions, RFCs for proposals, and postmortems for incidents.",
@@ -2945,6 +2988,10 @@ def init_project(args: argparse.Namespace) -> int:
             json.dumps(harness_evolution_config(project_name, values["created_at"]), indent=2) + "\n",
         )
         writer.write(
+            ".agent/mcp-policy.json",
+            json.dumps(mcp_policy_config(project_name, values["created_at"]), indent=2) + "\n",
+        )
+        writer.write(
             ".agent/governance-gc.json",
             json.dumps(governance_gc_config(project_name, values["created_at"]), indent=2) + "\n",
         )
@@ -2961,10 +3008,6 @@ def init_project(args: argparse.Namespace) -> int:
         writer.write(
             ".agent/security.json",
             json.dumps(security_config(project_name, values["created_at"]), indent=2) + "\n",
-        )
-        writer.write(
-            ".agent/mcp-policy.json",
-            json.dumps(mcp_policy_config(project_name, values["created_at"]), indent=2) + "\n",
         )
         writer.write(
             ".agent/skill-distribution.json",

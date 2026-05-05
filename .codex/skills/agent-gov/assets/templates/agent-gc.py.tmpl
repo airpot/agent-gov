@@ -28,6 +28,11 @@ def load_json(path: Path, fallback: dict | None = None) -> dict:
         raise SystemExit(f"error: invalid JSON in {path}: {exc}")
 
 
+def write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
 def parse_date(value: str) -> datetime | None:
     for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%SZ"):
         try:
@@ -192,6 +197,37 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 1 if report["counts"]["errors"] else 0
 
 
+def cmd_classify(args: argparse.Namespace) -> int:
+    path = Path(".agent/harness-evolution.json")
+    evolution = load_json(path)
+    categories = evolution.get("incident_categories", {})
+    if args.category not in categories:
+        print(f"error: unknown harness category: {args.category}", file=sys.stderr)
+        print("known categories: " + ", ".join(sorted(categories)), file=sys.stderr)
+        return 1
+    created_at = utc_now()
+    incident_id = "incident-" + created_at.replace("-", "").replace(":", "").replace("T", "-").replace("Z", "")
+    incident = {
+        "id": incident_id,
+        "created_at": created_at,
+        "category": args.category,
+        "severity": args.severity,
+        "summary": args.summary,
+        "path": args.path or "",
+        "promotion_target": args.promotion_target or "",
+        "postmortem": args.postmortem or "",
+        "status": args.status,
+    }
+    incidents = evolution.get("incidents", [])
+    if not isinstance(incidents, list):
+        incidents = []
+    incidents.append(incident)
+    evolution["incidents"] = incidents
+    write_json(path, evolution)
+    print(json.dumps(incident, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -204,6 +240,16 @@ def build_parser() -> argparse.ArgumentParser:
     report = subparsers.add_parser("report", help="Print a governance drift report")
     report.add_argument("--json", action="store_true")
     report.set_defaults(func=cmd_report)
+
+    classify = subparsers.add_parser("classify", help="Record a harness-evolution incident classification")
+    classify.add_argument("--category", required=True)
+    classify.add_argument("--summary", required=True)
+    classify.add_argument("--severity", choices=["low", "medium", "high", "critical"], default="medium")
+    classify.add_argument("--path", default="")
+    classify.add_argument("--promotion-target", default="")
+    classify.add_argument("--postmortem", default="")
+    classify.add_argument("--status", choices=["open", "promoted", "accepted", "closed"], default="open")
+    classify.set_defaults(func=cmd_classify)
     return parser
 
 

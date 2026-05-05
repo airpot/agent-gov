@@ -186,6 +186,43 @@ def assert_task_board_guards(init_script: Path, temp_root: Path, python: str) ->
         print("agent_task.py did not reject done without delivery_conclusion", file=sys.stderr)
         print(done_without_conclusion.stdout + done_without_conclusion.stderr, file=sys.stderr)
         raise SystemExit(1)
+    done_without_review = run(
+        [
+            python,
+            "scripts/agent_task.py",
+            "update",
+            "guard-task",
+            "--state",
+            "done",
+            "--conclusion",
+            "Implemented and validated.",
+        ],
+        cwd=guarded,
+        expect_ok=False,
+    )
+    if "review_gate" not in (done_without_review.stdout + done_without_review.stderr):
+        print("agent_task.py did not reject done without a passing review gate", file=sys.stderr)
+        print(done_without_review.stdout + done_without_review.stderr, file=sys.stderr)
+        raise SystemExit(1)
+    run(
+        [
+            python,
+            "scripts/agent_task.py",
+            "update",
+            "guard-task",
+            "--state",
+            "done",
+            "--conclusion",
+            "Implemented and validated.",
+            "--review-status",
+            "pass",
+            "--review-path",
+            "docs/features/guard-task/05_CODE_REVIEW.md",
+            "--clear-open-findings",
+        ],
+        cwd=guarded,
+    )
+    run([python, "scripts/agent_task.py", "doctor"], cwd=guarded)
 
     board_path = guarded / ".agent" / "task-board.json"
     board = json.loads(board_path.read_text(encoding="utf-8"))
@@ -245,6 +282,53 @@ def assert_task_board_guards(init_script: Path, temp_root: Path, python: str) ->
     if "delivery_conclusion" not in done_text:
         print("done task without delivery_conclusion was not reported by hard checks", file=sys.stderr)
         print(done_text, file=sys.stderr)
+        raise SystemExit(1)
+
+    review_guard = temp_root / "task-board-review-gate-guard"
+    review_guard.mkdir(parents=True, exist_ok=True)
+    run(
+        [
+            python,
+            str(init_script),
+            str(review_guard),
+            "--layout",
+            "minimal",
+            "--governance-profile",
+            "standard",
+        ],
+        cwd=PACKAGE_ROOT,
+    )
+    run(
+        [
+            python,
+            "scripts/agent_task.py",
+            "new",
+            "review-task",
+            "--title",
+            "Review task",
+            "--profile",
+            "standard",
+        ],
+        cwd=review_guard,
+    )
+    review_board_path = review_guard / ".agent" / "task-board.json"
+    review_board = json.loads(review_board_path.read_text(encoding="utf-8"))
+    review_board["items"][0]["state"] = "done"
+    review_board["items"][0]["delivery_conclusion"] = "Implemented and validated."
+    review_board["items"][0]["review_gate"]["status"] = "needs-fix"
+    review_board["items"][0]["review_gate"]["latest_review"] = "docs/features/review-task/05_CODE_REVIEW.md"
+    review_board["items"][0]["review_gate"]["open_findings"] = ["major: missing regression coverage"]
+    review_board_path.write_text(json.dumps(review_board, indent=2) + "\n", encoding="utf-8")
+    review_gate_outputs = [
+        run([python, "scripts/agent_task.py", "doctor"], cwd=review_guard, expect_ok=False),
+        run([python, "scripts/agent_check.py"], cwd=review_guard, expect_ok=False),
+        run([python, "scripts/agent_verify.py", "doctor"], cwd=review_guard, expect_ok=False),
+        run([python, "scripts/agent_score.py", "score", "--json"], cwd=review_guard, expect_ok=False),
+    ]
+    review_gate_text = "\n".join(item.stdout + item.stderr for item in review_gate_outputs)
+    if "review_gate" not in review_gate_text:
+        print("done task with a failing review gate was not reported by hard checks", file=sys.stderr)
+        print(review_gate_text, file=sys.stderr)
         raise SystemExit(1)
 
 
@@ -363,6 +447,63 @@ def main() -> int:
             ],
             cwd=target,
         )
+        tests_dir = target / "tests"
+        tests_dir.mkdir(exist_ok=True)
+        test_file = tests_dir / "test_agent_gov_regression.py"
+        test_file.write_text("def test_agent_gov_regression():\n    assert True\n", encoding="utf-8")
+        run([python, "scripts/agent_verify.py", "snapshot", "--name", "before-test-count", "--fail-on-issue"], cwd=target)
+        test_file.unlink()
+        run([python, "scripts/agent_verify.py", "snapshot", "--name", "after-test-count", "--fail-on-issue"], cwd=target)
+        test_count_compare = run(
+            [
+                python,
+                "scripts/agent_verify.py",
+                "compare",
+                "--before",
+                ".agent/baselines/before-test-count.json",
+                "--after",
+                ".agent/baselines/after-test-count.json",
+            ],
+            cwd=target,
+            expect_ok=False,
+        )
+        if "test_files" not in (test_count_compare.stdout + test_count_compare.stderr):
+            print("agent_verify.py did not report a test-count baseline decrease", file=sys.stderr)
+            print(test_count_compare.stdout + test_count_compare.stderr, file=sys.stderr)
+            return 1
+        test_file.write_text("def test_agent_gov_regression():\n    assert True\n", encoding="utf-8")
+        artifacts_template = target / ".agent" / "templates" / "artifacts.json.tmpl"
+        original_artifacts_template = artifacts_template.read_text(encoding="utf-8")
+        artifacts_template.write_text('{"schema": "{{schema}}",\n', encoding="utf-8")
+        template_check = run([python, "scripts/agent_verify.py", "doctor"], cwd=target, expect_ok=False)
+        if "template_rendering" not in (template_check.stdout + template_check.stderr):
+            print("agent_verify.py did not report invalid rendered JSON templates", file=sys.stderr)
+            print(template_check.stdout + template_check.stderr, file=sys.stderr)
+            return 1
+        artifacts_template.write_text(original_artifacts_template, encoding="utf-8")
+        classify = json.loads(
+            run(
+                [
+                    python,
+                    "scripts/agent_gc.py",
+                    "classify",
+                    "--category",
+                    "script_gap",
+                    "--summary",
+                    "Regression classification",
+                    "--promotion-target",
+                    "scripts/agent_verify.py",
+                ],
+                cwd=target,
+            ).stdout
+        )
+        if classify.get("category") != "script_gap":
+            print("agent_gc.py classify did not return the recorded category", file=sys.stderr)
+            return 1
+        evolution = json.loads((target / ".agent" / "harness-evolution.json").read_text(encoding="utf-8"))
+        if not evolution.get("incidents"):
+            print("agent_gc.py classify did not append a harness-evolution incident", file=sys.stderr)
+            return 1
         run([python, "scripts/agent_score.py", "doctor"], cwd=target)
         score_report = json.loads(run([python, "scripts/agent_score.py", "score", "--json"], cwd=target).stdout)
         for dimension in ("dev_map", "harness_evolution", "mcp_policy", "governance_gc"):
@@ -425,6 +566,14 @@ def main() -> int:
                 "created_at": "2025-01-01T00:00:00Z",
                 "updated_at": "2025-01-01T00:00:00Z",
                 "delivery_conclusion": "",
+                "review_gate": {
+                    "required": True,
+                    "status": "pending",
+                    "latest_review": "",
+                    "latest_fix": "",
+                    "open_findings": [],
+                    "accepted_exception": "",
+                },
                 "related_tasks": [],
             }
         )
@@ -521,8 +670,16 @@ def main() -> int:
             else:
                 run([python, "scripts/agent_verify.py", "doctor"], cwd=profiled)
                 run([python, "scripts/agent_gc.py", "doctor", "--fail-on-warning"], cwd=profiled)
-                if (profiled / ".agent" / "mcp-policy.json").exists():
-                    print("standard profile unexpectedly generated .agent/mcp-policy.json", file=sys.stderr)
+                mcp_path = profiled / ".agent" / "mcp-policy.json"
+                if not mcp_path.exists():
+                    print("standard profile did not generate disabled MCP policy", file=sys.stderr)
+                    return 1
+                mcp_policy = json.loads(mcp_path.read_text(encoding="utf-8"))
+                if mcp_policy.get("mode") != "optional-disabled-by-default":
+                    print("standard profile MCP policy was not disabled by default", file=sys.stderr)
+                    return 1
+                if "mcp_policy" not in score.get("dimensions", {}):
+                    print("standard profile score did not include mcp_policy", file=sys.stderr)
                     return 1
         assert_task_board_guards(INIT_SCRIPT, temp_root, python)
     finally:

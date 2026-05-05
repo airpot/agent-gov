@@ -20,6 +20,7 @@ Borrow these practices from mature agent workflow projects:
 - For behavior changes, capture failing-test evidence before production code and passing evidence after the fix.
 - For bugs and build/test failures, record reproduction, root cause, hypothesis, fix, and validation.
 - For delegated or substantial work, run spec compliance review before code quality review.
+- For `standard` and `full` tasks, keep review-fix-review running until the task-board `review_gate.status` is `pass`, `open_findings` is empty, and the latest review document exists.
 - Require fresh validation evidence before claiming completion, merge readiness, or PR readiness.
 - Present branch finish choices explicitly; destructive cleanup needs explicit confirmation.
 
@@ -81,7 +82,14 @@ Escalate the profile when task risk increases. Do not force a full flow for tiny
 
 ## Task Board And Feature Docs
 
-Use `.agent/task-board.json` for durable task state across sessions. It records task id, title, state, risk, profile, current stage, docs path, delivery conclusion, and related tasks. Use `scripts/agent_task.py new` to create a task and scaffold `docs/features/<task-id>/` from the profile-specific stage templates.
+Use `.agent/task-board.json` for durable task state across sessions. It records task id, title, state, risk, profile, current stage, docs path, delivery conclusion, review gate status, and related tasks. Use `scripts/agent_task.py new` to create a task and scaffold `docs/features/<task-id>/` from the profile-specific stage templates.
+
+For `standard` and `full` tasks, `state=done` requires a passing review gate:
+
+- `review_gate.status` is `pass`
+- `review_gate.latest_review` points to an existing review document
+- `review_gate.open_findings` is empty
+- the delivery conclusion is recorded
 
 The task board is not a casual TODO list. It is the project-local source for current and historical agent work when a new session starts.
 
@@ -194,6 +202,8 @@ Before saying work is complete:
 - Identify the command or checklist that proves the claim.
 - Run the command fresh or inspect fresh recorded evidence.
 - For standard and full work, compare before/after mechanical snapshots when available.
+- Treat new invalid JSON, missing required paths, newly broken local links, template-render failures, and test-count decreases as baseline regressions unless an explicit exception is recorded.
+- For standard and full work, confirm task-board `review_gate.status=pass` with no open blocker, major, or minor findings.
 - Read the output and exit status.
 - Record the command, result, and runlog id or session validation note.
 - State skipped checks plainly with reasons and residual risk.

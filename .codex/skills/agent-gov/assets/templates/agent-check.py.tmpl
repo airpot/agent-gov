@@ -173,6 +173,7 @@ LEGACY_CONFIG_PATH_KEYS = {
     "codex_hooks",
     "claude_settings",
 }
+REVIEW_STATUSES = {"pending", "needs-fix", "pass", "accepted-with-exceptions", "not-required"}
 
 
 def load_json(path: Path, label: str) -> dict:
@@ -210,6 +211,51 @@ def config_path_pointers(config: dict) -> dict[str, str]:
         for key, value in config.items()
         if key in LEGACY_CONFIG_PATH_KEYS and isinstance(value, str) and value
     }
+
+
+def profile_requires_review_gate(profile_name: str, profile: dict, policy: dict) -> bool:
+    required_profiles = set(policy.get("done_requires_review_gate_pass_for_profiles", []))
+    return profile.get("review_gate_required") is True or profile_name in required_profiles
+
+
+def normalized_review_gate(item: dict, profile: dict, policy: dict) -> dict:
+    required = profile_requires_review_gate(str(item.get("profile", "")), profile, policy)
+    gate = item.get("review_gate")
+    if not isinstance(gate, dict):
+        gate = {}
+    merged = {
+        "required": required,
+        "status": "pending" if required else "not-required",
+        "latest_review": "",
+        "latest_fix": "",
+        "open_findings": [],
+        "accepted_exception": "",
+    }
+    merged.update(gate)
+    merged["required"] = bool(required or merged.get("required") is True)
+    if not isinstance(merged.get("open_findings"), list):
+        merged["open_findings"] = [str(merged.get("open_findings"))]
+    return merged
+
+
+def validate_review_gate(task_id: str, item: dict, profile: dict, policy: dict, root: Path) -> str | None:
+    gate = normalized_review_gate(item, profile, policy)
+    if gate.get("status") not in REVIEW_STATUSES:
+        return f"task {task_id} review_gate has invalid status: {gate.get('status')}"
+    open_findings = [finding for finding in gate.get("open_findings", []) if str(finding).strip()]
+    if item.get("state") != "done" or not gate.get("required"):
+        return None
+    pass_status = policy.get("review_gate_pass_status", "pass")
+    if gate.get("status") != pass_status:
+        return f"task {task_id} is done without review_gate status {pass_status}"
+    if policy.get("review_gate_open_findings_must_be_empty") is True and open_findings:
+        return f"task {task_id} is done with open review findings"
+    latest_review = str(gate.get("latest_review", "")).strip()
+    if not latest_review:
+        return f"task {task_id} is done without review_gate latest_review"
+    if policy.get("review_gate_latest_review_must_exist") is True and not (root / latest_review).exists():
+        return f"task {task_id} review_gate latest_review path is missing: {latest_review}"
+    return None
 
 
 def main() -> int:
@@ -336,6 +382,7 @@ def main() -> int:
             "tdd",
             "systematic_debugging",
             "review_sequence",
+            "review_fix_gate",
             "human_review_evidence",
             "completion_verification",
         ):
@@ -362,6 +409,20 @@ def main() -> int:
         if gates.get("review_sequence", {}).get("finder_cannot_fix") is not True:
             print("error: .agent/workflow.json review sequence must enforce finder_cannot_fix")
             return 1
+        review_fix = gates.get("review_fix_gate", {})
+        if review_fix.get("latest_review_status_must_be") != "pass":
+            print("error: .agent/workflow.json review_fix_gate must require latest review status pass")
+            return 1
+        if review_fix.get("open_findings_must_be_empty") is not True:
+            print("error: .agent/workflow.json review_fix_gate must require empty open findings")
+            return 1
+        if review_fix.get("fix_requires_next_review_round") is not True:
+            print("error: .agent/workflow.json review_fix_gate must require a next review after fixes")
+            return 1
+        completion = gates.get("completion_verification", {})
+        if "standard" not in completion.get("review_fix_gate_required_for_profiles", []) or "full" not in completion.get("review_fix_gate_required_for_profiles", []):
+            print("error: .agent/workflow.json completion gate must require review_fix_gate for standard and full profiles")
+            return 1
         if not gates.get("risk_classification", {}).get("record_in_plan"):
             print("error: .agent/workflow.json risk classification must be recorded in plans")
             return 1
@@ -384,10 +445,13 @@ def main() -> int:
                 print(f"error: .agent/workflow-profiles.json missing profile: {profile}")
                 return 1
             spec = configured[profile]
-            for key in ("stages", "max_risk", "task_board_record", "feature_doc_templates", "required_evidence"):
+            for key in ("stages", "max_risk", "task_board_record", "review_gate_required", "feature_doc_templates", "required_evidence"):
                 if key not in spec:
                     print(f"error: workflow profile {profile} missing {key}")
                     return 1
+            if profile in {"standard", "full"} and spec.get("review_gate_required") is not True:
+                print(f"error: workflow profile {profile} must require review gate")
+                return 1
             for stage in spec.get("stages", []):
                 if workflow_stages and stage not in workflow_stages:
                     print(f"error: workflow profile {profile} references unknown stage: {stage}")
@@ -402,12 +466,19 @@ def main() -> int:
         if task_board.get("schema") != "agent-task-board-v1":
             print("error: .agent/task-board.json schema must be agent-task-board-v1")
             return 1
-        for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path", "delivery_conclusion", "related_tasks"):
+        for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path", "delivery_conclusion", "review_gate", "related_tasks"):
             if field not in task_board.get("required_fields", []):
                 print(f"error: .agent/task-board.json missing required field declaration: {field}")
                 return 1
         if task_board.get("policy", {}).get("new_session_reads_board_before_edits") is not True:
             print("error: .agent/task-board.json must require new sessions to read the task board")
+            return 1
+        task_policy = task_board.get("policy", {})
+        if set(task_policy.get("done_requires_review_gate_pass_for_profiles", [])) != {"standard", "full"}:
+            print("error: .agent/task-board.json must require review_gate pass for standard and full done tasks")
+            return 1
+        if task_policy.get("review_gate_open_findings_must_be_empty") is not True:
+            print("error: .agent/task-board.json must require empty review_gate open findings")
             return 1
         seen_tasks: set[str] = set()
         allowed_states = set(task_board.get("states", []))
@@ -427,6 +498,7 @@ def main() -> int:
             if allowed_profiles and item.get("profile") not in allowed_profiles:
                 print(f"error: task {task_id} has invalid workflow profile")
                 return 1
+            profile = {}
             if allowed_profiles:
                 profile = load_json(root / ".agent/workflow-profiles.json", ".agent/workflow-profiles.json").get("profiles", {}).get(item.get("profile"), {})
                 allowed_stages = set(profile.get("stages", []))
@@ -437,6 +509,10 @@ def main() -> int:
                 if not str(item.get("delivery_conclusion", "")).strip():
                     print(f"error: task {task_id} is done without delivery_conclusion")
                     return 1
+            gate_error = validate_review_gate(task_id, item, profile, task_policy, root)
+            if gate_error:
+                print(f"error: {gate_error}")
+                return 1
 
     risk_path = root / ".agent/risk-zones.json"
     if risk_path.exists():
@@ -603,6 +679,15 @@ def main() -> int:
             if key not in taxonomy:
                 print(f"error: .agent/memory.json taxonomy missing {key}")
                 return 1
+        memory_policy = memory.get("policy", {})
+        if memory_policy.get("memory_is_advisory_not_authoritative") is not True:
+            print("error: .agent/memory.json must keep memory advisory, not authoritative")
+            return 1
+        truth_sources = [str(item) for item in memory_policy.get("truth_sources_in_order", [])]
+        for token in (".agent/spec.json", ".agent/task-board.json", "docs/DEV_MAP.md", "docs/features", "docs/adr", ".agent/runlog.jsonl"):
+            if not any(token in item for item in truth_sources):
+                print(f"error: .agent/memory.json truth_sources missing {token}")
+                return 1
 
     context_path = root / ".agent/context.json"
     if context_path.exists():
@@ -704,6 +789,8 @@ def main() -> int:
             "dev_map",
             "harness_evolution",
             "governance_gc",
+            "template_rendering",
+            "test_baseline",
             "markdown_links",
         ]
         if (root / ".agent/mcp-policy.json").exists():
@@ -742,6 +829,12 @@ def main() -> int:
                 return 1
         if evolution.get("policy", {}).get("turn_repeat_failures_into_harness_changes") is not True:
             print("error: harness evolution must promote repeat failures into harness changes")
+            return 1
+        if "classify" not in evolution.get("commands", {}):
+            print("error: .agent/harness-evolution.json missing classify command")
+            return 1
+        if not isinstance(evolution.get("incidents", []), list):
+            print("error: .agent/harness-evolution.json incidents must be a list")
             return 1
 
     mcp_policy_path = root / ".agent/mcp-policy.json"

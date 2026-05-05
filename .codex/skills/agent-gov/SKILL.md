@@ -18,7 +18,7 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
 2. **Choose initialization scope**
    - Ask for or infer the technology stack before initialization. If unknown, ask whether to continue with `unspecified`.
    - Ask for the fixed project directory layout. Use a built-in layout (`minimal`, `python-app`, `node-app`, `web-app`, `service`, `library`) or explicit extra directories.
-   - Choose the initialization profile that matches the repository maturity: `core` for minimal spec/harness/session continuity, `standard` for durable workflow/task/memory/context governance, or `full` for native Codex/Claude adapters, subagent orchestration, security/tooling, MCP policy, and skill distribution. Default to `standard`; use `full` only when the user asks for the complete framework.
+   - Choose the initialization profile that matches the repository maturity: `core` for minimal spec/harness/session continuity, `standard` for durable workflow/task/memory/context governance plus disabled-by-default MCP policy, or `full` for native Codex/Claude adapters, subagent orchestration, security/tooling, and skill distribution. Default to `standard`; use `full` only when the user asks for the complete framework.
    - Use `references/spec-management.md` for embedded OpenSpec-style project specification setup.
    - Use `references/workflow-governance.md` for workflow profiles, lifecycle gates, task-board continuity, feature-stage documents, task risk/autonomy, plan quality, TDD/debugging evidence, diff traceability, worktree isolation, review order, human review evidence, and completion proof.
    - Use `references/implementation-discipline.md` for assumption clarification, simplicity-first implementation, surgical diffs, and verifiable goals.
@@ -45,7 +45,7 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
 
 5. **Create or verify long-term memory**
    - Ensure `.agent/memory.json`, `.agent/memory/events.jsonl`, `.agent/memory/summaries/`, and `.agent/tools/agent_memory.py` exist.
-   - Treat memory as advisory retrieval, not the source of truth; `.agent/sessions/` remains authoritative.
+   - Treat memory as advisory retrieval, not the source of truth; durable truth belongs in embedded specs, task-board records, dev map entries, feature docs, ADR/RFC/postmortem records, runlog evidence, validation notes, and active session handoff files.
    - Use progressive disclosure: `timeline`, then `search`, then `detail` only for selected memory ids.
    - Store concise summaries, decisions, validation, and retrieval handles; do not store raw transcripts or secrets.
 
@@ -59,6 +59,7 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
    - Ensure `.agent/workflow.json`, `.agent/workflow-profiles.json`, `.agent/task-board.json`, `.agent/risk-zones.json`, `.agent/review-policy.json`, `.agent/worktrees.json`, `.agent/templates/implementation-plan.md.tmpl`, `.agent/templates/debugging-record.md.tmpl`, and `.agent/templates/features/*.md.tmpl` exist.
    - Choose the lightest workflow profile that covers the task risk: `tiny`, `bugfix`, `standard`, or `full`.
    - Use `scripts/agent_task.py` to keep non-tiny task state in `.agent/task-board.json` and feature-stage documents under `docs/features/<task-id>/`.
+   - For `standard` and `full` tasks, require `review_gate.status=pass`, an existing latest review document, and no open blocker/major/minor findings before task state can become `done`.
    - Use workflow gates for task risk/autonomy, design/spec approval, plan quality, implementation discipline, diff traceability, isolated execution, TDD evidence, systematic debugging, spec review, quality review, human review evidence, completion verification, handoff, and finish choices.
    - Require high and critical risk work to record approval/review evidence; critical work is not autonomous modification work.
    - Prefer ignored git worktrees for feature work, implementation-plan execution, and risky refactors; record baseline validation before edits.
@@ -67,8 +68,8 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
 
 8. **Create or verify capability governance and runlog evidence**
    - Ensure core scoring and evidence files exist in every profile: `.agent/manifest.json`, `.agent/runlog.jsonl`, `.agent/evals.json`, `.agent/evals/latest.md`, `scripts/agent_runlog.py`, `scripts/agent_score.py`, and `scripts/agent_migrate.py`.
-   - For `standard` and `full`, ensure `.agent/capabilities.json`, `.agent/dev-map.json`, `.agent/harness-evolution.json`, `.agent/governance-gc.json`, `scripts/agent_capabilities.py`, `scripts/agent_verify.py`, and `scripts/agent_gc.py` exist.
-   - For `full`, ensure `.agent/tooling.json`, `.agent/security.json`, `.agent/mcp-policy.json`, `scripts/agent_tooling.py`, and `scripts/agent_security.py` exist.
+   - For `standard` and `full`, ensure `.agent/capabilities.json`, `.agent/dev-map.json`, `.agent/harness-evolution.json`, `.agent/mcp-policy.json`, `.agent/governance-gc.json`, `scripts/agent_capabilities.py`, `scripts/agent_verify.py`, and `scripts/agent_gc.py` exist.
+   - For `full`, ensure `.agent/tooling.json`, `.agent/security.json`, `scripts/agent_tooling.py`, and `scripts/agent_security.py` exist.
    - Treat `.agent/manifest.json` as the generated governance manifest for required paths, JSON schemas, JSONL stores, and score dimensions; update it when the governance surface changes.
    - Use `.agent/capabilities.json` to record enabled skills, tools, MCP/integration entries, resources, native adapters, owner, risk, capability class, permission shape, and validation commands.
    - Use `.agent/runlog.jsonl` for compact evidence of validation runs, session lifecycle events, accepted review exceptions, and high-risk capability use.
@@ -77,8 +78,8 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
    - Use `.agent/evals.json` and `scripts/agent_score.py` for local governance health scoring and `.agent/evals/latest.md` dashboard refresh.
    - Ensure `docs/AI_CODING_GLOSSARY.md`, `docs/adr/`, `docs/rfcs/`, `docs/incidents/`, and their templates exist for shared terminology, durable decisions, proposals, and postmortems.
    - Ensure `docs/DEV_MAP.md` exists as a concise repository navigation map, not a full file inventory.
-   - Use `.agent/harness-evolution.json` to classify repeated failures and promote fixes into rules, skills, scripts, workflow gates, role contracts, tool/MCP policy, or docs.
-   - Treat `.agent/mcp-policy.json` as optional and disabled by default until the project explicitly enables external integrations.
+   - Use `.agent/harness-evolution.json` and `python3 scripts/agent_gc.py classify ...` to classify repeated failures and promote fixes into rules, skills, scripts, workflow gates, role contracts, tool/MCP policy, or docs.
+   - Treat `.agent/mcp-policy.json` as optional and disabled by default until the project explicitly enables external integrations; it defines trust boundaries even when no MCP server is active.
    - Keep runlog entries structured and concise; do not store raw transcripts, terminal scrollback, secrets, or private host data.
 
 9. **Create or verify subagent orchestration**
@@ -118,6 +119,7 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
 12. **Review before handoff**
    - For substantial initialization work, create or update a review-fix record in the controlling skill lifecycle.
    - If the user asks to review or audit an agent-governed project, use `references/review-fix-loop.md` and repeat review, fix, revalidation, and review until the latest review has no blocker, major, or minor findings.
+   - Do not claim completion, handoff, merge readiness, archive readiness, or release readiness for `standard` or `full` tasks until the generated task-board review gate is `pass`.
    - Confirm that resume instructions do not depend on unsaved editor buffers, terminal scrollback, or Codex native thread history.
 
 ## Resource Map
