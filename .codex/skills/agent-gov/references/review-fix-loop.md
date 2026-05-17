@@ -12,6 +12,7 @@ Review the initialized project before handoff. At minimum, check:
 - `.agent/workflow.json` records lifecycle gates for risk classification, spec approval, plan quality, implementation discipline, diff traceability, worktree isolation, TDD/debugging, review sequence, human review evidence, completion verification, and finish choices.
 - `.agent/workflow-profiles.json` records `tiny`, `bugfix`, `standard`, and `full` process weights, and `.agent/workflow.json` points to it.
 - `.agent/task-board.json` and `docs/features/INDEX.md` exist; non-tiny task state can be created with `scripts/agent_task.py`.
+- `docs/DOMAIN_GLOSSARY.md` exists; non-tiny work has requirements interview evidence before implementation or done state.
 - `.agent/risk-zones.json` records low, medium, high, and critical autonomy rules; high and critical risk require human review, and critical work is not autonomous modification work.
 - `.agent/review-policy.json` records requested, necessary-support, incidental, and risky diff categories plus human review evidence fields.
 - `.agent/worktrees.json` records isolated worktree directory selection, ignore verification, baseline validation, and guarded cleanup.
@@ -26,8 +27,9 @@ Review the initialized project before handoff. At minimum, check:
 - `.agent/evals.json` exists, `scripts/agent_score.py score --write` runs, and `.agent/evals/latest.md` records current governance drift.
 - `.agent/mechanical-checks.json`, `.agent/baselines.json`, and `scripts/agent_verify.py` exist; hard mechanical checks and before/after baseline comparisons can run.
 - `.agent/dev-map.json` and `docs/DEV_MAP.md` exist and describe repository entry points without becoming a full file inventory.
+- `.agent/skill-hygiene.json` and `scripts/agent_skill_hygiene.py` exist; skill topology and risk signals can be scanned read-only, and cleanup/canary actions are explicit human-confirmation work.
 - `.agent/harness-evolution.json` exists and postmortem templates include harness gap classification.
-- `.agent/mcp-policy.json` exists and keeps MCP optional, credential-safe, and approval-gated by default.
+- `.agent/mcp-policy.json` exists and keeps MCP optional, credential-safe, vault/proxy-bounded, and approval-gated by default.
 - `.agent/governance-gc.json` and `scripts/agent_gc.py` exist and can report stale docs, stale tasks, baseline drift, config pointers, and owner gaps.
 - `docs/adr/`, `docs/rfcs/`, and `docs/incidents/` exist with templates for durable decisions, proposals, and postmortems.
 - Native Codex/Claude adapters exist when enabled and remain thin projections of `.agent/` policy.
@@ -90,6 +92,6 @@ review
 
 Do not convert a finding-bearing review to `pass`. Keep it as `needs-fix`, record the fix log, and use the next review round as proof that the fixes held.
 
-Generated projects enforce this through `scripts/agent_task.py`, `scripts/agent_check.py`, `scripts/agent_verify.py`, and `scripts/agent_score.py`.
+Generated projects enforce this through `scripts/agent_task.py`, `scripts/agent_skill_hygiene.py`, `scripts/agent_check.py`, `scripts/agent_verify.py`, and `scripts/agent_score.py`.
 
 For skill development in this repository, use `skill_lifecycle.py review`, `fix-log`, and `review-status`.

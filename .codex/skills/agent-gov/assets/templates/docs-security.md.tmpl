@@ -5,6 +5,8 @@
 - Do not commit tokens, SSH keys, API keys, or private host credentials.
 - Do not store secrets in `.agent/` session files.
 - Do not store secrets, credentials, host data, raw transcripts, or terminal scrollback in `.agent/runlog.jsonl`.
+- Keep raw credentials outside the repository, harness, sandbox, worktree, generated governance files, and session memory.
+- External integrations that need secrets should use a vault/proxy boundary: the proxy performs the external call without exposing raw credentials to the sandbox.
 
 ## Sensitive Data
 

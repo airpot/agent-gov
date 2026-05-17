@@ -15,6 +15,19 @@ TASK_BOARD_PATH = Path(".agent/task-board.json")
 PROFILES_PATH = Path(".agent/workflow-profiles.json")
 TASK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,80}$")
 REVIEW_STATUSES = {"pending", "needs-fix", "pass", "accepted-with-exceptions", "not-required"}
+REQUIREMENT_STATUSES = {"pending", "in-progress", "complete", "blocked", "not-required"}
+REQUIREMENT_PROTECTED_STAGES = {
+    "plan",
+    "gate_review",
+    "isolation",
+    "implementation",
+    "spec_review",
+    "quality_review",
+    "human_review",
+    "verification",
+    "handoff",
+    "finish",
+}
 
 
 def utc_now() -> str:
@@ -71,6 +84,33 @@ def default_review_gate(required: bool) -> dict:
     }
 
 
+def default_requirements(profile_name: str) -> dict:
+    required = profile_name != "tiny"
+    return {
+        "required": required,
+        "status": "pending" if required else "not-required",
+        "shared_understanding": "",
+        "domain_glossary_updated": False,
+        "code_docs_cross_checked": False,
+        "open_questions": [],
+    }
+
+
+def normalized_requirements(item: dict) -> dict:
+    profile_name = str(item.get("profile", "standard"))
+    requirements = item.get("requirements")
+    if not isinstance(requirements, dict):
+        requirements = {}
+    merged = default_requirements(profile_name)
+    merged.update(requirements)
+    merged["required"] = bool(profile_name != "tiny" or merged.get("required") is True)
+    if merged.get("status") not in REQUIREMENT_STATUSES:
+        merged["status"] = "pending" if merged["required"] else "not-required"
+    if not isinstance(merged.get("open_questions"), list):
+        merged["open_questions"] = [str(merged.get("open_questions"))]
+    return merged
+
+
 def normalized_review_gate(item: dict, profile: dict, policy: dict) -> dict:
     required = profile_requires_review_gate(str(item.get("profile", "")), profile, policy)
     gate = item.get("review_gate")
@@ -84,6 +124,33 @@ def normalized_review_gate(item: dict, profile: dict, policy: dict) -> dict:
     if not isinstance(merged.get("open_findings"), list):
         merged["open_findings"] = [str(merged.get("open_findings"))]
     return merged
+
+
+def requirements_errors(task_id: str, item: dict, profile: dict, policy: dict) -> list[str]:
+    errors: list[str] = []
+    requirements = normalized_requirements(item)
+    if requirements.get("status") not in REQUIREMENT_STATUSES:
+        errors.append(f"{task_id} requirements has invalid status: {requirements.get('status')}")
+    if not requirements.get("required"):
+        return errors
+    protected = set(profile.get("requirement_protected_stages", [])) or REQUIREMENT_PROTECTED_STAGES
+    current_stage = item.get("current_stage")
+    state_done = item.get("state") == "done" and policy.get("requirements_complete_before_done") is True
+    stage_protected = current_stage in protected and policy.get("requirements_complete_before_protected_stages") is True
+    if not state_done and not stage_protected:
+        return errors
+    if requirements.get("status") != "complete":
+        errors.append(f"{task_id} requirements must be complete before {current_stage or item.get('state')}")
+    if not str(requirements.get("shared_understanding", "")).strip():
+        errors.append(f"{task_id} requirements missing shared_understanding")
+    if requirements.get("domain_glossary_updated") is not True:
+        errors.append(f"{task_id} requirements must confirm domain_glossary_updated")
+    if requirements.get("code_docs_cross_checked") is not True:
+        errors.append(f"{task_id} requirements must confirm code_docs_cross_checked")
+    docs_path = item.get("docs_path")
+    if docs_path and not (Path(docs_path) / "01_REQUIREMENT_ANALYSIS.md").exists():
+        errors.append(f"{task_id} missing requirement analysis document")
+    return errors
 
 
 def review_gate_errors(task_id: str, item: dict, profile: dict, policy: dict) -> list[str]:
@@ -111,7 +178,7 @@ def validate_board(board: dict, profiles: dict) -> list[str]:
     states = set(board.get("states", []))
     required_fields = set(board.get("required_fields", []))
     policy = board.get("policy", {})
-    for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path", "review_gate"):
+    for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path", "requirements", "review_gate"):
         if field not in required_fields:
             errors.append(f"missing required field declaration: {field}")
     seen: set[str] = set()
@@ -140,6 +207,7 @@ def validate_board(board: dict, profiles: dict) -> list[str]:
         if item.get("state") == "done" and policy.get("done_requires_delivery_conclusion") is True:
             if not str(item.get("delivery_conclusion", "")).strip():
                 errors.append(f"{task_id} is done without delivery_conclusion")
+        errors.extend(requirements_errors(task_id, item, profile, policy))
         errors.extend(review_gate_errors(task_id, item, profile, policy))
         if profile.get("feature_doc_templates") and (not docs_path or not Path(docs_path).exists()):
             errors.append(f"{task_id} docs_path missing or absent: {docs_path}")
@@ -230,6 +298,7 @@ def cmd_new(args: argparse.Namespace) -> int:
         "profile": args.profile,
         "current_stage": "intake",
         "docs_path": docs_path,
+        "requirements": default_requirements(args.profile),
         "created_at": now,
         "updated_at": now,
         "delivery_conclusion": "",
@@ -266,6 +335,25 @@ def cmd_update(args: argparse.Namespace) -> int:
         item["current_stage"] = args.stage
     if args.conclusion is not None:
         item["delivery_conclusion"] = args.conclusion
+    requirements = normalized_requirements(item)
+    if args.requirements_status:
+        requirements["status"] = args.requirements_status
+    if args.shared_understanding is not None:
+        requirements["shared_understanding"] = args.shared_understanding
+    if args.domain_glossary_updated:
+        requirements["domain_glossary_updated"] = True
+    if args.no_domain_glossary_update:
+        requirements["domain_glossary_updated"] = False
+    if args.code_docs_cross_checked:
+        requirements["code_docs_cross_checked"] = True
+    if args.no_code_docs_cross_check:
+        requirements["code_docs_cross_checked"] = False
+    if args.clear_open_questions:
+        requirements["open_questions"] = []
+    if args.open_question:
+        requirements.setdefault("open_questions", [])
+        requirements["open_questions"].extend(args.open_question)
+    item["requirements"] = requirements
     gate = normalized_review_gate(item, profile, board.get("policy", {}))
     if args.review_status:
         gate["status"] = args.review_status
@@ -320,6 +408,14 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--state")
     update.add_argument("--stage")
     update.add_argument("--conclusion")
+    update.add_argument("--requirements-status", choices=sorted(REQUIREMENT_STATUSES))
+    update.add_argument("--shared-understanding")
+    update.add_argument("--domain-glossary-updated", action="store_true")
+    update.add_argument("--no-domain-glossary-update", action="store_true")
+    update.add_argument("--code-docs-cross-checked", action="store_true")
+    update.add_argument("--no-code-docs-cross-check", action="store_true")
+    update.add_argument("--open-question", action="append", default=[])
+    update.add_argument("--clear-open-questions", action="store_true")
     update.add_argument("--review-status", choices=sorted(REVIEW_STATUSES))
     update.add_argument("--review-path")
     update.add_argument("--fix-path")

@@ -16,6 +16,7 @@ The useful ideas from `caveman` are context economy, measurable token budgets, s
     latest.md
   capabilities.json
   dev-map.json
+  skill-hygiene.json
   workflow.json
   workflow-profiles.json
   task-board.json

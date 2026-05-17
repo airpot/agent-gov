@@ -30,6 +30,7 @@ BASE_REQUIRED = [
     ".agent/hooks.json",
     ".agent/knowledge.json",
     ".agent/dev-map.json",
+    ".agent/skill-hygiene.json",
     ".agent/memory.json",
     ".agent/context.json",
     ".agent/capabilities.json",
@@ -51,6 +52,7 @@ BASE_REQUIRED = [
     ".agent/context/latest.md",
     ".agent/skill-distribution.json",
     ".agent/sessions/index.json",
+    ".agent/sessions/events.jsonl",
     ".agent/sessions/active.md",
     ".agent/sessions/bootstrap.md",
     ".agent/templates/project-review.md.tmpl",
@@ -92,6 +94,7 @@ BASE_REQUIRED = [
     "scripts/agent_knowledge.py",
     "scripts/agent_invariants.py",
     "scripts/agent_capabilities.py",
+    "scripts/agent_skill_hygiene.py",
     "scripts/agent_runlog.py",
     "scripts/agent_tooling.py",
     "scripts/agent_security.py",
@@ -109,6 +112,7 @@ BASE_REQUIRED = [
     "docs/TOOLING.md",
     "docs/QUALITY_SCORE.md",
     "docs/AI_CODING_GLOSSARY.md",
+    "docs/DOMAIN_GLOSSARY.md",
     "docs/DEV_MAP.md",
     "docs/features/INDEX.md",
     "docs/features/.gitkeep",
@@ -155,6 +159,7 @@ LEGACY_CONFIG_PATH_KEYS = {
     "task_board",
     "knowledge_manifest",
     "dev_map",
+    "skill_hygiene",
     "memory_config",
     "context_config",
     "capabilities_config",
@@ -174,6 +179,19 @@ LEGACY_CONFIG_PATH_KEYS = {
     "claude_settings",
 }
 REVIEW_STATUSES = {"pending", "needs-fix", "pass", "accepted-with-exceptions", "not-required"}
+REQUIREMENT_STATUSES = {"pending", "in-progress", "complete", "blocked", "not-required"}
+REQUIREMENT_PROTECTED_STAGES = {
+    "plan",
+    "gate_review",
+    "isolation",
+    "implementation",
+    "spec_review",
+    "quality_review",
+    "human_review",
+    "verification",
+    "handoff",
+    "finish",
+}
 
 
 def load_json(path: Path, label: str) -> dict:
@@ -236,6 +254,52 @@ def normalized_review_gate(item: dict, profile: dict, policy: dict) -> dict:
     if not isinstance(merged.get("open_findings"), list):
         merged["open_findings"] = [str(merged.get("open_findings"))]
     return merged
+
+
+def normalized_requirements(item: dict) -> dict:
+    profile_name = str(item.get("profile", "standard"))
+    requirements = item.get("requirements")
+    if not isinstance(requirements, dict):
+        requirements = {}
+    required = profile_name != "tiny"
+    merged = {
+        "required": required,
+        "status": "pending" if required else "not-required",
+        "shared_understanding": "",
+        "domain_glossary_updated": False,
+        "code_docs_cross_checked": False,
+        "open_questions": [],
+    }
+    merged.update(requirements)
+    merged["required"] = bool(required or merged.get("required") is True)
+    if not isinstance(merged.get("open_questions"), list):
+        merged["open_questions"] = [str(merged.get("open_questions"))]
+    return merged
+
+
+def validate_requirements(task_id: str, item: dict, profile: dict, policy: dict, root: Path) -> str | None:
+    requirements = normalized_requirements(item)
+    if requirements.get("status") not in REQUIREMENT_STATUSES:
+        return f"task {task_id} requirements has invalid status: {requirements.get('status')}"
+    if not requirements.get("required"):
+        return None
+    protected = set(profile.get("requirement_protected_stages", [])) or REQUIREMENT_PROTECTED_STAGES
+    state_done = item.get("state") == "done" and policy.get("requirements_complete_before_done") is True
+    stage_protected = item.get("current_stage") in protected and policy.get("requirements_complete_before_protected_stages") is True
+    if not state_done and not stage_protected:
+        return None
+    if requirements.get("status") != "complete":
+        return f"task {task_id} requirements must be complete before {item.get('current_stage') or item.get('state')}"
+    if not str(requirements.get("shared_understanding", "")).strip():
+        return f"task {task_id} requirements missing shared_understanding"
+    if requirements.get("domain_glossary_updated") is not True:
+        return f"task {task_id} requirements must confirm domain_glossary_updated"
+    if requirements.get("code_docs_cross_checked") is not True:
+        return f"task {task_id} requirements must confirm code_docs_cross_checked"
+    docs_path = str(item.get("docs_path", "")).strip()
+    if docs_path and not (root / docs_path / "01_REQUIREMENT_ANALYSIS.md").exists():
+        return f"task {task_id} missing requirement analysis document"
+    return None
 
 
 def validate_review_gate(task_id: str, item: dict, profile: dict, policy: dict, root: Path) -> str | None:
@@ -306,6 +370,12 @@ def main() -> int:
     index_path = root / ".agent/sessions/index.json"
     if index_path.exists():
         load_json(index_path, ".agent/sessions/index.json")
+    session_events_path = root / ".agent/sessions/events.jsonl"
+    if session_events_path.exists():
+        for item in load_jsonl(session_events_path, ".agent/sessions/events.jsonl"):
+            if item.get("schema") != "agent-session-event-v1":
+                print("error: .agent/sessions/events.jsonl entries must use schema agent-session-event-v1")
+                return 1
 
     spec_path = root / ".agent/spec.json"
     if openspec_enabled:
@@ -359,7 +429,7 @@ def main() -> int:
                 return 1
         workflow_stages = set(workflow.get("stages", []))
         stage_definitions = workflow.get("stage_definitions", {})
-        for stage in ("intake", "risk_classification", "implementation", "spec_review", "quality_review", "verification", "handoff"):
+        for stage in ("intake", "requirement_interview", "risk_classification", "implementation", "spec_review", "quality_review", "verification", "handoff"):
             definition = stage_definitions.get(stage, {})
             if not definition:
                 print(f"error: .agent/workflow.json missing stage definition: {stage}")
@@ -375,6 +445,7 @@ def main() -> int:
         gates = workflow.get("gates", {})
         for gate in (
             "risk_classification",
+            "requirements_interview",
             "design_approval",
             "plan_quality",
             "implementation_discipline",
@@ -426,6 +497,11 @@ def main() -> int:
         if not gates.get("risk_classification", {}).get("record_in_plan"):
             print("error: .agent/workflow.json risk classification must be recorded in plans")
             return 1
+        requirement_gate = gates.get("requirements_interview", {})
+        for key in ("ask_one_question_at_a_time", "provide_recommended_answer_and_reason", "cross_check_user_claims_against_code_and_docs", "update_domain_glossary_for_new_or_ambiguous_terms"):
+            if requirement_gate.get(key) is not True:
+                print(f"error: .agent/workflow.json requirements_interview missing policy: {key}")
+                return 1
         if not gates.get("diff_traceability", {}).get("every_changed_line_traces_to_request"):
             print("error: .agent/workflow.json diff traceability gate must trace changed lines to request")
             return 1
@@ -466,7 +542,7 @@ def main() -> int:
         if task_board.get("schema") != "agent-task-board-v1":
             print("error: .agent/task-board.json schema must be agent-task-board-v1")
             return 1
-        for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path", "delivery_conclusion", "review_gate", "related_tasks"):
+        for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path", "requirements", "delivery_conclusion", "review_gate", "related_tasks"):
             if field not in task_board.get("required_fields", []):
                 print(f"error: .agent/task-board.json missing required field declaration: {field}")
                 return 1
@@ -509,6 +585,10 @@ def main() -> int:
                 if not str(item.get("delivery_conclusion", "")).strip():
                     print(f"error: task {task_id} is done without delivery_conclusion")
                     return 1
+            requirements_error = validate_requirements(task_id, item, profile, task_policy, root)
+            if requirements_error:
+                print(f"error: {requirements_error}")
+                return 1
             gate_error = validate_review_gate(task_id, item, profile, task_policy, root)
             if gate_error:
                 print(f"error: {gate_error}")
@@ -663,6 +743,25 @@ def main() -> int:
             print("error: .agent/dev-map.json must define at least one area")
             return 1
 
+    skill_hygiene_path = root / ".agent/skill-hygiene.json"
+    if skill_hygiene_path.exists():
+        hygiene = load_json(skill_hygiene_path, ".agent/skill-hygiene.json")
+        if hygiene.get("schema") != "agent-skill-hygiene-v1":
+            print("error: .agent/skill-hygiene.json schema must be agent-skill-hygiene-v1")
+            return 1
+        policy = hygiene.get("policy", {})
+        for key in ("doctor_is_read_only", "scripts_collect_facts_ai_interprets", "human_confirms_cleanup", "no_auto_delete"):
+            if policy.get(key) is not True:
+                print(f"error: .agent/skill-hygiene.json policy must enable {key}")
+                return 1
+        if hygiene.get("canary", {}).get("enabled") is not False:
+            print("error: .agent/skill-hygiene.json canary must be disabled by default")
+            return 1
+        for key in ("missing_frontmatter", "broken_symlink", "curl_pipe_shell"):
+            if key not in hygiene.get("risk_signals", {}):
+                print(f"error: .agent/skill-hygiene.json missing risk signal: {key}")
+                return 1
+
     memory_path = root / ".agent/memory.json"
     if memory_path.exists():
         memory = load_json(memory_path, ".agent/memory.json")
@@ -762,6 +861,10 @@ def main() -> int:
         if security.get("schema") != "agent-security-v1":
             print("error: .agent/security.json schema must be agent-security-v1")
             return 1
+        for key in ("raw_credentials_stay_outside_repo_harness_and_sandbox", "external_secret_use_requires_vault_or_proxy_boundary"):
+            if security.get("policy", {}).get(key) is not True:
+                print(f"error: .agent/security.json missing credential boundary policy: {key}")
+                return 1
         suites = security.get("suites", {})
         for key in ("policy_as_code", "secret_scan", "dependency_audit", "sbom", "license_scan"):
             if key not in suites:
@@ -787,6 +890,7 @@ def main() -> int:
             "role_contracts",
             "manifest",
             "dev_map",
+            "skill_hygiene",
             "harness_evolution",
             "governance_gc",
             "template_rendering",
@@ -846,9 +950,14 @@ def main() -> int:
         if mcp_policy.get("policy", {}).get("credentials_must_not_be_stored_in_repo") is not True:
             print("error: .agent/mcp-policy.json must forbid storing credentials in repo")
             return 1
-        if "release_or_signing" not in mcp_policy.get("trust_boundaries", {}):
-            print("error: .agent/mcp-policy.json missing release_or_signing trust boundary")
-            return 1
+        for key in ("credentials_must_use_vault_or_proxy", "sandbox_must_not_receive_raw_credentials", "credential_rotation_and_audit_required"):
+            if mcp_policy.get("policy", {}).get(key) is not True:
+                print(f"error: .agent/mcp-policy.json missing credential boundary policy: {key}")
+                return 1
+        for boundary in ("credential_vault", "credential_proxy", "release_or_signing"):
+            if boundary not in mcp_policy.get("trust_boundaries", {}):
+                print(f"error: .agent/mcp-policy.json missing {boundary} trust boundary")
+                return 1
 
     gc_path = root / ".agent/governance-gc.json"
     if gc_path.exists():

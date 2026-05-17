@@ -6,6 +6,7 @@
 .PHONY: agent-memory
 .PHONY: agent-context
 .PHONY: agent-capabilities
+.PHONY: agent-skill-hygiene
 .PHONY: agent-runlog
 .PHONY: agent-tooling
 .PHONY: agent-security
@@ -20,6 +21,7 @@ agent-check:
 	@test ! -f scripts/agent_knowledge.py || python3 scripts/agent_knowledge.py
 	@test ! -f scripts/agent_invariants.py || python3 scripts/agent_invariants.py
 	@test ! -f scripts/agent_capabilities.py || python3 scripts/agent_capabilities.py doctor
+	@test ! -f scripts/agent_skill_hygiene.py || python3 scripts/agent_skill_hygiene.py doctor
 	@test ! -f scripts/agent_runlog.py || python3 scripts/agent_runlog.py doctor
 	@test ! -f scripts/agent_migrate.py || python3 scripts/agent_migrate.py doctor
 	@test ! -f scripts/agent_tooling.py || python3 scripts/agent_tooling.py doctor
@@ -52,6 +54,9 @@ agent-context:
 
 agent-capabilities:
 	@if [ -f scripts/agent_capabilities.py ]; then python3 scripts/agent_capabilities.py list --enabled; else echo "agent_capabilities.py not available in this governance profile"; fi
+
+agent-skill-hygiene:
+	@if [ -f scripts/agent_skill_hygiene.py ]; then python3 scripts/agent_skill_hygiene.py report; else echo "agent_skill_hygiene.py not available in this governance profile"; fi
 
 agent-runlog:
 	python3 scripts/agent_runlog.py tail --limit 10

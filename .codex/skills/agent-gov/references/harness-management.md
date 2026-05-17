@@ -34,6 +34,7 @@ openspec/config.yaml
   hooks.json
   knowledge.json
   dev-map.json
+  skill-hygiene.json
   memory.json
   context.json
   capabilities.json
@@ -60,6 +61,7 @@ openspec/config.yaml
     summaries/
   sessions/
     index.json
+    events.jsonl
     active.md
     bootstrap.md
   templates/
@@ -103,6 +105,7 @@ scripts/
   agent_knowledge.py
   agent_invariants.py
   agent_capabilities.py
+  agent_skill_hygiene.py
   agent_runlog.py
   agent_tooling.py
   agent_security.py
@@ -120,6 +123,7 @@ docs/
   TOOLING.md
   QUALITY_SCORE.md
   AI_CODING_GLOSSARY.md
+  DOMAIN_GLOSSARY.md
   DEV_MAP.md
   features/
     INDEX.md
@@ -147,25 +151,28 @@ Makefile                   # optional if missing
 - Use `.agent/worktrees.json` as the git worktree isolation and guarded cleanup policy.
 - Use `.agent/workflow-profiles.json` to choose a task-size-aware process: `tiny`, `bugfix`, `standard`, or `full`.
 - Use `.agent/task-board.json`, `scripts/agent_task.py`, and `docs/features/` as the cross-session task index and feature-stage document store.
+- For existing projects, initialize with `--dry-run` first. Treat `conflicts` as a manual merge queue and `preserved append-only` as history that must not be overwritten.
+- Use the requirements interview gate for non-tiny work: ask one unresolved question at a time, provide a recommended answer and rationale, cross-check user claims against current code/docs, and update `docs/DOMAIN_GLOSSARY.md` when stable project-domain terms are established.
 - Use `.agent/subagents.json` as the delegated agent role, boundary, and snapshot contract when subagents are allowed.
 - Use `.agent/role-contracts.json` to enforce role inputs, outputs, forbidden actions, and finder-cannot-fix separation.
 - Use `.agent/hooks.json` as the platform-neutral hook policy, with native Codex and Claude hook adapters treated as generated projections.
 - Use `.agent/knowledge.json` as the durable knowledge manifest for ownership, review dates, source links, and known stale sections.
 - Use `.agent/dev-map.json` and `docs/DEV_MAP.md` as a concise repository navigation map for entry points, ownership, read-before-edit docs, and common patterns.
+- Use `.agent/skill-hygiene.json` and `scripts/agent_skill_hygiene.py` for read-only skill topology, source/hash, symlink, frontmatter, stale, and risk-signal scans.
 - Use `.agent/memory.json` as the cross-session memory policy for summaries, indexes, privacy redaction, and progressive retrieval.
 - Use `.agent/context.json` as the context budget policy for agent-facing docs, bootstrap packets, memory digests, embedded spec change docs, and subagent output size.
 - Use `.agent/capabilities.json` as the capability, skill/tool/MCP taxonomy, integration, permission, and risk registry for agent-visible skills, tools, resources, adapters, and integrations.
-- Use `.agent/runlog.jsonl` as the append-only evidence ledger for session lifecycle events, validation runs, review-fix gates, and high-risk capability use.
+- Use `.agent/runlog.jsonl` as the append-only evidence ledger for validation runs, review-fix gates, and high-risk capability use; use `.agent/sessions/events.jsonl` as the append-only session lifecycle stream.
 - Use `.agent/tooling.json` as the agent-computer-interface policy for bounded, path-first, line-numbered repository inspection.
 - Use `.agent/security.json` as the optional policy-as-code and supply-chain command registry.
 - Use `.agent/evals.json` and `.agent/evals/latest.md` as the local governance health score configuration and dashboard.
 - Use `.agent/mechanical-checks.json`, `.agent/baselines.json`, and `scripts/agent_verify.py` for hard mechanical checks, template rendering checks, test-count baselines, and before/after regression comparison.
 - Use `.agent/harness-evolution.json` as the incident taxonomy and promotion policy for repeated failures; record classifications with `python3 scripts/agent_gc.py classify --category <category> --summary <summary>`.
-- Use `.agent/mcp-policy.json` as the optional MCP trust-boundary and approval policy; it is generated disabled by default before any MCP server is enabled.
+- Use `.agent/mcp-policy.json` as the optional MCP trust-boundary and approval policy; it is generated disabled by default before any MCP server is enabled, and raw credentials must remain behind vault/proxy boundaries outside the repo, harness, and sandbox.
 - Use `.agent/governance-gc.json` and `scripts/agent_gc.py` for periodic governance gardening.
 - Use `.agent/skill-distribution.json` as the skill distribution policy for `.codex/skills`, `.agents/skills`, and `.claude/skills`.
 - Prefer `npx @airpot/agent-gov@latest` as the public one-command installer; it should copy bundled project skills before running the initializer.
-- Use `docs/AI_CODING_GLOSSARY.md` for shared AI coding terminology and `docs/adr/`, `docs/rfcs/`, and `docs/incidents/` for durable decisions, proposals, and postmortems that should outlive a session.
+- Use `docs/AI_CODING_GLOSSARY.md` for shared AI coding terminology, `docs/DOMAIN_GLOSSARY.md` for project-domain terminology, and `docs/adr/`, `docs/rfcs/`, and `docs/incidents/` for durable decisions, proposals, and postmortems that should outlive a session.
 - Capture the technology stack during initialization and prefill harness commands when there is a known safe default.
 - Prefer ignored git worktrees for feature work, implementation-plan execution, and risky refactors; record baseline validation before editing.
 - Require fresh validation evidence before reporting completion, merge readiness, PR readiness, archive readiness, or handoff readiness.
@@ -185,6 +192,7 @@ python3 scripts/agent_spec.py doctor
 python3 scripts/agent_knowledge.py
 python3 scripts/agent_invariants.py
 python3 scripts/agent_capabilities.py doctor
+python3 scripts/agent_skill_hygiene.py doctor
 python3 scripts/agent_runlog.py doctor
 python3 scripts/agent_tooling.py doctor
 python3 scripts/agent_security.py doctor

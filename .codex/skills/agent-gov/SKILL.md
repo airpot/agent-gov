@@ -37,10 +37,11 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
    - The initializer uses agent-gov's embedded spec layer; it does not install or call a global OpenSpec CLI.
    - Add `--no-claude` only when the user does not want Claude support.
    - Do not overwrite existing files unless the user explicitly asks for `--force`.
+   - For existing projects, run `--dry-run` first and inspect `would create`, `unchanged`, `preserved append-only`, and `conflicts` before writing.
 
 4. **Create or verify session continuity**
-   - Ensure `.agent/config.json`, `.agent/sessions/index.json`, `.agent/sessions/active.md`, `.agent/tools/agent_session.py`, and session templates exist.
-   - For active long-running work, use the generated `.agent/tools/agent_session.py start/checkpoint/bootstrap/compact/doctor/resume/status` commands.
+   - Ensure `.agent/config.json`, `.agent/sessions/index.json`, `.agent/sessions/events.jsonl`, `.agent/sessions/active.md`, `.agent/tools/agent_session.py`, and session templates exist.
+   - For active long-running work, use the generated `.agent/tools/agent_session.py start/checkpoint/bootstrap/compact/doctor/resume/status/events` commands.
    - Require new sessions to run `python3 .agent/tools/agent_session.py bootstrap` before editing when an active session exists.
 
 5. **Create or verify long-term memory**
@@ -59,6 +60,7 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
    - Ensure `.agent/workflow.json`, `.agent/workflow-profiles.json`, `.agent/task-board.json`, `.agent/risk-zones.json`, `.agent/review-policy.json`, `.agent/worktrees.json`, `.agent/templates/implementation-plan.md.tmpl`, `.agent/templates/debugging-record.md.tmpl`, and `.agent/templates/features/*.md.tmpl` exist.
    - Choose the lightest workflow profile that covers the task risk: `tiny`, `bugfix`, `standard`, or `full`.
    - Use `scripts/agent_task.py` to keep non-tiny task state in `.agent/task-board.json` and feature-stage documents under `docs/features/<task-id>/`.
+   - For non-tiny tasks, complete the requirements interview gate before design or implementation: ask one unresolved question at a time, give a recommended answer with rationale, cross-check user claims against current code/docs, and update `docs/DOMAIN_GLOSSARY.md` for stable terms.
    - For `standard` and `full` tasks, require `review_gate.status=pass`, an existing latest review document, and no open blocker/major/minor findings before task state can become `done`.
    - Use workflow gates for task risk/autonomy, design/spec approval, plan quality, implementation discipline, diff traceability, isolated execution, TDD evidence, systematic debugging, spec review, quality review, human review evidence, completion verification, handoff, and finish choices.
    - Require high and critical risk work to record approval/review evidence; critical work is not autonomous modification work.
@@ -68,7 +70,7 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
 
 8. **Create or verify capability governance and runlog evidence**
    - Ensure core scoring and evidence files exist in every profile: `.agent/manifest.json`, `.agent/runlog.jsonl`, `.agent/evals.json`, `.agent/evals/latest.md`, `scripts/agent_runlog.py`, `scripts/agent_score.py`, and `scripts/agent_migrate.py`.
-   - For `standard` and `full`, ensure `.agent/capabilities.json`, `.agent/dev-map.json`, `.agent/harness-evolution.json`, `.agent/mcp-policy.json`, `.agent/governance-gc.json`, `scripts/agent_capabilities.py`, `scripts/agent_verify.py`, and `scripts/agent_gc.py` exist.
+   - For `standard` and `full`, ensure `.agent/capabilities.json`, `.agent/dev-map.json`, `.agent/skill-hygiene.json`, `.agent/harness-evolution.json`, `.agent/mcp-policy.json`, `.agent/governance-gc.json`, `scripts/agent_capabilities.py`, `scripts/agent_skill_hygiene.py`, `scripts/agent_verify.py`, and `scripts/agent_gc.py` exist.
    - For `full`, ensure `.agent/tooling.json`, `.agent/security.json`, `scripts/agent_tooling.py`, and `scripts/agent_security.py` exist.
    - Treat `.agent/manifest.json` as the generated governance manifest for required paths, JSON schemas, JSONL stores, and score dimensions; update it when the governance surface changes.
    - Use `.agent/capabilities.json` to record enabled skills, tools, MCP/integration entries, resources, native adapters, owner, risk, capability class, permission shape, and validation commands.
@@ -76,10 +78,11 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
    - Use `.agent/tooling.json` and `scripts/agent_tooling.py` for bounded, path-first, line-numbered repository inspection.
    - Use `.agent/security.json` and `scripts/agent_security.py` for optional policy-as-code, secret scan, dependency audit, SBOM, and license scan command slots.
    - Use `.agent/evals.json` and `scripts/agent_score.py` for local governance health scoring and `.agent/evals/latest.md` dashboard refresh.
-   - Ensure `docs/AI_CODING_GLOSSARY.md`, `docs/adr/`, `docs/rfcs/`, `docs/incidents/`, and their templates exist for shared terminology, durable decisions, proposals, and postmortems.
+   - Ensure `docs/AI_CODING_GLOSSARY.md`, `docs/DOMAIN_GLOSSARY.md`, `docs/adr/`, `docs/rfcs/`, `docs/incidents/`, and their templates exist for shared terminology, durable decisions, proposals, and postmortems.
    - Ensure `docs/DEV_MAP.md` exists as a concise repository navigation map, not a full file inventory.
    - Use `.agent/harness-evolution.json` and `python3 scripts/agent_gc.py classify ...` to classify repeated failures and promote fixes into rules, skills, scripts, workflow gates, role contracts, tool/MCP policy, or docs.
-   - Treat `.agent/mcp-policy.json` as optional and disabled by default until the project explicitly enables external integrations; it defines trust boundaries even when no MCP server is active.
+   - Use `.agent/skill-hygiene.json` and `scripts/agent_skill_hygiene.py` as a read-only skill topology/source/hash/frontmatter/symlink/risk-signal scan; cleanup and canary injection require explicit human confirmation.
+   - Treat `.agent/mcp-policy.json` as optional and disabled by default until the project explicitly enables external integrations; it defines trust boundaries even when no MCP server is active, and raw credentials must stay behind vault/proxy boundaries outside the repo, harness, and sandbox.
    - Keep runlog entries structured and concise; do not store raw transcripts, terminal scrollback, secrets, or private host data.
 
 9. **Create or verify subagent orchestration**
@@ -106,7 +109,7 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
    - Check the knowledge store and invariants: `python3 scripts/agent_knowledge.py` and `python3 scripts/agent_invariants.py`.
    - Check capability governance and runlog health: `python3 scripts/agent_capabilities.py doctor` and `python3 scripts/agent_runlog.py doctor`.
    - Check ACI tooling and security baseline health: `python3 scripts/agent_tooling.py doctor` and `python3 scripts/agent_security.py doctor`.
-   - Check task-board and mechanical verification health: `python3 scripts/agent_task.py doctor` and `python3 scripts/agent_verify.py doctor`.
+   - Check task-board, skill hygiene, and mechanical verification health: `python3 scripts/agent_task.py doctor`, `python3 scripts/agent_skill_hygiene.py doctor`, and `python3 scripts/agent_verify.py doctor`.
    - Check governance-gc health: `python3 scripts/agent_gc.py doctor`.
    - Check governance score health: `python3 scripts/agent_score.py doctor`; refresh score with `python3 scripts/agent_score.py score --write` before release handoff.
    - Check memory health: `python3 .agent/tools/agent_memory.py doctor`.
@@ -115,6 +118,7 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
    - Check skill sync readiness: `python3 scripts/agent_sync_skills.py --dry-run`.
    - Skip commands whose scripts were intentionally not generated by the selected governance profile.
    - Report skipped files, existing files, and any manual merge required.
+   - Treat `conflicts` in initializer dry-run output as a manual merge queue; append-only stores are preserved to avoid losing history.
 
 12. **Review before handoff**
    - For substantial initialization work, create or update a review-fix record in the controlling skill lifecycle.
@@ -129,6 +133,7 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
 - `assets/templates/agent-memory.py.tmpl`: Source for generated target-project `.agent/tools/agent_memory.py`.
 - `assets/templates/agent-context.py.tmpl`: Source for generated target-project `.agent/tools/agent_context.py`.
 - `assets/templates/agent-capabilities.py.tmpl`: Source for generated target-project `scripts/agent_capabilities.py`.
+- `assets/templates/agent-skill-hygiene.py.tmpl`: Source for generated target-project `scripts/agent_skill_hygiene.py`.
 - `assets/templates/agent-runlog.py.tmpl`: Source for generated target-project `scripts/agent_runlog.py`.
 - `assets/templates/agent-tooling.py.tmpl`: Source for generated target-project `scripts/agent_tooling.py`.
 - `assets/templates/agent-security.py.tmpl`: Source for generated target-project `scripts/agent_security.py`.

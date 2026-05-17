@@ -16,6 +16,7 @@ from pathlib import Path
 
 SESSION_ROOT = Path(".agent/sessions")
 INDEX_PATH = SESSION_ROOT / "index.json"
+SESSION_EVENTS_PATH = SESSION_ROOT / "events.jsonl"
 ACTIVE_PATH = SESSION_ROOT / "active.md"
 BOOTSTRAP_PATH = SESSION_ROOT / "bootstrap.md"
 RUNLOG_PATH = Path(".agent/runlog.jsonl")
@@ -88,6 +89,7 @@ def resume_steps(session_id: str, workspace: str, openspec_change: str) -> list[
         steps.append("Read accepted or rejected subagent snapshots recorded in handoff, changes, or validation notes.")
     if Path(".agent/tools/agent_context.py").exists():
         steps.append("Run `python3 .agent/tools/agent_context.py scan --limit 10` if context size or stale bootstrap state is unclear.")
+    steps.append("Review recent append-only session events with `python3 .agent/tools/agent_session.py events --limit 10` when handoff state is unclear.")
     steps.extend(
         [
             "Run `git status --short`.",
@@ -123,6 +125,57 @@ def append(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(text)
+
+
+def emit_session_event(
+    *,
+    event_type: str,
+    session_id: str | None,
+    summary: str,
+    artifacts: list[str] | None = None,
+    payload: dict | None = None,
+) -> dict:
+    item = {
+        "schema": "agent-session-event-v1",
+        "id": f"session-event-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}",
+        "created_at": utc_now(),
+        "event_type": event_type,
+        "session_id": session_id,
+        "summary": summary,
+        "source": ".agent/tools/agent_session.py",
+        "artifacts": artifacts or [],
+        "payload": payload or {},
+    }
+    SESSION_EVENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with SESSION_EVENTS_PATH.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(item, ensure_ascii=False) + "\n")
+    return item
+
+
+def read_session_events(session_id: str | None = None, limit: int = 10) -> list[dict]:
+    if not SESSION_EVENTS_PATH.exists():
+        return []
+    rows: list[dict] = []
+    for line in SESSION_EVENTS_PATH.read_text(encoding="utf-8", errors="ignore").splitlines():
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if session_id is None or item.get("session_id") == session_id:
+            rows.append(item)
+    return rows[-limit:]
+
+
+def format_recent_events(session_id: str, limit: int = 8) -> list[str]:
+    events = read_session_events(session_id, limit)
+    if not events:
+        return ["- No session events recorded yet."]
+    return [
+        f"- {item.get('created_at', 'unknown')} `{item.get('event_type', 'unknown')}`: {item.get('summary', '')}"
+        for item in events
+    ]
 
 
 def record_runlog(
@@ -282,6 +335,10 @@ def write_bootstrap(session_id: str) -> Path:
         "## Validation",
         "",
         *first_nonempty_lines(directory / "validation.md", 80),
+        "",
+        "## Recent Session Events",
+        "",
+        *format_recent_events(session_id, 8),
         "",
         "## Memory Digest",
         "",
@@ -471,6 +528,13 @@ active
     write(directory / "artifacts.json", json.dumps(artifacts, indent=2) + "\n")
     write_bootstrap(session_id)
     maybe_scan_context()
+    emit_session_event(
+        event_type="started",
+        session_id=session_id,
+        summary=f"Started session for goal: {goal}",
+        artifacts=[str(directory / "session.md"), str(directory / "resume-prompt.md")],
+        payload={"client_surface": client_surface, "remote_kind": remote_kind, "openspec_change": openspec_change},
+    )
     write_bootstrap(session_id)
     return artifacts
 
@@ -555,6 +619,18 @@ def cmd_checkpoint(args: argparse.Namespace) -> int:
         append(directory / "validation.md", f"\n## {timestamp}\n\n{args.validation}\n")
     if args.next:
         append(directory / "handoff.md", f"\n## Next Step\n\n{args.next}\n")
+    emit_session_event(
+        event_type="checkpoint",
+        session_id=session_id,
+        summary=args.summary,
+        artifacts=[str(directory / "handoff.md"), str(directory / "changes.md"), str(directory / "validation.md")],
+        payload={
+            "decision": args.decision or "",
+            "changed_files": args.changed_file,
+            "validation": args.validation or "",
+            "next": args.next or "",
+        },
+    )
     compact_session(session_id, ingest_reason="checkpoint")
     record_runlog(
         kind="session",
@@ -594,6 +670,12 @@ def cmd_resume(args: argparse.Namespace) -> int:
 
 def cmd_bootstrap(args: argparse.Namespace) -> int:
     session_id = args.session_id or require_active()
+    emit_session_event(
+        event_type="bootstrap",
+        session_id=session_id,
+        summary="Refreshed and printed session bootstrap",
+        artifacts=[str(session_dir(session_id) / "bootstrap.md")],
+    )
     path = write_bootstrap(session_id)
     print(path.read_text(encoding="utf-8"))
     return 0
@@ -601,6 +683,13 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
 
 def cmd_compact(args: argparse.Namespace) -> int:
     session_id = args.session_id or require_active()
+    emit_session_event(
+        event_type="compact",
+        session_id=session_id,
+        summary=args.summary or "Compacted session bootstrap and resume artifacts",
+        artifacts=[str(session_dir(session_id) / "bootstrap.md"), str(session_dir(session_id) / "resume-prompt.md")],
+        payload={"next": args.next or ""},
+    )
     path = compact_session(session_id, args.summary, args.next)
     record_runlog(
         kind="session",
@@ -629,6 +718,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         except json.JSONDecodeError as exc:
             errors.append(f"{INDEX_PATH} is invalid JSON: {exc}")
             session_id = None
+
+    if SESSION_EVENTS_PATH.exists():
+        for index, line in enumerate(SESSION_EVENTS_PATH.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError as exc:
+                errors.append(f"{SESSION_EVENTS_PATH} line {index} is invalid JSON: {exc}")
+                continue
+            if item.get("schema") != "agent-session-event-v1":
+                errors.append(f"{SESSION_EVENTS_PATH} line {index} has invalid schema")
+    else:
+        warnings.append(f"missing optional event stream {SESSION_EVENTS_PATH}; it will be created on the next session event")
 
     if not session_id:
         warnings.append("no active session")
@@ -708,6 +811,13 @@ def cmd_archive(args: argparse.Namespace) -> int:
             command="agent_session.py archive --move",
             artifacts=[str(target)],
         )
+        emit_session_event(
+            event_type="archived",
+            session_id=session_id,
+            summary=f"Archived session to {target}",
+            artifacts=[str(target)],
+            payload={"moved": True},
+        )
         print(f"archived {session_id} to {target}")
     else:
         record_runlog(
@@ -718,7 +828,28 @@ def cmd_archive(args: argparse.Namespace) -> int:
             command="agent_session.py archive",
             artifacts=[str(session_dir(session_id))],
         )
+        emit_session_event(
+            event_type="archived",
+            session_id=session_id,
+            summary="Marked session archived",
+            artifacts=[str(session_dir(session_id))],
+            payload={"moved": False},
+        )
         print(f"marked {session_id} archived")
+    return 0
+
+
+def cmd_events(args: argparse.Namespace) -> int:
+    events = read_session_events(args.session_id, args.limit)
+    if args.json:
+        print(json.dumps({"schema": "agent-session-events-v1", "events": events}, indent=2))
+        return 0
+    if not events:
+        print("no session events")
+        return 0
+    for item in events:
+        session_id = item.get("session_id") or "none"
+        print(f"{item.get('created_at')} | {session_id} | {item.get('event_type')} | {item.get('summary')}")
     return 0
 
 
@@ -758,6 +889,12 @@ def build_parser() -> argparse.ArgumentParser:
     compact.add_argument("--summary")
     compact.add_argument("--next")
     compact.set_defaults(func=cmd_compact)
+
+    events = subparsers.add_parser("events", help="Read append-only session events")
+    events.add_argument("--session-id")
+    events.add_argument("--limit", type=int, default=10)
+    events.add_argument("--json", action="store_true")
+    events.set_defaults(func=cmd_events)
 
     doctor = subparsers.add_parser("doctor", help="Check active session continuity health")
     doctor.set_defaults(func=cmd_doctor)

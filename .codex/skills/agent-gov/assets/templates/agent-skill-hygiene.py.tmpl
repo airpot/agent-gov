@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+"""Read-only hygiene scan for local Agent Skills."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+CONFIG_PATH = Path(".agent/skill-hygiene.json")
+FRONTMATTER_RE = re.compile(r"\A---\n(.*?)\n---\n", re.DOTALL)
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def load_json(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise SystemExit(f"error: missing {path}")
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"error: invalid JSON in {path}: {exc}")
+
+
+def sha256(path: Path) -> str:
+    data = path.read_bytes()
+    return hashlib.sha256(data).hexdigest()
+
+
+def expand_path(value: str) -> Path:
+    return Path(os.path.expandvars(value)).expanduser()
+
+
+def classify_root(path: Path) -> str:
+    try:
+        resolved = path.resolve()
+        cwd = Path.cwd().resolve()
+        if resolved == cwd or cwd in resolved.parents:
+            return "project"
+    except OSError:
+        pass
+    return "global"
+
+
+def parse_frontmatter(text: str) -> dict:
+    match = FRONTMATTER_RE.match(text)
+    if not match:
+        return {}
+    data: dict[str, str] = {}
+    for line in match.group(1).splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        data[key.strip()] = value.strip().strip("\"'")
+    return data
+
+
+def discover_skill_files(root: Path) -> list[Path]:
+    if root.is_symlink() and not root.exists():
+        return [root]
+    if not root.exists():
+        return []
+    if root.is_file() and root.name == "SKILL.md":
+        return [root]
+    if (root / "SKILL.md").exists() or (root / "SKILL.md").is_symlink():
+        return [root / "SKILL.md"]
+    found: list[Path] = []
+    for child in sorted(root.iterdir(), key=lambda item: item.name):
+        skill = child / "SKILL.md"
+        if skill.exists() or skill.is_symlink():
+            found.append(skill)
+    return found
+
+
+def skill_record(root: Path, skill_path: Path, config: dict) -> dict:
+    broken_symlink = skill_path.is_symlink() and not skill_path.exists()
+    resolved = ""
+    content_hash = ""
+    frontmatter: dict = {}
+    risk_signals: list[str] = []
+    size_bytes = 0
+    modified_at = None
+    if broken_symlink:
+        risk_signals.append("broken_symlink")
+    else:
+        resolved_path = skill_path.resolve()
+        resolved = str(resolved_path)
+        content_hash = sha256(resolved_path)
+        size_bytes = resolved_path.stat().st_size
+        modified_at = datetime.fromtimestamp(resolved_path.stat().st_mtime, timezone.utc)
+        text = resolved_path.read_text(encoding="utf-8", errors="ignore")
+        frontmatter = parse_frontmatter(text)
+        if not frontmatter:
+            risk_signals.append("missing_frontmatter")
+        if not frontmatter.get("name"):
+            risk_signals.append("missing_name")
+        if not frontmatter.get("description"):
+            risk_signals.append("missing_description")
+        lowered = text.lower()
+        if "curl" in lowered and ("| bash" in lowered or "| sh" in lowered):
+            risk_signals.append("curl_pipe_shell")
+    stale_days = int(config.get("policy", {}).get("stale_after_days", 180))
+    if modified_at and (datetime.now(timezone.utc) - modified_at).days > stale_days:
+        risk_signals.append("stale_mtime")
+    name = frontmatter.get("name") or skill_path.parent.name
+    return {
+        "name": name,
+        "path": str(skill_path),
+        "root": str(root),
+        "root_kind": classify_root(root),
+        "is_symlink": skill_path.is_symlink(),
+        "broken_symlink": broken_symlink,
+        "resolved_path": resolved,
+        "content_sha256": content_hash,
+        "size_bytes": size_bytes,
+        "mtime": modified_at.strftime("%Y-%m-%dT%H:%M:%SZ") if modified_at else "",
+        "frontmatter": frontmatter,
+        "risk_signals": risk_signals,
+    }
+
+
+def collect(config: dict) -> dict:
+    roots = [expand_path(path) for path in config.get("scan_roots", [])]
+    records: list[dict] = []
+    missing_roots: list[str] = []
+    for root in roots:
+        if not root.exists():
+            missing_roots.append(str(root))
+            continue
+        for skill_path in discover_skill_files(root):
+            records.append(skill_record(root, skill_path, config))
+    duplicate_names: dict[str, list[dict]] = {}
+    for item in records:
+        duplicate_names.setdefault(item.get("name", ""), []).append(item)
+    conflicts: list[dict] = []
+    for name, items in duplicate_names.items():
+        hashes = {item.get("content_sha256") for item in items if item.get("content_sha256")}
+        roots = {item.get("root") for item in items}
+        if len(items) > 1 and (len(hashes) > 1 or len(roots) > 1):
+            conflicts.append(
+                {
+                    "name": name,
+                    "count": len(items),
+                    "content_hashes": sorted(hashes),
+                    "roots": sorted(roots),
+                    "paths": [item.get("path") for item in items],
+                }
+            )
+    findings: list[dict] = []
+    for item in records:
+        for signal in item.get("risk_signals", []):
+            severity = "warning"
+            if signal in {"broken_symlink", "curl_pipe_shell"}:
+                severity = "error"
+            findings.append({"severity": severity, "kind": signal, "path": item.get("path"), "summary": f"{item.get('name')} has {signal}"})
+    for conflict in conflicts:
+        findings.append({"severity": "warning", "kind": "duplicate_or_drifted_skill_name", "path": "", "summary": f"{conflict['name']} appears in multiple roots or hashes"})
+    errors = sum(1 for item in findings if item.get("severity") == "error")
+    warnings = sum(1 for item in findings if item.get("severity") == "warning")
+    return {
+        "schema": "agent-skill-hygiene-report-v1",
+        "created_at": utc_now(),
+        "status": "fail" if errors else ("warn" if warnings else "pass"),
+        "counts": {
+            "scan_roots": len(roots),
+            "missing_roots": len(missing_roots),
+            "skills": len(records),
+            "findings": len(findings),
+            "errors": errors,
+            "warnings": warnings,
+            "conflicts": len(conflicts),
+        },
+        "missing_roots": missing_roots,
+        "skills": records,
+        "conflicts": conflicts,
+        "findings": findings,
+        "policy": {
+            "read_only": True,
+            "no_auto_delete": True,
+            "canary_is_optional": bool(config.get("canary", {}).get("enabled", False)),
+        },
+    }
+
+
+def print_text(report: dict) -> None:
+    counts = report.get("counts", {})
+    print(f"skill hygiene: {report.get('status')}")
+    print(f"skills: {counts.get('skills', 0)}")
+    print(f"findings: {counts.get('findings', 0)} ({counts.get('errors', 0)} errors, {counts.get('warnings', 0)} warnings)")
+    for item in report.get("findings", [])[:50]:
+        path = f" ({item.get('path')})" if item.get("path") else ""
+        print(f"{item.get('severity')}: {item.get('kind')}: {item.get('summary')}{path}")
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    config = load_json(CONFIG_PATH)
+    if config.get("schema") != "agent-skill-hygiene-v1":
+        print("error: .agent/skill-hygiene.json schema must be agent-skill-hygiene-v1", file=sys.stderr)
+        return 1
+    report = collect(config)
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print_text(report)
+    return 1 if args.fail_on_error and report.get("counts", {}).get("errors", 0) else 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    config = load_json(CONFIG_PATH)
+    errors: list[str] = []
+    if config.get("schema") != "agent-skill-hygiene-v1":
+        errors.append(".agent/skill-hygiene.json schema must be agent-skill-hygiene-v1")
+    policy = config.get("policy", {})
+    if policy.get("doctor_is_read_only") is not True:
+        errors.append("skill hygiene doctor must be read-only")
+    if policy.get("no_auto_delete") is not True:
+        errors.append("skill hygiene must not auto-delete skills")
+    if config.get("canary", {}).get("enabled") is not False:
+        errors.append("activation canary must be disabled by default")
+    report = collect(config) if not errors else None
+    if report and report.get("counts", {}).get("errors", 0):
+        for item in report.get("findings", []):
+            if item.get("severity") == "error":
+                errors.append(f"{item.get('kind')}: {item.get('path')}")
+    if errors:
+        for error in errors:
+            print(f"error: {error}")
+        return 1
+    print("agent skill hygiene doctor passed")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    doctor = subparsers.add_parser("doctor", help="Validate skill hygiene policy and scan hard errors")
+    doctor.set_defaults(func=cmd_doctor)
+
+    report = subparsers.add_parser("report", help="Run read-only skill hygiene scan")
+    report.add_argument("--json", action="store_true")
+    report.add_argument("--fail-on-error", action="store_true")
+    report.set_defaults(func=cmd_report)
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

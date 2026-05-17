@@ -44,6 +44,7 @@ def assert_no_missing_doc_refs(target: Path) -> None:
         ".agent/memory.json": [target / ".agent" / "memory.json"],
         ".agent/context.json": [target / ".agent" / "context.json"],
         ".agent/dev-map.json": [target / ".agent" / "dev-map.json"],
+        ".agent/skill-hygiene.json": [target / ".agent" / "skill-hygiene.json"],
         ".agent/capabilities.json": [target / ".agent" / "capabilities.json"],
         ".agent/tooling.json": [target / ".agent" / "tooling.json"],
         ".agent/security.json": [target / ".agent" / "security.json"],
@@ -55,9 +56,11 @@ def assert_no_missing_doc_refs(target: Path) -> None:
         ".agent/skill-distribution.json": [target / ".agent" / "skill-distribution.json"],
         "docs/DEV_MAP.md": [target / "docs" / "DEV_MAP.md"],
         "docs/AI_CODING_GLOSSARY.md": [target / "docs" / "AI_CODING_GLOSSARY.md"],
+        "docs/DOMAIN_GLOSSARY.md": [target / "docs" / "DOMAIN_GLOSSARY.md"],
         "agent_memory.py": [target / ".agent" / "tools" / "agent_memory.py"],
         "agent_context.py": [target / ".agent" / "tools" / "agent_context.py"],
         "agent_capabilities.py": [target / "scripts" / "agent_capabilities.py"],
+        "agent_skill_hygiene.py": [target / "scripts" / "agent_skill_hygiene.py"],
         "agent_tooling.py": [target / "scripts" / "agent_tooling.py"],
         "agent_security.py": [target / "scripts" / "agent_security.py"],
         "agent_task.py": [target / "scripts" / "agent_task.py"],
@@ -134,6 +137,11 @@ def assert_core_session_resume_is_profile_aware(target: Path, python: str) -> No
     if not session_id:
         print("core session did not record an active session", file=sys.stderr)
         raise SystemExit(1)
+    events_path = target / ".agent" / "sessions" / "events.jsonl"
+    events = [json.loads(line) for line in events_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if not events or events[-1].get("schema") != "agent-session-event-v1":
+        print("core session did not record append-only session events", file=sys.stderr)
+        raise SystemExit(1)
     text = "\n".join(
         [
             (target / ".agent" / "sessions" / session_id / "resume-prompt.md").read_text(encoding="utf-8"),
@@ -146,6 +154,68 @@ def assert_core_session_resume_is_profile_aware(target: Path, python: str) -> No
         if token in text:
             print(f"core session resume artifacts reference profile-missing token: {token}", file=sys.stderr)
             raise SystemExit(1)
+
+
+def assert_existing_project_adoption(init_script: Path, temp_root: Path, python: str) -> None:
+    conflicted = temp_root / "adoption-conflict"
+    conflicted.mkdir(parents=True, exist_ok=True)
+    custom_agents = "custom existing agent instructions\n"
+    (conflicted / "AGENTS.md").write_text(custom_agents, encoding="utf-8")
+    dry_run = run(
+        [
+            python,
+            str(init_script),
+            str(conflicted),
+            "--layout",
+            "minimal",
+            "--governance-profile",
+            "standard",
+            "--dry-run",
+        ],
+        cwd=PACKAGE_ROOT,
+    )
+    dry_output = dry_run.stdout + dry_run.stderr
+    for token in ("mode: dry-run", "would create:", "conflicts:", "AGENTS.md"):
+        if token not in dry_output:
+            print(f"dry-run adoption report missing {token!r}", file=sys.stderr)
+            print(dry_output, file=sys.stderr)
+            raise SystemExit(1)
+    if (conflicted / "AGENTS.md").read_text(encoding="utf-8") != custom_agents:
+        print("dry-run adoption modified an existing AGENTS.md", file=sys.stderr)
+        raise SystemExit(1)
+
+    stable = temp_root / "adoption-idempotent"
+    stable.mkdir(parents=True, exist_ok=True)
+    run(
+        [
+            python,
+            str(init_script),
+            str(stable),
+            "--layout",
+            "minimal",
+            "--governance-profile",
+            "standard",
+        ],
+        cwd=PACKAGE_ROOT,
+    )
+    rerun = run(
+        [
+            python,
+            str(init_script),
+            str(stable),
+            "--layout",
+            "minimal",
+            "--governance-profile",
+            "standard",
+            "--dry-run",
+        ],
+        cwd=PACKAGE_ROOT,
+    )
+    rerun_output = rerun.stdout + rerun.stderr
+    if "unchanged:" not in rerun_output or "preserved append-only:" not in rerun_output or "conflicts:" in rerun_output:
+        print("idempotent dry run did not report stable unchanged/preserved state", file=sys.stderr)
+        print(rerun_output, file=sys.stderr)
+        raise SystemExit(1)
 
 
 def assert_task_board_guards(init_script: Path, temp_root: Path, python: str) -> None:
@@ -181,6 +251,21 @@ def assert_task_board_guards(init_script: Path, temp_root: Path, python: str) ->
         print("agent_task.py did not reject an invalid current_stage", file=sys.stderr)
         print(bad_stage.stdout + bad_stage.stderr, file=sys.stderr)
         raise SystemExit(1)
+    run(
+        [
+            python,
+            "scripts/agent_task.py",
+            "update",
+            "guard-task",
+            "--requirements-status",
+            "complete",
+            "--shared-understanding",
+            "Guard task scope is understood.",
+            "--domain-glossary-updated",
+            "--code-docs-cross-checked",
+        ],
+        cwd=guarded,
+    )
     done_without_conclusion = run([python, "scripts/agent_task.py", "update", "guard-task", "--state", "done"], cwd=guarded, expect_ok=False)
     if "conclusion" not in (done_without_conclusion.stdout + done_without_conclusion.stderr):
         print("agent_task.py did not reject done without delivery_conclusion", file=sys.stderr)
@@ -219,6 +304,12 @@ def assert_task_board_guards(init_script: Path, temp_root: Path, python: str) ->
             "--review-path",
             "docs/features/guard-task/05_CODE_REVIEW.md",
             "--clear-open-findings",
+            "--requirements-status",
+            "complete",
+            "--shared-understanding",
+            "Guard task scope is understood.",
+            "--domain-glossary-updated",
+            "--code-docs-cross-checked",
         ],
         cwd=guarded,
     )
@@ -271,6 +362,14 @@ def assert_task_board_guards(init_script: Path, temp_root: Path, python: str) ->
     done_board = json.loads(done_board_path.read_text(encoding="utf-8"))
     done_board["items"][0]["state"] = "done"
     done_board["items"][0]["delivery_conclusion"] = ""
+    done_board["items"][0]["requirements"] = {
+        "required": True,
+        "status": "complete",
+        "shared_understanding": "Done guard task scope is understood.",
+        "domain_glossary_updated": True,
+        "code_docs_cross_checked": True,
+        "open_questions": [],
+    }
     done_board_path.write_text(json.dumps(done_board, indent=2) + "\n", encoding="utf-8")
     done_outputs = [
         run([python, "scripts/agent_task.py", "doctor"], cwd=guarded_done, expect_ok=False),
@@ -315,6 +414,14 @@ def assert_task_board_guards(init_script: Path, temp_root: Path, python: str) ->
     review_board = json.loads(review_board_path.read_text(encoding="utf-8"))
     review_board["items"][0]["state"] = "done"
     review_board["items"][0]["delivery_conclusion"] = "Implemented and validated."
+    review_board["items"][0]["requirements"] = {
+        "required": True,
+        "status": "complete",
+        "shared_understanding": "Review guard task scope is understood.",
+        "domain_glossary_updated": True,
+        "code_docs_cross_checked": True,
+        "open_questions": [],
+    }
     review_board["items"][0]["review_gate"]["status"] = "needs-fix"
     review_board["items"][0]["review_gate"]["latest_review"] = "docs/features/review-task/05_CODE_REVIEW.md"
     review_board["items"][0]["review_gate"]["open_findings"] = ["major: missing regression coverage"]
@@ -377,6 +484,7 @@ def main() -> int:
             ".agent/mechanical-checks.json": "agent-mechanical-checks-v1",
             ".agent/baselines.json": "agent-baselines-v1",
             ".agent/dev-map.json": "agent-dev-map-v1",
+            ".agent/skill-hygiene.json": "agent-skill-hygiene-v1",
             ".agent/harness-evolution.json": "agent-harness-evolution-v1",
             ".agent/mcp-policy.json": "agent-mcp-policy-v1",
             ".agent/governance-gc.json": "agent-governance-gc-v1",
@@ -395,6 +503,9 @@ def main() -> int:
         if not (target / "docs" / "AI_CODING_GLOSSARY.md").exists():
             print("docs/AI_CODING_GLOSSARY.md was not created", file=sys.stderr)
             return 1
+        if not (target / "docs" / "DOMAIN_GLOSSARY.md").exists():
+            print("docs/DOMAIN_GLOSSARY.md was not created", file=sys.stderr)
+            return 1
         if not (target / "docs" / "features" / "INDEX.md").exists():
             print("docs/features/INDEX.md was not created", file=sys.stderr)
             return 1
@@ -407,6 +518,11 @@ def main() -> int:
         run([python, "scripts/agent_check.py"], cwd=target)
         run([python, "scripts/agent_migrate.py", "doctor"], cwd=target)
         run([python, "scripts/agent_gc.py", "doctor", "--fail-on-warning"], cwd=target)
+        run([python, "scripts/agent_skill_hygiene.py", "doctor"], cwd=target)
+        hygiene_report = json.loads(run([python, "scripts/agent_skill_hygiene.py", "report", "--json"], cwd=target).stdout)
+        if hygiene_report.get("schema") != "agent-skill-hygiene-report-v1":
+            print("agent_skill_hygiene.py did not produce the expected report schema", file=sys.stderr)
+            return 1
         gc_report = json.loads(run([python, "scripts/agent_gc.py", "report", "--json"], cwd=target).stdout)
         if gc_report.get("schema") != "agent-governance-gc-report-v1" or gc_report.get("status") != "pass":
             print("agent_gc.py did not produce a clean governance report", file=sys.stderr)
@@ -432,6 +548,27 @@ def main() -> int:
         if not (target / "docs" / "features" / "regression-task" / "01_REQUIREMENT_ANALYSIS.md").exists():
             print("feature stage documents were not created", file=sys.stderr)
             return 1
+        requirement_gate = run([python, "scripts/agent_task.py", "update", "regression-task", "--stage", "plan"], cwd=target, expect_ok=False)
+        if "requirements" not in (requirement_gate.stdout + requirement_gate.stderr):
+            print("agent_task.py did not enforce the requirements interview gate", file=sys.stderr)
+            print(requirement_gate.stdout + requirement_gate.stderr, file=sys.stderr)
+            return 1
+        run(
+            [
+                python,
+                "scripts/agent_task.py",
+                "update",
+                "regression-task",
+                "--requirements-status",
+                "complete",
+                "--shared-understanding",
+                "Regression task scope is understood.",
+                "--domain-glossary-updated",
+                "--code-docs-cross-checked",
+            ],
+            cwd=target,
+        )
+        run([python, "scripts/agent_task.py", "update", "regression-task", "--stage", "plan"], cwd=target)
         run([python, "scripts/agent_verify.py", "doctor"], cwd=target)
         run([python, "scripts/agent_verify.py", "snapshot", "--name", "before-regression", "--fail-on-issue"], cwd=target)
         run([python, "scripts/agent_verify.py", "snapshot", "--name", "after-regression", "--fail-on-issue"], cwd=target)
@@ -506,7 +643,7 @@ def main() -> int:
             return 1
         run([python, "scripts/agent_score.py", "doctor"], cwd=target)
         score_report = json.loads(run([python, "scripts/agent_score.py", "score", "--json"], cwd=target).stdout)
-        for dimension in ("dev_map", "harness_evolution", "mcp_policy", "governance_gc"):
+        for dimension in ("dev_map", "skill_hygiene", "harness_evolution", "mcp_policy", "governance_gc"):
             if dimension not in score_report.get("dimensions", {}):
                 print(f"agent_score.py did not include {dimension}", file=sys.stderr)
                 return 1
@@ -631,6 +768,7 @@ def main() -> int:
             print(escape_result.stdout, file=sys.stderr)
             print(escape_result.stderr, file=sys.stderr)
             return 1
+        assert_existing_project_adoption(INIT_SCRIPT, temp_root, python)
 
         for profile in ("core", "standard"):
             profiled = temp_root / f"profile-{profile}"
@@ -668,6 +806,7 @@ def main() -> int:
                     print("core profile unexpectedly generated agent_verify.py", file=sys.stderr)
                     return 1
             else:
+                run([python, "scripts/agent_skill_hygiene.py", "doctor"], cwd=profiled)
                 run([python, "scripts/agent_verify.py", "doctor"], cwd=profiled)
                 run([python, "scripts/agent_gc.py", "doctor", "--fail-on-warning"], cwd=profiled)
                 mcp_path = profiled / ".agent" / "mcp-policy.json"
@@ -678,8 +817,19 @@ def main() -> int:
                 if mcp_policy.get("mode") != "optional-disabled-by-default":
                     print("standard profile MCP policy was not disabled by default", file=sys.stderr)
                     return 1
+                for key in ("credentials_must_use_vault_or_proxy", "sandbox_must_not_receive_raw_credentials"):
+                    if mcp_policy.get("policy", {}).get(key) is not True:
+                        print(f"standard profile MCP policy missing {key}", file=sys.stderr)
+                        return 1
+                for boundary in ("credential_vault", "credential_proxy"):
+                    if boundary not in mcp_policy.get("trust_boundaries", {}):
+                        print(f"standard profile MCP policy missing {boundary}", file=sys.stderr)
+                        return 1
                 if "mcp_policy" not in score.get("dimensions", {}):
                     print("standard profile score did not include mcp_policy", file=sys.stderr)
+                    return 1
+                if "skill_hygiene" not in score.get("dimensions", {}):
+                    print("standard profile score did not include skill_hygiene", file=sys.stderr)
                     return 1
         assert_task_board_guards(INIT_SCRIPT, temp_root, python)
     finally:

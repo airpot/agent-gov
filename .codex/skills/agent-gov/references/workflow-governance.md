@@ -10,6 +10,7 @@ Borrow these practices from mature agent workflow projects:
 - Get design or specification approval before implementation for non-trivial changes.
 - Convert approved specs into executable plans with exact files, commands, expected results, and no placeholders.
 - Surface assumptions, ambiguity, and tradeoffs before implementation when a request has multiple plausible meanings.
+- Run a requirements interview for non-tiny work: one unresolved question at a time, recommended answer plus rationale, shared-understanding confirmation, domain glossary updates, and code/docs cross-checks before design or implementation.
 - Prefer simple direct code, and justify new abstractions or speculative flexibility before adding them.
 - Keep diffs surgical: every changed line should trace to the request, approved spec, or local cleanup caused by the change.
 - Classify task risk and autonomy before implementation; stop and re-plan when the risk level increases.
@@ -63,6 +64,7 @@ Do not adopt these as absolute project rules:
       validation.md
       handoff.md
 docs/
+  DOMAIN_GLOSSARY.md
   features/
     INDEX.md
 ```
@@ -82,7 +84,15 @@ Escalate the profile when task risk increases. Do not force a full flow for tiny
 
 ## Task Board And Feature Docs
 
-Use `.agent/task-board.json` for durable task state across sessions. It records task id, title, state, risk, profile, current stage, docs path, delivery conclusion, review gate status, and related tasks. Use `scripts/agent_task.py new` to create a task and scaffold `docs/features/<task-id>/` from the profile-specific stage templates.
+Use `.agent/task-board.json` for durable task state across sessions. It records task id, title, state, risk, profile, current stage, docs path, requirements status, delivery conclusion, review gate status, and related tasks. Use `scripts/agent_task.py new` to create a task and scaffold `docs/features/<task-id>/` from the profile-specific stage templates.
+
+For `bugfix`, `standard`, and `full` tasks, the requirements interview gate must be complete before protected stages such as `plan`, `implementation`, review, verification, handoff, or done state. Completion means:
+
+- `requirements.status=complete`
+- shared understanding is recorded
+- code/docs cross-check was performed
+- `docs/DOMAIN_GLOSSARY.md` was updated or explicitly confirmed current
+- `docs/features/<task-id>/01_REQUIREMENT_ANALYSIS.md` exists
 
 For `standard` and `full` tasks, `state=done` requires a passing review gate:
 
@@ -98,15 +108,16 @@ The task board is not a casual TODO list. It is the project-local source for cur
 Use these stages for substantial work:
 
 1. `intake`: understand request, repository state, active session, and constraints.
-2. `spec`: create or continue the embedded spec change, RFC, or documented approval.
-3. `plan`: write an implementation plan with exact files, commands, and expected results.
-4. `isolation`: choose branch/worktree, verify ignore rules when project-local, and capture baseline validation.
-5. `implementation`: execute task by task with simple direct code, surgical diffs, and preferably TDD for behavior changes.
-6. `spec_review`: verify the implementation matches the requested spec and does not add unrequested behavior.
-7. `quality_review`: verify maintainability, tests, security, performance, and project conventions.
-8. `verification`: run fresh validation commands and record output summaries.
-9. `handoff`: checkpoint session state, runlog ids, accepted subagent snapshots, and remaining risks.
-10. `finish`: merge, create PR, keep branch, or discard only after the user chooses.
+2. `requirement_interview`: resolve key ambiguities one question at a time, record shared understanding, update domain glossary terms, and cross-check important claims against current code/docs.
+3. `spec`: create or continue the embedded spec change, RFC, or documented approval.
+4. `plan`: write an implementation plan with exact files, commands, and expected results.
+5. `isolation`: choose branch/worktree, verify ignore rules when project-local, and capture baseline validation.
+6. `implementation`: execute task by task with simple direct code, surgical diffs, and preferably TDD for behavior changes.
+7. `spec_review`: verify the implementation matches the requested spec and does not add unrequested behavior.
+8. `quality_review`: verify maintainability, tests, security, performance, and project conventions.
+9. `verification`: run fresh validation commands and record output summaries.
+10. `handoff`: checkpoint session state, runlog ids, accepted subagent snapshots, and remaining risks.
+11. `finish`: merge, create PR, keep branch, or discard only after the user chooses.
 
 ## Plan Quality
 

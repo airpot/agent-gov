@@ -49,6 +49,7 @@ SCHEMA_JSON_FILES = {
     ".agent/hooks.json": "agent-hooks-v1",
     ".agent/knowledge.json": "agent-knowledge-v1",
     ".agent/dev-map.json": "agent-dev-map-v1",
+    ".agent/skill-hygiene.json": "agent-skill-hygiene-v1",
     ".agent/memory.json": "agent-memory-v1",
     ".agent/context.json": "agent-context-budget-v1",
     ".agent/capabilities.json": "agent-capabilities-v1",
@@ -69,6 +70,7 @@ JSON_FILES_WITHOUT_SCHEMA = [
 ]
 JSONL_FILES = [
     ".agent/runlog.jsonl",
+    ".agent/sessions/events.jsonl",
     ".agent/memory/events.jsonl",
     ".agent/context/stats.jsonl",
 ]
@@ -81,6 +83,7 @@ CRITICAL_JSON_FILES = {
     ".agent/role-contracts.json",
     ".agent/mechanical-checks.json",
     ".agent/dev-map.json",
+    ".agent/skill-hygiene.json",
     ".agent/harness-evolution.json",
     ".agent/mcp-policy.json",
     ".agent/governance-gc.json",
@@ -97,6 +100,7 @@ DEFAULT_DIMENSION_WEIGHTS = {
     "role_contracts": 8,
     "mechanical_verification": 10,
     "dev_map": 6,
+    "skill_hygiene": 6,
     "harness_evolution": 6,
     "mcp_policy": 4,
     "governance_gc": 6,
@@ -113,6 +117,19 @@ DEFAULT_DIMENSION_WEIGHTS = {
 }
 HARD_FAIL_DIMENSIONS = {"project_integrity", "required_paths", "workflow_profiles", "task_board", "mechanical_verification", "governance_gc"}
 REVIEW_STATUSES = {"pending", "needs-fix", "pass", "accepted-with-exceptions", "not-required"}
+REQUIREMENT_STATUSES = {"pending", "in-progress", "complete", "blocked", "not-required"}
+REQUIREMENT_PROTECTED_STAGES = {
+    "plan",
+    "gate_review",
+    "isolation",
+    "implementation",
+    "spec_review",
+    "quality_review",
+    "human_review",
+    "verification",
+    "handoff",
+    "finish",
+}
 
 
 def utc_now() -> str:
@@ -363,6 +380,10 @@ def score_workflow_profiles() -> dict:
         findings.append("standard profile should require durable feature docs")
     if len(full_docs) < 7:
         findings.append("full profile should require all seven stage docs")
+    gate = workflow.get("gates", {}).get("requirements_interview", {})
+    for key in ("ask_one_question_at_a_time", "provide_recommended_answer_and_reason", "cross_check_user_claims_against_code_and_docs", "update_domain_glossary_for_new_or_ambiguous_terms"):
+        if gate.get(key) is not True:
+            findings.append(f"requirements_interview gate missing {key}")
     if configured.get("standard", {}).get("review_gate_required") is not True:
         findings.append("standard profile must require review gate")
     if configured.get("full", {}).get("review_gate_required") is not True:
@@ -417,13 +438,60 @@ def review_gate_findings(task_id: str, item: dict, profile: dict, policy: dict) 
     return findings
 
 
+def normalized_requirements(item: dict) -> dict:
+    profile_name = str(item.get("profile", "standard"))
+    requirements = item.get("requirements")
+    if not isinstance(requirements, dict):
+        requirements = {}
+    required = profile_name != "tiny"
+    merged = {
+        "required": required,
+        "status": "pending" if required else "not-required",
+        "shared_understanding": "",
+        "domain_glossary_updated": False,
+        "code_docs_cross_checked": False,
+        "open_questions": [],
+    }
+    merged.update(requirements)
+    merged["required"] = bool(required or merged.get("required") is True)
+    if not isinstance(merged.get("open_questions"), list):
+        merged["open_questions"] = [str(merged.get("open_questions"))]
+    return merged
+
+
+def requirement_findings(task_id: str, item: dict, profile: dict, policy: dict) -> list[str]:
+    findings: list[str] = []
+    requirements = normalized_requirements(item)
+    if requirements.get("status") not in REQUIREMENT_STATUSES:
+        findings.append(f"{task_id} requirements invalid status: {requirements.get('status')}")
+    if not requirements.get("required"):
+        return findings
+    protected = set(profile.get("requirement_protected_stages", [])) or REQUIREMENT_PROTECTED_STAGES
+    state_done = item.get("state") == "done" and policy.get("requirements_complete_before_done") is True
+    stage_protected = item.get("current_stage") in protected and policy.get("requirements_complete_before_protected_stages") is True
+    if not state_done and not stage_protected:
+        return findings
+    if requirements.get("status") != "complete":
+        findings.append(f"{task_id} requirements must be complete before {item.get('current_stage') or item.get('state')}")
+    if not str(requirements.get("shared_understanding", "")).strip():
+        findings.append(f"{task_id} requirements missing shared_understanding")
+    if requirements.get("domain_glossary_updated") is not True:
+        findings.append(f"{task_id} requirements must confirm domain_glossary_updated")
+    if requirements.get("code_docs_cross_checked") is not True:
+        findings.append(f"{task_id} requirements must confirm code_docs_cross_checked")
+    docs_path = item.get("docs_path")
+    if docs_path and not (Path(docs_path) / "01_REQUIREMENT_ANALYSIS.md").exists():
+        findings.append(f"{task_id} missing requirement analysis document")
+    return findings
+
+
 def score_task_board() -> dict:
     board = load_json(Path(".agent/task-board.json"))
     profiles = load_json(Path(".agent/workflow-profiles.json"))
     findings: list[str] = []
     if board.get("schema") != "agent-task-board-v1":
         findings.append("invalid task-board schema")
-    for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path", "delivery_conclusion", "review_gate", "related_tasks"):
+    for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path", "requirements", "delivery_conclusion", "review_gate", "related_tasks"):
         if field not in board.get("required_fields", []):
             findings.append(f"task board missing required field declaration: {field}")
     policy = board.get("policy", {})
@@ -460,6 +528,7 @@ def score_task_board() -> dict:
         if item.get("state") == "done" and policy.get("done_requires_delivery_conclusion") is True:
             if not str(item.get("delivery_conclusion", "")).strip():
                 findings.append(f"{task_id} is done without delivery_conclusion")
+        findings.extend(requirement_findings(task_id, item, profile, policy))
         findings.extend(review_gate_findings(task_id, item, profile, policy))
         docs_path = item.get("docs_path")
         if profile.get("feature_doc_templates") and (not docs_path or not Path(docs_path).exists()):
@@ -517,6 +586,7 @@ def score_mechanical_verification() -> dict:
         "task_board",
         "role_contracts",
         "manifest",
+        "skill_hygiene",
         "mcp_policy",
         "template_rendering",
         "test_baseline",
@@ -599,6 +669,38 @@ def score_dev_map() -> dict:
     return dimension("dev_map", score, findings, [f"{len(areas)} area(s)"])
 
 
+def score_skill_hygiene() -> dict:
+    hygiene = load_json(Path(".agent/skill-hygiene.json"))
+    findings: list[str] = []
+    if hygiene.get("schema") != "agent-skill-hygiene-v1":
+        findings.append("invalid skill-hygiene schema")
+    policy = hygiene.get("policy", {})
+    for key in ("doctor_is_read_only", "scripts_collect_facts_ai_interprets", "human_confirms_cleanup", "no_auto_delete"):
+        if policy.get(key) is not True:
+            findings.append(f"skill hygiene policy missing {key}")
+    if hygiene.get("canary", {}).get("enabled") is not False:
+        findings.append("activation canary must be disabled by default")
+    if not Path("scripts/agent_skill_hygiene.py").exists():
+        findings.append("missing scripts/agent_skill_hygiene.py")
+    report, error = run_json_command([sys.executable, "scripts/agent_skill_hygiene.py", "report", "--json"])
+    errors = 0
+    warnings = 0
+    skills = 0
+    if error:
+        findings.append(f"agent_skill_hygiene report unavailable: {error}")
+        errors += 1
+    else:
+        counts = report.get("counts", {})
+        errors = int(counts.get("errors", 0))
+        warnings = int(counts.get("warnings", 0))
+        skills = int(counts.get("skills", 0))
+        for item in report.get("findings", [])[:10]:
+            path = f" ({item.get('path')})" if item.get("path") else ""
+            findings.append(f"{item.get('severity')}: {item.get('kind')}: {item.get('summary')}{path}")
+    score = 100 - min(90, len(findings) * 8) - min(90, errors * 35) - min(50, warnings * 5)
+    return dimension("skill_hygiene", score, findings, [f"{skills} skill(s)", f"{errors} error(s)", f"{warnings} warning(s)"])
+
+
 def score_harness_evolution() -> dict:
     evolution = load_json(Path(".agent/harness-evolution.json"))
     findings: list[str] = []
@@ -630,11 +732,18 @@ def score_mcp_policy() -> dict:
     if policy.get("schema") != "agent-mcp-policy-v1":
         findings.append("invalid MCP policy schema")
     rules = policy.get("policy", {})
-    for key in ("credentials_must_not_be_stored_in_repo", "destructive_or_release_operations_need_human_approval", "record_high_risk_mcp_use_in_runlog"):
+    for key in (
+        "credentials_must_not_be_stored_in_repo",
+        "credentials_must_use_vault_or_proxy",
+        "sandbox_must_not_receive_raw_credentials",
+        "credential_rotation_and_audit_required",
+        "destructive_or_release_operations_need_human_approval",
+        "record_high_risk_mcp_use_in_runlog",
+    ):
         if rules.get(key) is not True:
             findings.append(f"MCP policy missing {key}")
     boundaries = policy.get("trust_boundaries", {})
-    for key in ("repo_local", "external_read", "external_write", "release_or_signing"):
+    for key in ("repo_local", "external_read", "external_write", "credential_vault", "credential_proxy", "release_or_signing"):
         if key not in boundaries:
             findings.append(f"MCP policy missing trust boundary: {key}")
     if policy.get("mode") != "optional-disabled-by-default" and not policy.get("servers"):
@@ -837,6 +946,7 @@ def score_context_budget() -> dict:
 def score_session_continuity() -> dict:
     required = [
         ".agent/sessions/index.json",
+        ".agent/sessions/events.jsonl",
         ".agent/sessions/active.md",
         ".agent/sessions/bootstrap.md",
         ".agent/tools/agent_session.py",
@@ -847,6 +957,12 @@ def score_session_continuity() -> dict:
     index = load_json(Path(".agent/sessions/index.json"), {})
     evidence = [f"{len(existing)}/{len(required)} session paths exist"]
     evidence.append(f"active_session={index.get('active_session') or 'none'}")
+    events = iter_jsonl(Path(".agent/sessions/events.jsonl"))
+    invalid = [item for item in events if item.get("schema") not in {"agent-session-event-v1"}]
+    if invalid:
+        findings.append(f"{len(invalid)} invalid session event(s)")
+        score = max(0, score - min(80, len(invalid) * 20))
+    evidence.append(f"{len(events)} session event(s)")
     return dimension("session_continuity", score, findings, evidence)
 
 
@@ -947,6 +1063,10 @@ def score_security() -> dict:
     security = load_json(Path(".agent/security.json"))
     suites = security.get("suites", {})
     findings: list[str] = []
+    policy = security.get("policy", {})
+    for key in ("raw_credentials_stay_outside_repo_harness_and_sandbox", "external_secret_use_requires_vault_or_proxy_boundary"):
+        if policy.get(key) is not True:
+            findings.append(f"security policy missing {key}")
     for name in ("policy_as_code", "secret_scan", "dependency_audit", "sbom", "license_scan"):
         if name not in suites:
             findings.append(f"missing suite: {name}")
@@ -1023,6 +1143,7 @@ def collect_scores(extra_runlog_events: int = 0) -> dict:
         "role_contracts": score_role_contracts,
         "mechanical_verification": score_mechanical_verification,
         "dev_map": score_dev_map,
+        "skill_hygiene": score_skill_hygiene,
         "harness_evolution": score_harness_evolution,
         "mcp_policy": score_mcp_policy,
         "governance_gc": score_governance_gc,

@@ -16,6 +16,19 @@ CONFIG_PATH = Path(".agent/mechanical-checks.json")
 BASELINES_PATH = Path(".agent/baselines.json")
 MARKDOWN_LINK_RE = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
 REVIEW_STATUSES = {"pending", "needs-fix", "pass", "accepted-with-exceptions", "not-required"}
+REQUIREMENT_STATUSES = {"pending", "in-progress", "complete", "blocked", "not-required"}
+REQUIREMENT_PROTECTED_STAGES = {
+    "plan",
+    "gate_review",
+    "isolation",
+    "implementation",
+    "spec_review",
+    "quality_review",
+    "human_review",
+    "verification",
+    "handoff",
+    "finish",
+}
 
 
 def utc_now() -> str:
@@ -113,6 +126,53 @@ def normalized_review_gate(item: dict, profile: dict, policy: dict) -> dict:
     return merged
 
 
+def normalized_requirements(item: dict) -> dict:
+    profile_name = str(item.get("profile", "standard"))
+    requirements = item.get("requirements")
+    if not isinstance(requirements, dict):
+        requirements = {}
+    required = profile_name != "tiny"
+    merged = {
+        "required": required,
+        "status": "pending" if required else "not-required",
+        "shared_understanding": "",
+        "domain_glossary_updated": False,
+        "code_docs_cross_checked": False,
+        "open_questions": [],
+    }
+    merged.update(requirements)
+    merged["required"] = bool(required or merged.get("required") is True)
+    if not isinstance(merged.get("open_questions"), list):
+        merged["open_questions"] = [str(merged.get("open_questions"))]
+    return merged
+
+
+def requirements_errors(task_id: str, item: dict, profile: dict, policy: dict) -> list[str]:
+    errors: list[str] = []
+    requirements = normalized_requirements(item)
+    if requirements.get("status") not in REQUIREMENT_STATUSES:
+        errors.append(f"{task_id} requirements invalid status: {requirements.get('status')}")
+    if not requirements.get("required"):
+        return errors
+    protected = set(profile.get("requirement_protected_stages", [])) or REQUIREMENT_PROTECTED_STAGES
+    state_done = item.get("state") == "done" and policy.get("requirements_complete_before_done") is True
+    stage_protected = item.get("current_stage") in protected and policy.get("requirements_complete_before_protected_stages") is True
+    if not state_done and not stage_protected:
+        return errors
+    if requirements.get("status") != "complete":
+        errors.append(f"{task_id} requirements must be complete before {item.get('current_stage') or item.get('state')}")
+    if not str(requirements.get("shared_understanding", "")).strip():
+        errors.append(f"{task_id} requirements missing shared_understanding")
+    if requirements.get("domain_glossary_updated") is not True:
+        errors.append(f"{task_id} requirements must confirm domain_glossary_updated")
+    if requirements.get("code_docs_cross_checked") is not True:
+        errors.append(f"{task_id} requirements must confirm code_docs_cross_checked")
+    docs_path = item.get("docs_path")
+    if docs_path and not (Path(docs_path) / "01_REQUIREMENT_ANALYSIS.md").exists():
+        errors.append(f"{task_id} missing requirement analysis document")
+    return errors
+
+
 def review_gate_errors(task_id: str, item: dict, profile: dict, policy: dict) -> list[str]:
     errors: list[str] = []
     gate = normalized_review_gate(item, profile, policy)
@@ -144,7 +204,7 @@ def check_task_board() -> list[str]:
     states = set(board.get("states", []))
     profile_names = set(profiles.get("profiles", {}))
     policy = board.get("policy", {})
-    for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path", "review_gate"):
+    for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path", "requirements", "review_gate"):
         if field not in required_fields:
             errors.append(f"task board missing required field declaration: {field}")
     if set(policy.get("done_requires_review_gate_pass_for_profiles", [])) != {"standard", "full"}:
@@ -172,6 +232,7 @@ def check_task_board() -> list[str]:
         if item.get("state") == "done" and policy.get("done_requires_delivery_conclusion") is True:
             if not str(item.get("delivery_conclusion", "")).strip():
                 errors.append(f"{task_id} done without delivery_conclusion")
+        errors.extend(requirements_errors(task_id, item, profile, policy))
         errors.extend(review_gate_errors(task_id, item, profile, policy))
         docs_path = item.get("docs_path")
         if profile.get("feature_doc_templates") and (not docs_path or not Path(docs_path).exists()):
@@ -210,6 +271,7 @@ def check_governance_configs(config: dict) -> list[str]:
         in {
             ".agent/manifest.json",
             ".agent/dev-map.json",
+            ".agent/skill-hygiene.json",
             ".agent/harness-evolution.json",
             ".agent/mcp-policy.json",
             ".agent/governance-gc.json",
@@ -230,6 +292,10 @@ def check_governance_configs(config: dict) -> list[str]:
     profiles = load_json(Path(".agent/workflow-profiles.json"), {})
     workflow_stages = set(workflow.get("stages", []))
     review_fix = workflow.get("gates", {}).get("review_fix_gate", {})
+    requirements_gate = workflow.get("gates", {}).get("requirements_interview", {})
+    for key in ("ask_one_question_at_a_time", "provide_recommended_answer_and_reason", "cross_check_user_claims_against_code_and_docs", "update_domain_glossary_for_new_or_ambiguous_terms"):
+        if requirements_gate.get(key) is not True:
+            errors.append(f"workflow requirements_interview missing {key}")
     if review_fix.get("latest_review_status_must_be") != "pass":
         errors.append("workflow review_fix_gate must require latest review status pass")
     if review_fix.get("open_findings_must_be_empty") is not True:
@@ -243,6 +309,17 @@ def check_governance_configs(config: dict) -> list[str]:
                     errors.append(f"workflow profile {name} references unknown stage: {stage}")
     if check_enabled(config, "dev_map") and not Path("docs/DEV_MAP.md").exists():
         errors.append("docs/DEV_MAP.md is missing")
+    if check_enabled(config, "skill_hygiene"):
+        hygiene_path = Path(config.get("checks", {}).get("skill_hygiene", {}).get("path", ".agent/skill-hygiene.json"))
+        hygiene = load_json(hygiene_path, {})
+        if hygiene.get("schema") != "agent-skill-hygiene-v1":
+            errors.append(f"{hygiene_path} schema must be agent-skill-hygiene-v1")
+        policy = hygiene.get("policy", {})
+        for key in ("doctor_is_read_only", "human_confirms_cleanup", "no_auto_delete"):
+            if policy.get(key) is not True:
+                errors.append(f"{hygiene_path} missing policy: {key}")
+        if hygiene.get("canary", {}).get("enabled") is not False:
+            errors.append(f"{hygiene_path} canary must be disabled by default")
     if check_enabled(config, "mcp_policy"):
         mcp_path = Path(config.get("checks", {}).get("mcp_policy", {}).get("path", ".agent/mcp-policy.json"))
         mcp = load_json(mcp_path, {})
@@ -251,9 +328,19 @@ def check_governance_configs(config: dict) -> list[str]:
         if mcp.get("mode") != "optional-disabled-by-default" and not mcp.get("servers"):
             errors.append(f"{mcp_path} must stay disabled by default or define audited servers")
         rules = mcp.get("policy", {})
-        for key in ("credentials_must_not_be_stored_in_repo", "destructive_or_release_operations_need_human_approval", "record_high_risk_mcp_use_in_runlog"):
+        for key in (
+            "credentials_must_not_be_stored_in_repo",
+            "credentials_must_use_vault_or_proxy",
+            "sandbox_must_not_receive_raw_credentials",
+            "credential_rotation_and_audit_required",
+            "destructive_or_release_operations_need_human_approval",
+            "record_high_risk_mcp_use_in_runlog",
+        ):
             if rules.get(key) is not True:
                 errors.append(f"{mcp_path} missing policy: {key}")
+        for boundary in ("credential_vault", "credential_proxy"):
+            if boundary not in mcp.get("trust_boundaries", {}):
+                errors.append(f"{mcp_path} missing trust boundary: {boundary}")
     return errors
 
 

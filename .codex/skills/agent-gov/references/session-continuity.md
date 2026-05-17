@@ -19,6 +19,7 @@ Long-term memory is a retrieval aid layered on top of durable project files. It 
 ```text
 .agent/sessions/
   index.json
+  events.jsonl
   active.md
   <session-id>/
     session.md
@@ -55,6 +56,7 @@ docs/DEV_MAP.md
 
 1. **start**
    - Create a session directory.
+   - Append a `started` event to `.agent/sessions/events.jsonl`.
    - Record goal, remote workspace path, git branch, git commit, embedded spec change, and client surface.
    - Record current workflow stage, base branch, and worktree path when isolated work is used.
 
@@ -66,6 +68,7 @@ docs/DEV_MAP.md
    - If subagents were used, record accepted snapshots, rejected snapshots, integration decisions, and follow-up validation.
    - Capture a concise memory record when the checkpoint changes future behavior or saves rediscovery work; repeated identical session ingests should dedupe by session/reason/content hash.
    - Ensure validation and session lifecycle evidence is present in `.agent/runlog.jsonl`.
+   - Append a `checkpoint` event to `.agent/sessions/events.jsonl` with concise summary, changed files, validation, and next-step payload.
 
 3. **pre-compact**
    - Summarize task state into files before the session becomes too large.
@@ -78,6 +81,7 @@ docs/DEV_MAP.md
 
 4. **rollover**
    - Start a new Codex session with `bootstrap.md` or `resume-prompt.md`.
+   - Read recent append-only session events with `python3 .agent/tools/agent_session.py events --limit 10` when handoff state is unclear.
    - Use progressive memory retrieval: `timeline` first, `search` second, `detail` only for selected records.
    - Use runlog retrieval: `tail` first, then `summary` when validation or session evidence is unclear.
    - Confirm `git status`, embedded spec state, and validation status before editing.
@@ -120,6 +124,7 @@ Use these commands instead of manually stitching session files together:
 python3 .agent/tools/agent_session.py bootstrap
 python3 .agent/tools/agent_session.py compact --summary "..." --next "..."
 python3 .agent/tools/agent_session.py doctor
+python3 .agent/tools/agent_session.py events --limit 10
 python3 .agent/tools/agent_memory.py doctor
 python3 .agent/tools/agent_context.py doctor
 python3 .agent/tools/agent_memory.py search "<query>"
@@ -132,6 +137,7 @@ python3 .agent/tools/governance_hook.py --event session-start
 
 - `bootstrap` prints and refreshes the active session startup packet.
 - `compact` refreshes `handoff.md`, `resume-prompt.md`, and `bootstrap.md`.
+- `events` reads the append-only session event stream. It is the session lifecycle event source; markdown files remain the human-readable handoff layer.
 - `doctor` checks the active session files, validation notes, and dirty worktree continuity.
 - `agent_memory.py` provides cross-session timeline/search/detail over concise summaries, decisions, validations, and handoffs. Its `doctor` command is read-only by default; use `init`, `ingest-session`, or `doctor --write` when refreshing stores is intended.
 - `agent_context.py` keeps governance docs, bootstraps, memory digests, embedded spec change docs, and subagent outputs within measured budgets. Its `doctor` command is read-only by default; use `scan` or `doctor --write` when refreshing the latest digest is intended.

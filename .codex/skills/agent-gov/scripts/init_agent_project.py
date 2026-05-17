@@ -54,10 +54,31 @@ STACK_COMMANDS = {
         "lint": ["cargo clippy --all-targets --all-features"],
     },
 }
+APPEND_ONLY_PATHS = {
+    ".agent/runlog.jsonl",
+    ".agent/sessions/events.jsonl",
+    ".agent/memory/events.jsonl",
+    ".agent/context/stats.jsonl",
+}
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def existing_created_at(root: Path) -> str | None:
+    for relative in (".agent/config.json", ".agent/manifest.json", ".agent/harness.json"):
+        path = root / relative
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        created_at = data.get("created_at")
+        if isinstance(created_at, str) and created_at.strip():
+            return created_at
+    return None
 
 
 def skill_dir() -> Path:
@@ -139,6 +160,7 @@ def config_path_pointers(governance_profile: str, openspec_enabled: bool, claude
                 "task_board": ".agent/task-board.json",
                 "knowledge_manifest": ".agent/knowledge.json",
                 "dev_map": ".agent/dev-map.json",
+                "skill_hygiene": ".agent/skill-hygiene.json",
                 "memory_config": ".agent/memory.json",
                 "context_config": ".agent/context.json",
                 "capabilities_config": ".agent/capabilities.json",
@@ -203,6 +225,7 @@ def harness_config(
         ".agent/evals/latest.md",
         ".agent/runlog.jsonl",
         ".agent/sessions/index.json",
+        ".agent/sessions/events.jsonl",
         ".agent/sessions/active.md",
         ".agent/sessions/bootstrap.md",
         ".agent/tools/agent_session.py",
@@ -240,6 +263,7 @@ def harness_config(
                 ".agent/task-board.json",
                 ".agent/knowledge.json",
                 ".agent/dev-map.json",
+                ".agent/skill-hygiene.json",
                 ".agent/memory.json",
                 ".agent/context.json",
                 ".agent/capabilities.json",
@@ -277,6 +301,7 @@ def harness_config(
                 "scripts/agent_knowledge.py",
                 "scripts/agent_invariants.py",
                 "scripts/agent_capabilities.py",
+                "scripts/agent_skill_hygiene.py",
                 "scripts/agent_task.py",
                 "scripts/agent_verify.py",
                 "scripts/agent_gc.py",
@@ -284,6 +309,7 @@ def harness_config(
                 "docs/RELIABILITY.md",
                 "docs/QUALITY_SCORE.md",
                 "docs/AI_CODING_GLOSSARY.md",
+                "docs/DOMAIN_GLOSSARY.md",
                 "docs/DEV_MAP.md",
                 "docs/features/INDEX.md",
                 "docs/features/.gitkeep",
@@ -364,6 +390,7 @@ def harness_config(
                 "docs/RELIABILITY.md",
                 "docs/QUALITY_SCORE.md",
                 "docs/AI_CODING_GLOSSARY.md",
+                "docs/DOMAIN_GLOSSARY.md",
                 "docs/DEV_MAP.md",
                 "docs/features/INDEX.md",
                 "docs/tech-debt.md",
@@ -500,13 +527,14 @@ def workflow_profiles_config(project_name: str, created_at: str) -> dict:
                 ],
                 "stages": [
                     "intake",
+                    "requirement_interview",
                     "risk_classification",
                     "debugging",
                     "implementation",
                     "verification",
                     "handoff",
                 ],
-                "required_evidence": ["reproduction", "root cause", "fix validation", "regression check"],
+                "required_evidence": ["requirements interview", "reproduction", "root cause", "fix validation", "regression check"],
             },
             "standard": {
                 "description": "Normal multi-file project work with clear scope and review needs.",
@@ -523,6 +551,7 @@ def workflow_profiles_config(project_name: str, created_at: str) -> dict:
                 ],
                 "stages": [
                     "intake",
+                    "requirement_interview",
                     "risk_classification",
                     "spec",
                     "plan",
@@ -532,7 +561,7 @@ def workflow_profiles_config(project_name: str, created_at: str) -> dict:
                     "verification",
                     "handoff",
                 ],
-                "required_evidence": ["approved scope", "implementation plan", "review result", "fresh validation"],
+                "required_evidence": ["requirements interview", "approved scope", "implementation plan", "review result", "fresh validation"],
             },
             "full": {
                 "description": "Cross-module, architectural, release, migration, or high coordination work.",
@@ -542,6 +571,7 @@ def workflow_profiles_config(project_name: str, created_at: str) -> dict:
                 "feature_doc_templates": [name.replace(".tmpl", "") for name in FEATURE_STAGE_TEMPLATES],
                 "stages": [
                     "intake",
+                    "requirement_interview",
                     "risk_classification",
                     "spec",
                     "plan",
@@ -557,6 +587,7 @@ def workflow_profiles_config(project_name: str, created_at: str) -> dict:
                 ],
                 "required_evidence": [
                     "requirement analysis",
+                    "requirements interview",
                     "solution design",
                     "gate review",
                     "implementation record",
@@ -606,6 +637,7 @@ def task_board_config(project_name: str, created_at: str) -> dict:
             "profile",
             "current_stage",
             "docs_path",
+            "requirements",
             "created_at",
             "updated_at",
             "delivery_conclusion",
@@ -622,6 +654,8 @@ def task_board_config(project_name: str, created_at: str) -> dict:
             "review_gate_open_findings_must_be_empty": True,
             "review_gate_latest_review_must_exist": True,
             "docs_path_required_when_profile_requires_docs": True,
+            "requirements_complete_before_protected_stages": True,
+            "requirements_complete_before_done": True,
         },
         "items": [],
     }
@@ -633,16 +667,24 @@ def workflow_stage_definitions() -> dict:
             "owner_role": "coordinator",
             "required_inputs": ["user request", "repository state"],
             "required_outputs": ["task profile", "risk classification", "task-board id when required"],
-            "allowed_next": ["risk_classification", "spec", "plan", "implementation"],
+            "allowed_next": ["requirement_interview", "risk_classification", "spec", "plan", "implementation"],
             "rollback_to": [],
             "forbidden_actions": ["modify files before dirty-state inspection"],
         },
+        "requirement_interview": {
+            "owner_role": "coordinator",
+            "required_inputs": ["user request", "repository state", "docs/DOMAIN_GLOSSARY.md"],
+            "required_outputs": ["shared understanding", "open questions resolved or recorded", "domain glossary updates", "code/docs cross-check result"],
+            "allowed_next": ["risk_classification", "spec", "plan", "debugging"],
+            "rollback_to": ["intake"],
+            "forbidden_actions": ["ask multiple unrelated questions at once", "accept a user claim that conflicts with current code or docs without resolving it"],
+        },
         "risk_classification": {
             "owner_role": "coordinator",
-            "required_inputs": [".agent/risk-zones.json", ".agent/workflow-profiles.json"],
+            "required_inputs": [".agent/risk-zones.json", ".agent/workflow-profiles.json", "requirements status"],
             "required_outputs": ["risk level", "autonomy decision", "selected workflow profile"],
             "allowed_next": ["spec", "plan", "debugging", "implementation", "gate_review"],
-            "rollback_to": ["intake"],
+            "rollback_to": ["requirement_interview", "intake"],
             "forbidden_actions": ["continue silently after risk increases"],
         },
         "spec": {
@@ -757,6 +799,7 @@ def workflow_config(project_name: str, created_at: str, openspec_enabled: bool) 
         "feature_docs": "docs/features",
         "stages": [
             "intake",
+            "requirement_interview",
             "risk_classification",
             "debugging",
             "spec",
@@ -773,6 +816,17 @@ def workflow_config(project_name: str, created_at: str, openspec_enabled: bool) 
         ],
         "stage_definitions": workflow_stage_definitions(),
         "gates": {
+            "requirements_interview": {
+                "required_for_profiles": ["bugfix", "standard", "full"],
+                "feature_doc": "docs/features/<task-id>/01_REQUIREMENT_ANALYSIS.md",
+                "domain_glossary": "docs/DOMAIN_GLOSSARY.md",
+                "ask_one_question_at_a_time": True,
+                "provide_recommended_answer_and_reason": True,
+                "stop_when_shared_understanding_missing": True,
+                "cross_check_user_claims_against_code_and_docs": True,
+                "record_unresolved_questions": True,
+                "update_domain_glossary_for_new_or_ambiguous_terms": True,
+            },
             "risk_classification": {
                 "required_for": ["implementation", "refactor", "migration", "security_change", "public_api_change"],
                 "policy": ".agent/risk-zones.json",
@@ -1100,6 +1154,7 @@ def role_contracts_config(project_name: str, created_at: str, governance_profile
         ".agent/task-board.json",
         ".agent/risk-zones.json",
         ".agent/review-policy.json",
+        "docs/DOMAIN_GLOSSARY.md",
     ]
     if profile_at_least(governance_profile, "full"):
         read_common.append(".agent/subagents.json")
@@ -1123,10 +1178,10 @@ def role_contracts_config(project_name: str, created_at: str, governance_profile
         },
         "contracts": {
             "coordinator": {
-                "owner_for_stages": ["intake", "risk_classification", "spec", "plan", "handoff", "finish"],
+                "owner_for_stages": ["intake", "requirement_interview", "risk_classification", "spec", "plan", "handoff", "finish"],
                 "must_read": read_common,
-                "may_write": [".agent/task-board.json", ".agent/sessions/**", "docs/features/**"],
-                "must_write": ["task-board state when required", "handoff/resume state"],
+                "may_write": [".agent/task-board.json", ".agent/sessions/**", "docs/features/**", "docs/DOMAIN_GLOSSARY.md"],
+                "must_write": ["task-board state when required", "requirements status", "handoff/resume state"],
                 "forbidden_actions": ["perform implementation inside reviewer-only stages"],
                 "blocking_conditions": ["missing risk classification", "missing task-board record for non-tiny work"],
             },
@@ -1242,6 +1297,7 @@ def knowledge_config(project_name: str, created_at: str, governance_profile: str
         "docs/RELIABILITY.md",
         "docs/QUALITY_SCORE.md",
         "docs/AI_CODING_GLOSSARY.md",
+        "docs/DOMAIN_GLOSSARY.md",
         "docs/DEV_MAP.md",
         "docs/features/INDEX.md",
         "docs/tech-debt.md",
@@ -1282,7 +1338,7 @@ def dev_map_config(project_name: str, created_at: str, dirs: list[str]) -> dict:
             "id": "application",
             "name": "Application code",
             "entry_points": dirs[:3],
-            "read_before_edit": ["docs/ARCHITECTURE.md", "docs/QUALITY.md"],
+            "read_before_edit": ["docs/ARCHITECTURE.md", "docs/QUALITY.md", "docs/DOMAIN_GLOSSARY.md"],
             "owned_paths": dirs,
             "common_patterns": ["Fill this section after the project architecture is known."],
         },
@@ -1333,7 +1389,7 @@ def harness_evolution_config(project_name: str, created_at: str) -> dict:
             "workflow_gap": [".agent/workflow.json", ".agent/workflow-profiles.json"],
             "role_contract_gap": [".agent/role-contracts.json", ".agent/subagents.json"],
             "tool_or_mcp_gap": [".agent/capabilities.json", ".agent/mcp-policy.json"],
-            "knowledge_gap": ["docs/index.md", "docs/DEV_MAP.md", ".agent/knowledge.json"],
+            "knowledge_gap": ["docs/index.md", "docs/DEV_MAP.md", "docs/DOMAIN_GLOSSARY.md", ".agent/knowledge.json"],
             "session_gap": [".agent/sessions", ".agent/memory.json"],
             "context_gap": [".agent/context.json", ".agent/context/latest.md"],
         },
@@ -1356,6 +1412,9 @@ def mcp_policy_config(project_name: str, created_at: str) -> dict:
             "mcp_is_not_required_for_local_governance": True,
             "deny_external_network_by_default": True,
             "credentials_must_not_be_stored_in_repo": True,
+            "credentials_must_use_vault_or_proxy": True,
+            "sandbox_must_not_receive_raw_credentials": True,
+            "credential_rotation_and_audit_required": True,
             "destructive_or_release_operations_need_human_approval": True,
             "record_high_risk_mcp_use_in_runlog": True,
             "prefer_read_only_integrations_until_delivery_loop_is_stable": True,
@@ -1364,6 +1423,8 @@ def mcp_policy_config(project_name: str, created_at: str) -> dict:
             "repo_local": {"default": "allow", "notes": "Local filesystem governance files."},
             "external_read": {"default": "approval-or-project-policy", "notes": "Docs, issue trackers, CI status, artifact metadata."},
             "external_write": {"default": "human-approval", "notes": "Issue updates, CI triggers, release status writes."},
+            "credential_vault": {"default": "outside-repo", "notes": "Secrets live outside the repository, harness, sandbox, and generated governance files."},
+            "credential_proxy": {"default": "approval-or-project-policy", "notes": "External calls use a broker/proxy that injects credentials without exposing raw values to the sandbox."},
             "release_or_signing": {"default": "human-driven", "notes": "Publishing, signing, production deploy, irreversible operations."},
         },
         "servers": [],
@@ -1427,6 +1488,7 @@ def memory_config(project_name: str, created_at: str) -> dict:
                 ".agent/spec.json and openspec/",
                 ".agent/task-board.json",
                 "docs/DEV_MAP.md and .agent/dev-map.json",
+                "docs/DOMAIN_GLOSSARY.md for shared project-domain terms",
                 "docs/features/<task-id>/",
                 "docs/adr/, docs/rfcs/, docs/incidents/",
                 ".agent/runlog.jsonl and validation.md",
@@ -1508,6 +1570,7 @@ def context_budget_config(project_name: str, created_at: str) -> dict:
             ".agent/mechanical-checks.json",
             ".agent/baselines.json",
             ".agent/dev-map.json",
+            ".agent/skill-hygiene.json",
             ".agent/harness-evolution.json",
             ".agent/mcp-policy.json",
             ".agent/governance-gc.json",
@@ -1515,6 +1578,7 @@ def context_budget_config(project_name: str, created_at: str) -> dict:
             "docs/TOOLING.md",
             "docs/QUALITY_SCORE.md",
             "docs/AI_CODING_GLOSSARY.md",
+            "docs/DOMAIN_GLOSSARY.md",
             "docs/DEV_MAP.md",
             "docs/features/INDEX.md",
             "docs/adr/README.md",
@@ -1573,6 +1637,52 @@ def skill_distribution_config(project_name: str, created_at: str) -> dict:
             "prefer_agents_skills_for_codex": True,
             "preserve_legacy_codex_skills": True,
             "do_not_overwrite_without_force": True,
+        },
+    }
+
+
+def skill_hygiene_config(project_name: str, created_at: str) -> dict:
+    return {
+        "schema": "agent-skill-hygiene-v1",
+        "project_name": project_name,
+        "created_at": created_at,
+        "scan_roots": [
+            ".agents/skills",
+            ".codex/skills",
+            ".claude/skills",
+            ".cursor/skills",
+            "~/.agents/skills",
+            "~/.codex/skills",
+            "~/.claude/skills",
+            "~/.cursor/skills",
+        ],
+        "policy": {
+            "doctor_is_read_only": True,
+            "scripts_collect_facts_ai_interprets": True,
+            "human_confirms_cleanup": True,
+            "no_auto_delete": True,
+            "do_not_treat_zero_canary_as_unused": True,
+            "stale_after_days": 180,
+            "report_symlinks_as_topology_not_duplicates": True,
+        },
+        "risk_signals": {
+            "missing_frontmatter": "warning",
+            "missing_name": "warning",
+            "missing_description": "warning",
+            "stale_mtime": "warning",
+            "duplicate_or_drifted_skill_name": "warning",
+            "broken_symlink": "error",
+            "curl_pipe_shell": "error",
+        },
+        "canary": {
+            "enabled": False,
+            "meaning": "Canary evidence only proves the canary command ran; it does not prove skill discovery, full loading, compliance, or output quality.",
+            "requires_explicit_user_confirmation": True,
+        },
+        "commands": {
+            "doctor": "python3 scripts/agent_skill_hygiene.py doctor",
+            "report": "python3 scripts/agent_skill_hygiene.py report",
+            "json": "python3 scripts/agent_skill_hygiene.py report --json",
         },
     }
 
@@ -1703,6 +1813,17 @@ def capabilities_config(
             "validation": ["python3 scripts/agent_check.py", "python3 scripts/agent_score.py doctor"],
         },
         {
+            "id": "requirements-interview",
+            "kind": "policy",
+            "provider": "local",
+            "enabled": True,
+            "risk": "medium",
+            "owner": "governance-owner",
+            "description": "One-question-at-a-time intake gate with recommended answers, shared understanding, and code/docs cross-checks before non-tiny implementation.",
+            "permissions": {"read": True, "write": "bounded", "network": False, "secrets": False},
+            "validation": ["python3 scripts/agent_task.py doctor", "python3 scripts/agent_check.py"],
+        },
+        {
             "id": "worktree-isolation",
             "kind": "policy",
             "provider": "git",
@@ -1756,6 +1877,17 @@ def capabilities_config(
             "description": "Hard checks and before/after baselines for JSON integrity, required paths, role contracts, task board, and local markdown links.",
             "permissions": {"read": True, "write": "bounded", "network": False, "secrets": False},
             "validation": ["python3 scripts/agent_verify.py doctor"],
+        },
+        {
+            "id": "skill-hygiene",
+            "kind": "tool",
+            "provider": "agent-gov",
+            "enabled": True,
+            "risk": "medium",
+            "owner": "governance-owner",
+            "description": "Read-only local skill topology, source, hash, frontmatter, symlink, stale, and risk-signal scan.",
+            "permissions": {"read": True, "write": False, "network": False, "secrets": False},
+            "validation": ["python3 scripts/agent_skill_hygiene.py doctor"],
         },
         {
             "id": "dev-map",
@@ -1889,6 +2021,17 @@ def capabilities_config(
             "permissions": {"read": True, "write": "bounded", "network": False, "secrets": False},
             "validation": ["test -f docs/AI_CODING_GLOSSARY.md"],
         },
+        {
+            "id": "domain-glossary",
+            "kind": "knowledge",
+            "provider": "local",
+            "enabled": True,
+            "risk": "low",
+            "owner": "governance-owner",
+            "description": "Project-domain terminology, canonical names, forbidden synonyms, and source evidence for user/agent shared understanding.",
+            "permissions": {"read": True, "write": "bounded", "network": False, "secrets": False},
+            "validation": ["test -f docs/DOMAIN_GLOSSARY.md"],
+        },
     ]
     capability_classes = {
         "instruction": {
@@ -1918,11 +2061,13 @@ def capabilities_config(
         "task-board": "executable",
         "role-contracts": "instruction",
         "implementation-discipline": "instruction",
+        "requirements-interview": "instruction",
         "worktree-isolation": "instruction",
         "aci-tooling": "executable",
         "security-baseline": "executable",
         "governance-score": "executable",
         "mechanical-verification": "executable",
+        "skill-hygiene": "executable",
         "dev-map": "instruction",
         "harness-evolution": "instruction",
         "mcp-policy": "integration",
@@ -1935,6 +2080,7 @@ def capabilities_config(
         "claude-native-adapters": "native_adapter",
         "skill-distribution": "instruction",
         "ai-coding-glossary": "instruction",
+        "domain-glossary": "instruction",
     }
     standard_capabilities = {
         "repo-filesystem",
@@ -1946,9 +2092,11 @@ def capabilities_config(
         "task-board",
         "role-contracts",
         "implementation-discipline",
+        "requirements-interview",
         "worktree-isolation",
         "governance-score",
         "mechanical-verification",
+        "skill-hygiene",
         "dev-map",
         "harness-evolution",
         "mcp-policy",
@@ -1957,6 +2105,7 @@ def capabilities_config(
         "session-memory",
         "context-budget",
         "ai-coding-glossary",
+        "domain-glossary",
     }
     full_capabilities = set(class_by_id)
     allowed = full_capabilities if profile_at_least(governance_profile, "full") else standard_capabilities
@@ -2030,6 +2179,8 @@ def security_config(project_name: str, created_at: str) -> dict:
             "prefer_local_scans": True,
             "record_security_runs_in_runlog": True,
             "do_not_store_secrets": True,
+            "raw_credentials_stay_outside_repo_harness_and_sandbox": True,
+            "external_secret_use_requires_vault_or_proxy_boundary": True,
             "review_high_risk_findings_before_handoff": True,
         },
         "suites": {
@@ -2068,6 +2219,7 @@ def evals_config(project_name: str, created_at: str, governance_profile: str) ->
                 "role_contracts": {"weight": 8},
                 "mechanical_verification": {"weight": 10},
                 "dev_map": {"weight": 6},
+                "skill_hygiene": {"weight": 6},
                 "harness_evolution": {"weight": 6},
                 "mcp_policy": {"weight": 4},
                 "governance_gc": {"weight": 6},
@@ -2128,6 +2280,7 @@ def mechanical_checks_config(project_name: str, created_at: str, governance_prof
         ".agent/role-contracts.json",
         ".agent/knowledge.json",
         ".agent/dev-map.json",
+        ".agent/skill-hygiene.json",
         ".agent/memory.json",
         ".agent/context.json",
         ".agent/capabilities.json",
@@ -2158,7 +2311,7 @@ def mechanical_checks_config(project_name: str, created_at: str, governance_prof
         "jsonl_integrity": {
             "enabled": True,
             "fail_on_invalid": True,
-            "paths": [".agent/runlog.jsonl", ".agent/memory/events.jsonl", ".agent/context/stats.jsonl"],
+            "paths": [".agent/runlog.jsonl", ".agent/sessions/events.jsonl", ".agent/memory/events.jsonl", ".agent/context/stats.jsonl"],
         },
         "required_paths": {
             "enabled": True,
@@ -2189,6 +2342,12 @@ def mechanical_checks_config(project_name: str, created_at: str, governance_prof
             "enabled": True,
             "path": ".agent/dev-map.json",
             "doc": "docs/DEV_MAP.md",
+        },
+        "skill_hygiene": {
+            "enabled": True,
+            "path": ".agent/skill-hygiene.json",
+            "script": "scripts/agent_skill_hygiene.py",
+            "doctor_is_read_only": True,
         },
         "harness_evolution": {
             "enabled": True,
@@ -2291,6 +2450,7 @@ def manifest_config(project_name: str, created_at: str, harness: dict, evals: di
         ".agent/hooks.json": "agent-hooks-v1",
         ".agent/knowledge.json": "agent-knowledge-v1",
         ".agent/dev-map.json": "agent-dev-map-v1",
+        ".agent/skill-hygiene.json": "agent-skill-hygiene-v1",
         ".agent/memory.json": "agent-memory-v1",
         ".agent/context.json": "agent-context-budget-v1",
         ".agent/capabilities.json": "agent-capabilities-v1",
@@ -2312,7 +2472,7 @@ def manifest_config(project_name: str, created_at: str, harness: dict, evals: di
     ]
     jsonl_files = [
         path
-        for path in [".agent/runlog.jsonl", ".agent/memory/events.jsonl", ".agent/context/stats.jsonl"]
+        for path in [".agent/runlog.jsonl", ".agent/sessions/events.jsonl", ".agent/memory/events.jsonl", ".agent/context/stats.jsonl"]
         if path in required_set
     ]
     return {
@@ -2505,6 +2665,9 @@ class Writer:
         self.created: list[str] = []
         self.updated: list[str] = []
         self.skipped: list[str] = []
+        self.unchanged: list[str] = []
+        self.preserved: list[str] = []
+        self.conflicts: list[str] = []
 
     def target(self, relative: str) -> Path:
         relative_path = Path(relative)
@@ -2522,7 +2685,13 @@ class Writer:
         path = self.target(relative)
         exists = path.exists()
         if exists and not self.force:
-            self.skipped.append(relative)
+            if relative in APPEND_ONLY_PATHS:
+                self.preserved.append(relative)
+            elif self.same_text(path, content):
+                self.unchanged.append(relative)
+            else:
+                self.skipped.append(relative)
+                self.conflicts.append(relative)
             return
         if not self.dry_run:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -2535,7 +2704,13 @@ class Writer:
         path = self.target(relative)
         exists = path.exists()
         if exists and not self.force:
-            self.skipped.append(relative)
+            if relative in APPEND_ONLY_PATHS:
+                self.preserved.append(relative)
+            elif self.same_bytes(path, source):
+                self.unchanged.append(relative)
+            else:
+                self.skipped.append(relative)
+                self.conflicts.append(relative)
             return
         if not self.dry_run:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -2544,12 +2719,23 @@ class Writer:
                 path.chmod(path.stat().st_mode | 0o111)
         (self.updated if exists else self.created).append(relative)
 
+    @staticmethod
+    def same_text(path: Path, content: str) -> bool:
+        if not path.is_file():
+            return False
+        try:
+            return path.read_text(encoding="utf-8") == content
+        except OSError:
+            return False
 
-def ensure_json(path: Path, default: dict, writer: Writer, relative: str) -> None:
-    if path.exists() and not writer.force:
-        writer.skipped.append(relative)
-        return
-    writer.write(relative, json.dumps(default, indent=2) + "\n")
+    @staticmethod
+    def same_bytes(path: Path, source: Path) -> bool:
+        if not path.is_file() or not source.is_file():
+            return False
+        try:
+            return path.read_bytes() == source.read_bytes()
+        except OSError:
+            return False
 
 
 def spec_enabled(args: argparse.Namespace) -> bool:
@@ -2571,11 +2757,13 @@ def agent_ground_rules(governance_profile: str) -> tuple[str, str]:
             "- Use `.agent/role-contracts.json` so verifier/reviewer roles report findings and route fixes back instead of fixing directly.",
             "- Use `.agent/knowledge.json`, `.agent/memory.json`, and `.agent/context.json` for durable docs, memory retrieval, and context budgets.",
             "- Use `.agent/dev-map.json` and `docs/DEV_MAP.md` to find entry points, ownership, and read-before-edit docs before broad changes.",
+            "- Use `.agent/skill-hygiene.json` and `scripts/agent_skill_hygiene.py` for read-only skill topology, source, hash, symlink, frontmatter, stale, and risk-signal scans.",
             "- Use `.agent/capabilities.json`, `.agent/mechanical-checks.json`, and `.agent/baselines.json` for capability risk, hard checks, and before/after baselines.",
             "- Use `.agent/harness-evolution.json` for incident taxonomy and for promoting repeated failures into rules, skills, scripts, workflow gates, role contracts, tools, or docs.",
             "- Use `.agent/mcp-policy.json` as the disabled-by-default trust-boundary policy before enabling any MCP or external integration.",
             "- Use `.agent/governance-gc.json` and `scripts/agent_gc.py` for periodic governance gardening.",
             "- Use `docs/AI_CODING_GLOSSARY.md` for shared skill/tool/MCP, harness, session, memory, and review terms.",
+            "- Use `docs/DOMAIN_GLOSSARY.md` for project-domain terminology; resolve naming conflicts before implementation.",
         ]
     if profile_at_least(governance_profile, "full"):
         full = [
@@ -2612,8 +2800,10 @@ def agent_workflow(governance_profile: str, spec_workflow_step: str) -> tuple[st
             "- Run `python3 .agent/tools/agent_context.py doctor` and keep large docs behind summaries and detail commands.",
             "- Run `python3 scripts/agent_capabilities.py doctor`, `python3 scripts/agent_task.py doctor`, `python3 scripts/agent_verify.py doctor`, and `python3 scripts/agent_gc.py doctor`.",
             "- Read `.agent/workflow.json`, `.agent/workflow-profiles.json`, `.agent/task-board.json`, `.agent/risk-zones.json`, and `.agent/review-policy.json`; choose the lightest sufficient workflow profile before implementation.",
+            "- For non-tiny work, complete the requirements interview gate before design or implementation: ask one question at a time, provide a recommended answer and reason, cross-check claims against current code/docs, and update `docs/DOMAIN_GLOSSARY.md` when terms are ambiguous.",
             "- Read `.agent/worktrees.json`; prefer an ignored isolated worktree for feature work, plan execution, or risky refactors.",
             "- Read `docs/DEV_MAP.md` and `.agent/dev-map.json` before broad codebase navigation or module-boundary edits.",
+            "- Run `python3 scripts/agent_skill_hygiene.py report --json` when reviewing installed or project-level skills; treat it as read-only fact collection, not cleanup authority.",
             "- For bugs, test failures, build failures, unexpected behavior, or governance failures, classify the harness gap with `.agent/harness-evolution.json`.",
             "- For non-tiny work, create or update a task-board record with `python3 scripts/agent_task.py` and keep `docs/features/<task-id>/` stage documents current.",
             "- For standard or full work, capture before/after snapshots with `python3 scripts/agent_verify.py snapshot --name <name>` and compare regressions before handoff.",
@@ -2649,6 +2839,7 @@ def harness_commands(governance_profile: str) -> str:
                 "python3 scripts/agent_knowledge.py",
                 "python3 scripts/agent_invariants.py",
                 "python3 scripts/agent_capabilities.py doctor",
+                "python3 scripts/agent_skill_hygiene.py doctor",
                 "python3 scripts/agent_task.py doctor",
                 "python3 scripts/agent_verify.py doctor",
                 "python3 scripts/agent_gc.py doctor",
@@ -2682,6 +2873,7 @@ python3 scripts/agent_gc.py doctor
 python3 .agent/tools/agent_context.py scan --limit 10
 python3 .agent/tools/agent_context.py suggest
 python3 scripts/agent_capabilities.py doctor
+python3 scripts/agent_skill_hygiene.py doctor
 python3 scripts/agent_capabilities.py list --enabled
 python3 scripts/agent_task.py list
 python3 scripts/agent_verify.py snapshot --name before-change
@@ -2691,6 +2883,7 @@ python3 scripts/agent_verify.py compare --before .agent/baselines/before-change.
         standard_expectations = """- Follow `.agent/workflow.json` and `.agent/workflow-profiles.json` for spec approval, plan quality, implementation discipline, worktree isolation, TDD/debugging, review sequence, and completion verification gates.
 - Choose the lightest sufficient workflow profile: `tiny`, `bugfix`, `standard`, or `full`.
 - For non-tiny work, keep `.agent/task-board.json` and `docs/features/<task-id>/` current.
+- Complete the requirements interview gate before design or implementation: ask one question at a time, recommend an answer with rationale, cross-check user claims against current code/docs, and update `docs/DOMAIN_GLOSSARY.md` for stable terms.
 - Classify task risk with `.agent/risk-zones.json` before implementation; stop and re-plan when the risk level increases.
 - Follow the `implementation_discipline` gate for non-trivial implementation: surface assumptions, choose the simplest maintainable approach, keep diffs tied to the request, and define success criteria.
 - Follow `.agent/review-policy.json` before handoff: every changed line should map to requested, necessary-support, incidental, or risky; incidental changes need removal or an explicit exception.
@@ -2739,7 +2932,7 @@ def build_values(root: Path, args: argparse.Namespace) -> dict[str, str]:
     claude_enabled = (not args.no_claude) and profile_at_least(args.governance_profile, "full")
     standard_ground_rules, full_ground_rules = agent_ground_rules(args.governance_profile)
     workspace_path = str(root.resolve())
-    created_at = utc_now()
+    created_at = utc_now() if args.force else (existing_created_at(root) or utc_now())
     core_workflow, standard_workflow, full_workflow = agent_workflow(
         args.governance_profile,
         "Check documented planning context before substantial changes."
@@ -2778,6 +2971,8 @@ def build_values(root: Path, args: argparse.Namespace) -> dict[str, str]:
         "standard_docs_intro": (
             "Knowledge metadata is tracked in `.agent/knowledge.json`. Update `owner`, `last_reviewed`, `source_links`, and `known_stale_sections` when durable knowledge changes.\n"
             "Development navigation is tracked in `.agent/dev-map.json` and `docs/DEV_MAP.md`.\n"
+            "Project-domain terminology is tracked in `docs/DOMAIN_GLOSSARY.md`; use it to resolve naming conflicts before implementation.\n"
+            "Skill topology and hygiene policy are tracked in `.agent/skill-hygiene.json`; scans are read-only and cleanup requires human confirmation.\n"
             "Cross-session working memory is tracked in `.agent/memory.json` and `.agent/memory/`. Store summaries, decisions, validation, and retrieval handles; do not store raw transcripts.\n"
             "Capability governance is tracked in `.agent/capabilities.json`.\n"
             "Workflow gates, including risk classification, implementation discipline, diff traceability, and review evidence, are tracked in `.agent/workflow.json`.\n"
@@ -2794,6 +2989,7 @@ def build_values(root: Path, args: argparse.Namespace) -> dict[str, str]:
             "- [Reliability](RELIABILITY.md): runtime behavior, observability, rollback, and operational risks.\n"
             "- [Governance Score](QUALITY_SCORE.md): local score dimensions, dashboard, and drift signals.\n"
             "- [AI Coding Glossary](AI_CODING_GLOSSARY.md): shared terms for skills, tools, MCP, harness, sessions, memory, and reviews.\n"
+            "- [Domain Glossary](DOMAIN_GLOSSARY.md): project-domain terms, canonical names, forbidden synonyms, and source evidence.\n"
             "- [Development Map](DEV_MAP.md): concise entry points, ownership, read-before-edit docs, and common patterns.\n"
             "- [Feature Work](features/INDEX.md): task-board-backed feature-stage documents.\n"
             "- [Tech Debt](tech-debt.md): known debt, cleanup candidates, and follow-up work.\n"
@@ -2807,6 +3003,7 @@ def build_values(root: Path, args: argparse.Namespace) -> dict[str, str]:
             "Update `.agent/workflow.json` when lifecycle gates, risk classification, implementation discipline, diff traceability, review order, TDD/debugging rules, or completion evidence rules change.\n"
             "Update `.agent/workflow-profiles.json` when task-size process weights or required stage documents change.\n"
             "Update `.agent/task-board.json` and `docs/features/` when non-tiny task state, stage, or delivery conclusions change.\n"
+            "Update `docs/DOMAIN_GLOSSARY.md` when requirements interviews introduce or resolve project-domain terms.\n"
             "Update `.agent/risk-zones.json` when risk levels, autonomy rules, approval gates, or high-risk path patterns change.\n"
             "Update `.agent/review-policy.json` when diff traceability categories, human review evidence, or automated review boundaries change.\n"
             "Update `.agent/worktrees.json` when isolated worktree locations, baseline validation, or guarded cleanup rules change.\n"
@@ -2814,6 +3011,7 @@ def build_values(root: Path, args: argparse.Namespace) -> dict[str, str]:
             "Update `.agent/memory.json` when memory stores, privacy tags, or retention policy change.\n"
             "Update `.agent/capabilities.json` when agent-visible tools, external integrations, permissions, owners, or risk levels change.\n"
             "Update `.agent/dev-map.json` and `docs/DEV_MAP.md` when entry points, ownership, read-before-edit guidance, or common project patterns change.\n"
+            "Update `.agent/skill-hygiene.json` when skill scan roots, stale thresholds, risk signals, or canary policy change.\n"
             "Update `.agent/mechanical-checks.json` and `.agent/baselines.json` when hard checks or baseline comparison policy changes.\n"
             "Update `.agent/harness-evolution.json` when incident categories or promotion targets change.\n"
             "Update `.agent/governance-gc.json` when periodic governance cleanup checks or thresholds change."
@@ -2960,6 +3158,10 @@ def init_project(args: argparse.Namespace) -> int:
             json.dumps(dev_map_config(project_name, values["created_at"], dirs), indent=2) + "\n",
         )
         writer.write(
+            ".agent/skill-hygiene.json",
+            json.dumps(skill_hygiene_config(project_name, values["created_at"]), indent=2) + "\n",
+        )
+        writer.write(
             ".agent/memory.json",
             json.dumps(memory_config(project_name, values["created_at"]), indent=2) + "\n",
         )
@@ -3023,6 +3225,7 @@ def init_project(args: argparse.Namespace) -> int:
         writer.write(".agent/context/stats.jsonl", "")
         writer.write(".agent/context/latest.md", template("context-summary.md.tmpl"))
     writer.write(".agent/sessions/index.json", template("session-index.json.tmpl"))
+    writer.write(".agent/sessions/events.jsonl", "")
     writer.write(".agent/sessions/active.md", template("active.md.tmpl"))
     writer.write(".agent/sessions/bootstrap.md", template("bootstrap.md.tmpl"))
 
@@ -3085,6 +3288,7 @@ def init_project(args: argparse.Namespace) -> int:
         writer.write("scripts/agent_knowledge.py", template("agent-knowledge.py.tmpl"), executable=True)
         writer.write("scripts/agent_invariants.py", template("agent-invariants.py.tmpl"), executable=True)
         writer.write("scripts/agent_capabilities.py", template("agent-capabilities.py.tmpl"), executable=True)
+        writer.write("scripts/agent_skill_hygiene.py", template("agent-skill-hygiene.py.tmpl"), executable=True)
         writer.write("scripts/agent_task.py", template("agent-task.py.tmpl"), executable=True)
         writer.write("scripts/agent_verify.py", template("agent-verify.py.tmpl"), executable=True)
         writer.write("scripts/agent_gc.py", template("agent-gc.py.tmpl"), executable=True)
@@ -3100,6 +3304,7 @@ def init_project(args: argparse.Namespace) -> int:
         writer.write("docs/RELIABILITY.md", render(template("docs-reliability.md.tmpl"), values))
         writer.write("docs/QUALITY_SCORE.md", render(template("docs-quality-score.md.tmpl"), values))
         writer.write("docs/AI_CODING_GLOSSARY.md", render(template("docs-ai-coding-glossary.md.tmpl"), values))
+        writer.write("docs/DOMAIN_GLOSSARY.md", render(template("docs-domain-glossary.md.tmpl"), values))
         writer.write("docs/DEV_MAP.md", render(template("docs-dev-map.md.tmpl"), values))
         writer.write("docs/features/INDEX.md", render(template("docs-features-index.md.tmpl"), values))
         writer.write("docs/features/.gitkeep", "")
@@ -3119,14 +3324,27 @@ def init_project(args: argparse.Namespace) -> int:
         writer.write("Makefile", template("Makefile.tmpl"))
 
     print(f"project root: {root}")
-    for label, items in (("created", writer.created), ("updated", writer.updated), ("skipped", writer.skipped)):
+    print(f"governance profile: {governance_profile}")
+    print(f"layout: {args.layout}")
+    print(f"create layout dirs: {'no' if args.no_create_layout else 'yes'}")
+    print(f"mode: {'dry-run' if args.dry_run else 'write'}")
+    labels = (
+        ("would create" if args.dry_run else "created", writer.created),
+        ("would update" if args.dry_run else "updated", writer.updated),
+        ("unchanged", writer.unchanged),
+        ("preserved append-only", writer.preserved),
+        ("conflicts", writer.conflicts),
+    )
+    for label, items in labels:
         if items:
             print(f"{label}:")
             for item in items:
                 print(f"  {item}")
 
-    if writer.skipped:
-        print("note: skipped existing files; rerun with --force only if overwriting is intended")
+    if writer.conflicts:
+        print("note: existing different files were preserved; merge manually or rerun with --force only if overwriting is intended")
+    if writer.preserved:
+        print("note: append-only stores were preserved to avoid losing runlog, session, memory, or context history")
 
     if not args.dry_run:
         check = root / "scripts" / "agent_check.py"

@@ -85,8 +85,24 @@ function shouldSkip(sourcePath) {
   return IGNORE_SUFFIXES.has(path.extname(sourcePath));
 }
 
+function filesEqual(left, right) {
+  try {
+    if (!fs.existsSync(left) || !fs.existsSync(right)) {
+      return false;
+    }
+    const leftStat = fs.statSync(left);
+    const rightStat = fs.statSync(right);
+    if (!leftStat.isFile() || !rightStat.isFile() || leftStat.size !== rightStat.size) {
+      return false;
+    }
+    return fs.readFileSync(left).equals(fs.readFileSync(right));
+  } catch {
+    return false;
+  }
+}
+
 function copyTree(source, dest, options) {
-  const result = { copied: 0, skipped: 0 };
+  const result = { copied: 0, skipped: 0, unchanged: 0, conflicts: 0 };
   if (!fs.existsSync(source)) {
     return result;
   }
@@ -100,13 +116,20 @@ function copyTree(source, dest, options) {
       const nested = copyTree(sourcePath, destPath, options);
       result.copied += nested.copied;
       result.skipped += nested.skipped;
+      result.unchanged += nested.unchanged;
+      result.conflicts += nested.conflicts;
       continue;
     }
     if (!entry.isFile()) {
       continue;
     }
     if (fs.existsSync(destPath) && !options.force) {
-      result.skipped += 1;
+      if (filesEqual(sourcePath, destPath)) {
+        result.unchanged += 1;
+      } else {
+        result.skipped += 1;
+        result.conflicts += 1;
+      }
       continue;
     }
     result.copied += 1;
@@ -123,19 +146,24 @@ function installSkills(targetRoot, options = {}) {
   const skillDest = path.join(targetRoot, ".codex", "skills");
   let copied = 0;
   let skipped = 0;
+  let unchanged = 0;
+  let conflicts = 0;
   for (const skill of RUNTIME_SKILLS) {
     const source = path.join(SKILLS_SOURCE, skill);
     const dest = path.join(skillDest, skill);
     const result = copyTree(source, dest, options);
     copied += result.copied;
     skipped += result.skipped;
+    unchanged += result.unchanged;
+    conflicts += result.conflicts;
   }
   console.log(`skill source: ${SKILLS_SOURCE}`);
   console.log(`skill dest: ${skillDest}`);
-  console.log(`skill files copied: ${copied}`);
-  console.log(`skill files skipped: ${skipped}`);
-  if (skipped > 0 && !options.force) {
-    console.log("existing skill files were preserved; rerun with --force-skill or --force to overwrite");
+  console.log(`skill files ${options.dryRun ? "would copy" : "copied"}: ${copied}`);
+  console.log(`skill files unchanged: ${unchanged}`);
+  console.log(`skill file conflicts preserved: ${conflicts}`);
+  if (conflicts > 0 && !options.force) {
+    console.log("existing different skill files were preserved; rerun with --force-skill or --force only after reviewing the local changes");
   }
 }
 
