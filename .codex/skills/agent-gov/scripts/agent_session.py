@@ -21,6 +21,8 @@ ACTIVE_PATH = SESSION_ROOT / "active.md"
 BOOTSTRAP_PATH = SESSION_ROOT / "bootstrap.md"
 RUNLOG_PATH = Path(".agent/runlog.jsonl")
 CONFIG_PATH = Path(".agent/config.json")
+OFFLOAD_SCHEMA = "agent-session-offload-v1"
+VALID_OFFLOAD_PRIVACY = {"public", "internal", "private-redacted"}
 
 
 def utc_now() -> str:
@@ -77,6 +79,8 @@ def resume_steps(session_id: str, workspace: str, openspec_change: str) -> list[
         f"Read `.agent/sessions/{session_id}/context.md`.",
         f"Read `.agent/sessions/{session_id}/changes.md`.",
         f"Read `.agent/sessions/{session_id}/validation.md`.",
+        f"Read `.agent/sessions/{session_id}/grounding.md` and confirm current repository truth before editing.",
+        f"Read `.agent/sessions/{session_id}/offload-index.md`, then use offload recall only for selected evidence-backed history.",
         f"If linked, read the embedded spec change: `{openspec_change}`.",
     ]
     if Path(".agent/workflow.json").exists() and Path(".agent/worktrees.json").exists():
@@ -244,6 +248,22 @@ def session_dir(session_id: str) -> Path:
     return SESSION_ROOT / session_id
 
 
+def offload_path(session_id: str) -> Path:
+    return session_dir(session_id) / "offload.jsonl"
+
+
+def grounding_path(session_id: str) -> Path:
+    return session_dir(session_id) / "grounding.md"
+
+
+def offload_index_path(session_id: str) -> Path:
+    return session_dir(session_id) / "offload-index.md"
+
+
+def task_map_path(session_id: str) -> Path:
+    return session_dir(session_id) / "task-map.mmd"
+
+
 def require_active() -> str:
     session_id = active_session_id()
     if not session_id:
@@ -253,6 +273,235 @@ def require_active() -> str:
         print(f"error: active session folder is missing: {session_dir(session_id)}", file=sys.stderr)
         raise SystemExit(1)
     return session_id
+
+
+def load_jsonl(path: Path) -> tuple[list[dict], list[str]]:
+    rows: list[dict] = []
+    errors: list[str] = []
+    if not path.exists():
+        return rows, errors
+    for index, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError as exc:
+            errors.append(f"{path}:{index}: {exc}")
+            continue
+        rows.append(item)
+    return rows, errors
+
+
+def session_offload_entries(session_id: str) -> tuple[list[dict], list[str]]:
+    entries, errors = load_jsonl(offload_path(session_id))
+    for item in entries:
+        if item.get("schema") != OFFLOAD_SCHEMA:
+            errors.append(f"{offload_path(session_id)} entry {item.get('id') or '<missing-id>'} has invalid schema")
+        if item.get("authority") != "advisory":
+            errors.append(f"{offload_path(session_id)} entry {item.get('id') or '<missing-id>'} is not advisory")
+        evidence = item.get("evidence")
+        if not isinstance(evidence, list) or not evidence:
+            errors.append(f"{offload_path(session_id)} entry {item.get('id') or '<missing-id>'} has no evidence handles")
+    return entries, errors
+
+
+def runlog_ids() -> set[str]:
+    rows, _ = load_jsonl(RUNLOG_PATH)
+    return {str(item.get("id")) for item in rows if item.get("id")}
+
+
+def session_event_ids() -> set[str]:
+    rows, _ = load_jsonl(SESSION_EVENTS_PATH)
+    return {str(item.get("id")) for item in rows if item.get("id")}
+
+
+def strip_line_suffix(handle: str) -> str:
+    match = re.match(r"^(.+?):\d+(?::\d+)?$", handle)
+    return match.group(1) if match else handle
+
+
+def evidence_exists(handle: str) -> bool:
+    handle = handle.strip()
+    if not handle:
+        return False
+    if handle in runlog_ids() or handle in session_event_ids():
+        return True
+    candidate = Path(strip_line_suffix(handle))
+    return candidate.exists()
+
+
+def dangling_evidence(entries: list[dict]) -> list[str]:
+    errors: list[str] = []
+    for item in entries:
+        entry_id = item.get("id") or "<missing-id>"
+        for handle in item.get("evidence", []):
+            if not isinstance(handle, str) or not evidence_exists(handle):
+                errors.append(f"{entry_id} evidence is missing: {handle}")
+    return errors
+
+
+def active_task_summary() -> list[str]:
+    board_path = Path(".agent/task-board.json")
+    if not board_path.exists():
+        return ["- Task board: not generated for this profile."]
+    try:
+        board = json.loads(board_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return [f"- Task board: invalid JSON ({exc})."]
+    items = [
+        item
+        for item in board.get("items", [])
+        if item.get("state") not in {"done", "archived", "cancelled"}
+    ]
+    if not items:
+        return ["- Active tasks: none recorded."]
+    lines = []
+    for item in items[:8]:
+        lines.append(
+            f"- {item.get('id', 'unknown')}: {item.get('title', '')} "
+            f"[state={item.get('state', 'unknown')}, stage={item.get('current_stage', 'unknown')}, profile={item.get('profile', 'unknown')}]"
+        )
+    return lines
+
+
+def ensure_session_offload_files(session_id: str) -> None:
+    directory = session_dir(session_id)
+    write(directory / "refs" / ".gitkeep", "")
+    if not offload_path(session_id).exists():
+        write(offload_path(session_id), "")
+    if not grounding_path(session_id).exists():
+        write(grounding_path(session_id), render_grounding(session_id))
+    refresh_offload_artifacts(session_id)
+
+
+def render_grounding(session_id: str, note: str | None = None, checked: list[str] | None = None) -> str:
+    artifacts = artifacts_for(session_id)
+    git_status = run_git(["status", "--short"], fallback="")
+    checked_lines = [f"- {item}" for item in checked or []] or ["- Not recorded yet."]
+    note_lines = [f"- {note}"] if note else ["- None."]
+    return "\n".join(
+        [
+            f"# Grounding: {session_id}",
+            "",
+            "## Repository Truth",
+            "",
+            f"- Workspace: {artifacts.get('workspace_path', str(Path.cwd()))}",
+            f"- Current branch: {run_git(['branch', '--show-current'])}",
+            f"- Current commit: {run_git(['rev-parse', '--short', 'HEAD'])}",
+            f"- Linked spec change: {artifacts.get('openspec_change', 'none')}",
+            f"- Workflow stage: {artifacts.get('workflow_stage', 'unknown')}",
+            "",
+            "## Git Status",
+            "",
+            "```text",
+            git_status or "clean or unavailable",
+            "```",
+            "",
+            "## Active Task State",
+            "",
+            *active_task_summary(),
+            "",
+            "## Current Facts Checked",
+            "",
+            *checked_lines,
+            "",
+            "## Stale Assumptions Corrected",
+            "",
+            *note_lines,
+            "",
+            "## Rule",
+            "",
+            "- Current repository files, configs, specs, task-board state, and runlog evidence override memory summaries and prior chat assumptions.",
+            "",
+        ]
+    )
+
+
+def mermaid_id(value: str) -> str:
+    value = re.sub(r"[^A-Za-z0-9_]", "_", value)
+    if not value or value[0].isdigit():
+        value = f"n_{value}"
+    return value[:80]
+
+
+def mermaid_label(value: str, limit: int = 72) -> str:
+    value = re.sub(r"[\"]", "'", " ".join(value.split()))
+    return value[: limit - 3] + "..." if len(value) > limit else value
+
+
+def render_task_map(session_id: str) -> str:
+    entries, _ = session_offload_entries(session_id)
+    artifacts = artifacts_for(session_id)
+    lines = [
+        "flowchart TD",
+        f"  {mermaid_id(session_id)}[\"session: {mermaid_label(session_id)}\"]",
+    ]
+    spec = artifacts.get("openspec_change")
+    if spec and spec != "none":
+        spec_node = mermaid_id(f"spec_{spec}")
+        lines.append(f"  {spec_node}[\"spec: {mermaid_label(str(spec))}\"]")
+        lines.append(f"  {mermaid_id(session_id)} --> {spec_node}")
+    for item in entries[-30:]:
+        entry_id = str(item.get("id") or "offload")
+        entry_node = mermaid_id(entry_id)
+        lines.append(f"  {entry_node}[\"{mermaid_label(str(item.get('summary', entry_id)))}\"]")
+        lines.append(f"  {mermaid_id(session_id)} --> {entry_node}")
+        task_id = item.get("related_task_id")
+        if task_id:
+            task_node = mermaid_id(f"task_{task_id}")
+            lines.append(f"  {task_node}[\"task: {mermaid_label(str(task_id))}\"]")
+            lines.append(f"  {entry_node} --> {task_node}")
+        spec_change = item.get("spec_change")
+        if spec_change and spec_change != "none":
+            spec_node = mermaid_id(f"spec_{spec_change}")
+            lines.append(f"  {spec_node}[\"spec: {mermaid_label(str(spec_change))}\"]")
+            lines.append(f"  {entry_node} --> {spec_node}")
+    return "\n".join(lines) + "\n"
+
+
+def render_offload_index(session_id: str) -> str:
+    entries, errors = session_offload_entries(session_id)
+    lines = [
+        f"# Offload Index: {session_id}",
+        "",
+        "Session offload entries are advisory summaries with evidence handles. Confirm facts against the repository before editing.",
+        "",
+        "## Entries",
+        "",
+    ]
+    if not entries:
+        lines.append("- No offload entries recorded yet.")
+    for item in entries[-20:]:
+        evidence = ", ".join(str(handle) for handle in item.get("evidence", []))
+        lines.append(
+            f"- `{item.get('id', 'unknown')}` {item.get('created_at', 'unknown')} "
+            f"[{item.get('kind', 'unknown')}]: {item.get('summary', '')}"
+        )
+        lines.append(f"  - Evidence: {evidence or 'missing'}")
+        if item.get("related_task_id"):
+            lines.append(f"  - Task: {item.get('related_task_id')}")
+        if item.get("spec_change") and item.get("spec_change") != "none":
+            lines.append(f"  - Spec: {item.get('spec_change')}")
+    if errors:
+        lines.extend(["", "## Integrity Warnings", ""])
+        lines.extend(f"- {error}" for error in errors)
+    lines.extend(
+        [
+            "",
+            "## Recall",
+            "",
+            "```bash",
+            "python3 .agent/tools/agent_session.py offload-recall <query>",
+            "```",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def refresh_offload_artifacts(session_id: str) -> None:
+    write(offload_index_path(session_id), render_offload_index(session_id))
+    write(task_map_path(session_id), render_task_map(session_id))
 
 
 def render_resume_prompt(session_id: str, workspace: str, openspec_change: str) -> str:
@@ -283,6 +532,7 @@ def artifacts_for(session_id: str) -> dict:
 
 def write_bootstrap(session_id: str) -> Path:
     directory = session_dir(session_id)
+    ensure_session_offload_files(session_id)
     artifacts = artifacts_for(session_id)
     workspace = artifacts.get("workspace_path", str(Path.cwd()))
     openspec_change = artifacts.get("openspec_change", "none")
@@ -335,6 +585,14 @@ def write_bootstrap(session_id: str) -> Path:
         "## Validation",
         "",
         *first_nonempty_lines(directory / "validation.md", 80),
+        "",
+        "## Truth-First Grounding",
+        "",
+        *first_nonempty_lines(grounding_path(session_id), 80),
+        "",
+        "## Offload Index",
+        "",
+        *first_nonempty_lines(offload_index_path(session_id), 80),
         "",
         "## Recent Session Events",
         "",
@@ -526,6 +784,7 @@ active
     )
     write(directory / "resume-prompt.md", render_resume_prompt(session_id, workspace, openspec_change))
     write(directory / "artifacts.json", json.dumps(artifacts, indent=2) + "\n")
+    ensure_session_offload_files(session_id)
     write_bootstrap(session_id)
     maybe_scan_context()
     emit_session_event(
@@ -535,6 +794,7 @@ active
         artifacts=[str(directory / "session.md"), str(directory / "resume-prompt.md")],
         payload={"client_surface": client_surface, "remote_kind": remote_kind, "openspec_change": openspec_change},
     )
+    refresh_offload_artifacts(session_id)
     write_bootstrap(session_id)
     return artifacts
 
@@ -632,6 +892,7 @@ def cmd_checkpoint(args: argparse.Namespace) -> int:
         },
     )
     compact_session(session_id, ingest_reason="checkpoint")
+    refresh_offload_artifacts(session_id)
     record_runlog(
         kind="session",
         outcome="completed",
@@ -654,6 +915,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         directory = session_dir(session_id)
         print(f"path: {directory}")
         print(f"resume_prompt: {directory / 'resume-prompt.md'}")
+        print(f"offload_index: {offload_index_path(session_id)}")
     return 0
 
 
@@ -691,6 +953,7 @@ def cmd_compact(args: argparse.Namespace) -> int:
         payload={"next": args.next or ""},
     )
     path = compact_session(session_id, args.summary, args.next)
+    refresh_offload_artifacts(session_id)
     record_runlog(
         kind="session",
         outcome="completed",
@@ -742,6 +1005,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             )
     else:
         directory = session_dir(session_id)
+        ensure_session_offload_files(session_id)
         for name in (
             "session.md",
             "context.md",
@@ -752,9 +1016,19 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             "resume-prompt.md",
             "bootstrap.md",
             "artifacts.json",
+            "grounding.md",
+            "offload.jsonl",
+            "offload-index.md",
+            "task-map.mmd",
+            "refs/.gitkeep",
         ):
             if not (directory / name).exists():
                 errors.append(f"missing {directory / name}")
+        entries, offload_errors = session_offload_entries(session_id)
+        errors.extend(offload_errors)
+        errors.extend(dangling_evidence(entries))
+        if not read(grounding_path(session_id)).strip():
+            errors.append(f"empty {grounding_path(session_id)}")
 
         validation = read(directory / "validation.md")
         validation_entries = [
@@ -770,6 +1044,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             warnings.append("worktree has changes not reflected verbatim in changes.md")
 
         refresh_resume_prompt(session_id)
+        if not grounding_path(session_id).exists():
+            write(grounding_path(session_id), render_grounding(session_id))
+        refresh_offload_artifacts(session_id)
         write_bootstrap(session_id)
 
     for warning in warnings:
@@ -853,6 +1130,163 @@ def cmd_events(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_grounding(args: argparse.Namespace) -> int:
+    session_id = args.session_id or require_active()
+    text = render_grounding(session_id, args.note, args.checked)
+    write(grounding_path(session_id), text)
+    emit_session_event(
+        event_type="grounding",
+        session_id=session_id,
+        summary="Refreshed truth-first grounding snapshot",
+        artifacts=[str(grounding_path(session_id))],
+        payload={"checked": args.checked, "note": args.note or ""},
+    )
+    record_runlog(
+        kind="session",
+        outcome="completed",
+        summary="refreshed truth-first grounding snapshot",
+        session_id=session_id,
+        command="agent_session.py grounding",
+        artifacts=[str(grounding_path(session_id))],
+    )
+    refresh_offload_artifacts(session_id)
+    write_bootstrap(session_id)
+    print(text)
+    return 0
+
+
+def cmd_offload_add(args: argparse.Namespace) -> int:
+    session_id = args.session_id or require_active()
+    if args.privacy not in VALID_OFFLOAD_PRIVACY:
+        print(f"error: privacy must be one of {', '.join(sorted(VALID_OFFLOAD_PRIVACY))}", file=sys.stderr)
+        return 1
+    evidence = [item.strip() for item in args.evidence if item.strip()]
+    if not evidence:
+        print("error: at least one --evidence handle is required", file=sys.stderr)
+        return 1
+    missing = [handle for handle in evidence if not evidence_exists(handle)]
+    if missing and not args.allow_missing_evidence:
+        for handle in missing:
+            print(f"error: evidence handle is missing: {handle}", file=sys.stderr)
+        return 1
+    artifacts = artifacts_for(session_id)
+    entry = {
+        "schema": OFFLOAD_SCHEMA,
+        "id": f"offload-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}",
+        "session_id": session_id,
+        "created_at": utc_now(),
+        "kind": args.kind,
+        "summary": args.summary,
+        "evidence": evidence,
+        "related_task_id": args.task_id or "",
+        "spec_change": args.spec_change or artifacts.get("openspec_change", "none"),
+        "confidence": args.confidence,
+        "privacy": args.privacy,
+        "authority": "advisory",
+    }
+    append(offload_path(session_id), json.dumps(entry, ensure_ascii=False) + "\n")
+    refresh_offload_artifacts(session_id)
+    emit_session_event(
+        event_type="offload",
+        session_id=session_id,
+        summary=args.summary,
+        artifacts=[str(offload_path(session_id)), str(offload_index_path(session_id)), str(task_map_path(session_id))],
+        payload={"offload_id": entry["id"], "evidence": evidence},
+    )
+    record_runlog(
+        kind="session",
+        outcome="completed",
+        summary=f"recorded session offload {entry['id']}",
+        session_id=session_id,
+        command="agent_session.py offload-add",
+        artifacts=[str(offload_path(session_id)), str(offload_index_path(session_id))],
+    )
+    write_bootstrap(session_id)
+    print(json.dumps(entry, indent=2))
+    return 0
+
+
+def cmd_offload_recall(args: argparse.Namespace) -> int:
+    session_id = args.session_id or require_active()
+    query = args.query.lower()
+    entries, errors = session_offload_entries(session_id)
+    matches = []
+    for item in entries:
+        haystack = " ".join(
+            [
+                str(item.get("summary", "")),
+                str(item.get("kind", "")),
+                str(item.get("related_task_id", "")),
+                str(item.get("spec_change", "")),
+                " ".join(str(handle) for handle in item.get("evidence", [])),
+            ]
+        ).lower()
+        if query in haystack:
+            matches.append(item)
+    result = {
+        "schema": "agent-session-offload-recall-v1",
+        "session_id": session_id,
+        "query": args.query,
+        "matches": matches[-args.limit :],
+        "errors": errors,
+        "rule": "Offload recall is advisory; verify current facts against repository truth sources before editing.",
+    }
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        if errors:
+            for error in errors:
+                print(f"warning: {error}")
+        if not result["matches"]:
+            print("no matching offload entries")
+            return 0
+        for item in result["matches"]:
+            print(f"{item.get('created_at')} | {item.get('id')} | {item.get('kind')} | {item.get('summary')}")
+            print(f"  evidence: {', '.join(str(handle) for handle in item.get('evidence', []))}")
+    return 0
+
+
+def cmd_offload_map(args: argparse.Namespace) -> int:
+    session_id = args.session_id or require_active()
+    refresh_offload_artifacts(session_id)
+    text = task_map_path(session_id).read_text(encoding="utf-8")
+    print(text)
+    return 0
+
+
+def cmd_rollover(args: argparse.Namespace) -> int:
+    session_id = args.session_id or require_active()
+    if args.summary or args.next:
+        compact_session(session_id, args.summary, args.next, ingest_reason="rollover")
+    if not grounding_path(session_id).exists() or args.refresh_grounding:
+        write(grounding_path(session_id), render_grounding(session_id, args.note, args.checked))
+    refresh_resume_prompt(session_id)
+    refresh_offload_artifacts(session_id)
+    bootstrap = write_bootstrap(session_id)
+    emit_session_event(
+        event_type="rollover",
+        session_id=session_id,
+        summary=args.summary or "Prepared session rollover packet",
+        artifacts=[
+            str(bootstrap),
+            str(session_dir(session_id) / "resume-prompt.md"),
+            str(grounding_path(session_id)),
+            str(offload_index_path(session_id)),
+        ],
+        payload={"next": args.next or ""},
+    )
+    record_runlog(
+        kind="session",
+        outcome="completed",
+        summary="prepared session rollover packet",
+        session_id=session_id,
+        command="agent_session.py rollover",
+        artifacts=[str(bootstrap), str(session_dir(session_id) / "resume-prompt.md")],
+    )
+    print(bootstrap.read_text(encoding="utf-8"))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -895,6 +1329,44 @@ def build_parser() -> argparse.ArgumentParser:
     events.add_argument("--limit", type=int, default=10)
     events.add_argument("--json", action="store_true")
     events.set_defaults(func=cmd_events)
+
+    grounding = subparsers.add_parser("grounding", help="Refresh truth-first grounding for the active session")
+    grounding.add_argument("session_id", nargs="?")
+    grounding.add_argument("--checked", action="append", default=[], help="Current file, config, command, or evidence checked")
+    grounding.add_argument("--note", help="Stale assumption corrected or grounding note")
+    grounding.set_defaults(func=cmd_grounding)
+
+    offload_add = subparsers.add_parser("offload-add", help="Record an evidence-backed compact session offload entry")
+    offload_add.add_argument("--summary", required=True)
+    offload_add.add_argument("--evidence", action="append", default=[], help="Path, path:line, runlog id, or session event id")
+    offload_add.add_argument("--kind", default="session-summary")
+    offload_add.add_argument("--task-id")
+    offload_add.add_argument("--spec-change")
+    offload_add.add_argument("--confidence", default="medium", choices=["low", "medium", "high"])
+    offload_add.add_argument("--privacy", default="internal", choices=sorted(VALID_OFFLOAD_PRIVACY))
+    offload_add.add_argument("--allow-missing-evidence", action="store_true")
+    offload_add.add_argument("session_id", nargs="?")
+    offload_add.set_defaults(func=cmd_offload_add)
+
+    offload_recall = subparsers.add_parser("offload-recall", help="Search advisory offload entries for the active session")
+    offload_recall.add_argument("query")
+    offload_recall.add_argument("--session-id")
+    offload_recall.add_argument("--limit", type=int, default=10)
+    offload_recall.add_argument("--json", action="store_true")
+    offload_recall.set_defaults(func=cmd_offload_recall)
+
+    offload_map = subparsers.add_parser("offload-map", help="Refresh and print the active session Mermaid task map")
+    offload_map.add_argument("session_id", nargs="?")
+    offload_map.set_defaults(func=cmd_offload_map)
+
+    rollover = subparsers.add_parser("rollover", help="Prepare bootstrap, grounding, offload index, and resume packet for a new session")
+    rollover.add_argument("session_id", nargs="?")
+    rollover.add_argument("--summary")
+    rollover.add_argument("--next")
+    rollover.add_argument("--checked", action="append", default=[])
+    rollover.add_argument("--note")
+    rollover.add_argument("--refresh-grounding", action="store_true")
+    rollover.set_defaults(func=cmd_rollover)
 
     doctor = subparsers.add_parser("doctor", help="Check active session continuity health")
     doctor.set_defaults(func=cmd_doctor)

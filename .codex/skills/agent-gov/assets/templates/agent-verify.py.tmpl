@@ -15,6 +15,7 @@ from pathlib import Path
 CONFIG_PATH = Path(".agent/mechanical-checks.json")
 BASELINES_PATH = Path(".agent/baselines.json")
 MARKDOWN_LINK_RE = re.compile(r"\[[^\]]+\]\(([^)]+)\)")
+OFFLOAD_SCHEMA = "agent-session-offload-v1"
 REVIEW_STATUSES = {"pending", "needs-fix", "pass", "accepted-with-exceptions", "not-required"}
 REQUIREMENT_STATUSES = {"pending", "in-progress", "complete", "blocked", "not-required"}
 REQUIREMENT_PROTECTED_STAGES = {
@@ -80,6 +81,92 @@ def check_jsonl(paths: list[str]) -> list[str]:
             except json.JSONDecodeError as exc:
                 invalid.append(f"invalid jsonl: {name}:{index}: {exc}")
     return invalid
+
+
+def check_jsonl_glob(pattern: str) -> list[str]:
+    invalid: list[str] = []
+    if not pattern:
+        return invalid
+    for path in Path(".").glob(pattern):
+        if path.is_file():
+            invalid.extend(check_jsonl([path.as_posix()]))
+    return invalid
+
+
+def jsonl_rows(path: Path) -> tuple[list[dict], list[str]]:
+    rows: list[dict] = []
+    errors: list[str] = []
+    if not path.exists():
+        return rows, errors
+    for index, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError as exc:
+            errors.append(f"invalid jsonl: {path}:{index}: {exc}")
+    return rows, errors
+
+
+def strip_line_suffix(handle: str) -> str:
+    match = re.match(r"^(.+?):\d+(?::\d+)?$", handle)
+    return match.group(1) if match else handle
+
+
+def id_set(path: Path) -> set[str]:
+    rows, _ = jsonl_rows(path)
+    return {str(item.get("id")) for item in rows if item.get("id")}
+
+
+def evidence_exists(handle: str, runlog_ids: set[str], event_ids: set[str]) -> bool:
+    handle = handle.strip()
+    if not handle:
+        return False
+    if handle in runlog_ids or handle in event_ids:
+        return True
+    return Path(strip_line_suffix(handle)).exists()
+
+
+def check_session_offload(config: dict) -> list[str]:
+    spec = config.get("checks", {}).get("session_offload", {})
+    session_root = Path(spec.get("session_root", ".agent/sessions"))
+    errors: list[str] = []
+    if not session_root.exists():
+        return errors
+    index = load_json(session_root / "index.json", {})
+    active_session = index.get("active_session")
+    if active_session and spec.get("require_grounding_for_active_session", True):
+        active_dir = session_root / str(active_session)
+        for name in ("grounding.md", "offload.jsonl", "offload-index.md", "task-map.mmd", "refs/.gitkeep"):
+            if not (active_dir / name).exists():
+                errors.append(f"active session missing {active_dir / name}")
+        bootstrap_text = (session_root / "bootstrap.md").read_text(encoding="utf-8", errors="ignore") if (session_root / "bootstrap.md").exists() else ""
+        if spec.get("bootstrap_must_include_grounding_and_offload", True):
+            if "Truth-First Grounding" not in bootstrap_text or "Offload Index" not in bootstrap_text:
+                errors.append(".agent/sessions/bootstrap.md missing grounding/offload sections")
+        grounding_text = (active_dir / "grounding.md").read_text(encoding="utf-8", errors="ignore") if (active_dir / "grounding.md").exists() else ""
+        if grounding_text and "override memory summaries" not in grounding_text:
+            errors.append(f"{active_dir / 'grounding.md'} missing truth-first memory boundary")
+    runlog_ids = id_set(Path(".agent/runlog.jsonl"))
+    event_ids = id_set(session_root / "events.jsonl")
+    for offload_file in session_root.glob("*/offload.jsonl"):
+        rows, parse_errors = jsonl_rows(offload_file)
+        errors.extend(parse_errors)
+        for item in rows:
+            entry_id = item.get("id") or "<missing-id>"
+            if item.get("schema") != spec.get("schema", OFFLOAD_SCHEMA):
+                errors.append(f"{offload_file} entry {entry_id} schema mismatch")
+            if spec.get("memory_is_advisory", True) and item.get("authority") != "advisory":
+                errors.append(f"{offload_file} entry {entry_id} must be advisory")
+            evidence = item.get("evidence")
+            if spec.get("require_evidence_handles", True) and (not isinstance(evidence, list) or not evidence):
+                errors.append(f"{offload_file} entry {entry_id} missing evidence handles")
+                continue
+            if spec.get("evidence_must_exist", True):
+                for handle in evidence or []:
+                    if not isinstance(handle, str) or not evidence_exists(handle, runlog_ids, event_ids):
+                        errors.append(f"{offload_file} entry {entry_id} dangling evidence: {handle}")
+    return errors
 
 
 def required_paths() -> list[str]:
@@ -422,11 +509,14 @@ def collect_snapshot() -> dict:
     checks = config.get("checks", {})
     json_invalid = check_json(checks.get("json_integrity", {}).get("paths", [])) if check_enabled(config, "json_integrity") else []
     jsonl_invalid = check_jsonl(checks.get("jsonl_integrity", {}).get("paths", [])) if check_enabled(config, "jsonl_integrity") else []
+    if check_enabled(config, "jsonl_integrity"):
+        jsonl_invalid.extend(check_jsonl_glob(checks.get("jsonl_integrity", {}).get("session_offload_glob", "")))
     missing_required = check_required_paths() if check_enabled(config, "required_paths") else []
     missing_templates = check_feature_templates(config) if check_enabled(config, "feature_templates") else []
     task_board_errors = check_task_board() if check_enabled(config, "task_board") else []
     role_contract_errors = check_role_contracts() if check_enabled(config, "role_contracts") else []
     governance_config_errors = check_governance_configs(config) if check_enabled(config, "manifest") else []
+    session_offload_errors = check_session_offload(config) if check_enabled(config, "session_offload") else []
     template_errors = render_json_template_errors(config) if check_enabled(config, "template_rendering") else []
     broken_links = check_markdown_links(config) if check_enabled(config, "markdown_links") else []
     test_file_count = count_test_files(config) if check_enabled(config, "test_baseline") else 0
@@ -438,6 +528,7 @@ def collect_snapshot() -> dict:
         "task_board": task_board_errors,
         "role_contracts": role_contract_errors,
         "governance_configs": governance_config_errors,
+        "session_offload": session_offload_errors,
         "template_rendering": template_errors,
         "broken_local_links": broken_links,
     }
@@ -461,6 +552,7 @@ def snapshot_has_hard_fail(snapshot: dict) -> bool:
         "task_board",
         "role_contracts",
         "governance_configs",
+        "session_offload",
         "template_rendering",
     ]
     return any(counts.get(key, 0) > 0 for key in hard_keys)

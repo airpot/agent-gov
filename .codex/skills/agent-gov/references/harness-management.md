@@ -64,6 +64,12 @@ openspec/config.yaml
     events.jsonl
     active.md
     bootstrap.md
+    <session-id>/
+      grounding.md
+      offload.jsonl
+      offload-index.md
+      task-map.mmd
+      refs/
   templates/
     session.md.tmpl
     handoff.md.tmpl
@@ -73,6 +79,12 @@ openspec/config.yaml
     validation.md.tmpl
     resume-prompt.md.tmpl
     artifacts.json.tmpl
+    grounding.md.tmpl
+    offload.jsonl.tmpl
+    offload-index.md.tmpl
+    task-map.mmd.tmpl
+    refs/
+      .gitkeep
     project-review.md.tmpl
     project-fix-log.md.tmpl
     implementation-plan.md.tmpl
@@ -160,6 +172,7 @@ Makefile                   # optional if missing
 - Use `.agent/dev-map.json` and `docs/DEV_MAP.md` as a concise repository navigation map for entry points, ownership, read-before-edit docs, and common patterns.
 - Use `.agent/skill-hygiene.json` and `scripts/agent_skill_hygiene.py` for read-only skill topology, source/hash, symlink, frontmatter, stale, and risk-signal scans.
 - Use `.agent/memory.json` as the cross-session memory policy for summaries, indexes, privacy redaction, and progressive retrieval.
+- Use `.agent/sessions/<session-id>/offload.jsonl`, `offload-index.md`, `task-map.mmd`, and `grounding.md` for evidence-backed session offload and truth-first rollover. Offload entries are advisory; they must point to durable evidence and cannot override current repo truth.
 - Use `.agent/context.json` as the context budget policy for agent-facing docs, bootstrap packets, memory digests, embedded spec change docs, and subagent output size.
 - Use `.agent/capabilities.json` as the capability, skill/tool/MCP taxonomy, integration, permission, and risk registry for agent-visible skills, tools, resources, adapters, and integrations.
 - Use `.agent/runlog.jsonl` as the append-only evidence ledger for validation runs, review-fix gates, and high-risk capability use; use `.agent/sessions/events.jsonl` as the append-only session lifecycle stream.
@@ -204,6 +217,8 @@ python3 scripts/agent_validate.py --list
 python3 scripts/agent_sync_skills.py --dry-run
 python3 .agent/tools/agent_memory.py doctor
 python3 .agent/tools/agent_context.py doctor
+python3 .agent/tools/agent_session.py grounding
+python3 .agent/tools/agent_session.py offload-map
 python3 scripts/agent_spec.py list --json
 python3 .agent/tools/agent_session.py status
 ```

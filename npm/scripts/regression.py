@@ -439,6 +439,134 @@ def assert_task_board_guards(init_script: Path, temp_root: Path, python: str) ->
         raise SystemExit(1)
 
 
+def assert_session_offload_protocol(target: Path, python: str) -> None:
+    run(
+        [
+            python,
+            ".agent/tools/agent_session.py",
+            "start",
+            "offload-smoke",
+            "--goal",
+            "Offload smoke",
+        ],
+        cwd=target,
+    )
+    index = json.loads((target / ".agent" / "sessions" / "index.json").read_text(encoding="utf-8"))
+    session_id = index.get("active_session")
+    if not session_id:
+        print("session offload smoke did not create an active session", file=sys.stderr)
+        raise SystemExit(1)
+    session_dir = target / ".agent" / "sessions" / session_id
+    for relative in ("grounding.md", "offload.jsonl", "offload-index.md", "task-map.mmd", "refs/.gitkeep"):
+        if not (session_dir / relative).exists():
+            print(f"session offload artifact missing: {relative}", file=sys.stderr)
+            raise SystemExit(1)
+    run([python, ".agent/tools/agent_session.py", "grounding", "--checked", "scripts/agent_check.py"], cwd=target)
+    add = json.loads(
+        run(
+            [
+                python,
+                ".agent/tools/agent_session.py",
+                "offload-add",
+                "--summary",
+                "Validated offload smoke",
+                "--evidence",
+                "scripts/agent_check.py",
+                "--kind",
+                "validation",
+            ],
+            cwd=target,
+        ).stdout
+    )
+    if add.get("schema") != "agent-session-offload-v1" or add.get("authority") != "advisory":
+        print("offload-add did not create an advisory offload entry", file=sys.stderr)
+        raise SystemExit(1)
+    recall = json.loads(
+        run([python, ".agent/tools/agent_session.py", "offload-recall", "smoke", "--json"], cwd=target).stdout
+    )
+    if not recall.get("matches"):
+        print("offload-recall did not return the smoke entry", file=sys.stderr)
+        raise SystemExit(1)
+    task_map = run([python, ".agent/tools/agent_session.py", "offload-map"], cwd=target).stdout
+    if "flowchart TD" not in task_map or "Validated offload smoke" not in task_map:
+        print("offload-map did not include the expected task canvas", file=sys.stderr)
+        print(task_map, file=sys.stderr)
+        raise SystemExit(1)
+    rollover = run(
+        [
+            python,
+            ".agent/tools/agent_session.py",
+            "rollover",
+            "--summary",
+            "Prepare rollover",
+            "--next",
+            "Continue validation",
+        ],
+        cwd=target,
+    ).stdout
+    if "Truth-First Grounding" not in rollover or "Offload Index" not in rollover:
+        print("rollover did not include grounding/offload sections", file=sys.stderr)
+        print(rollover, file=sys.stderr)
+        raise SystemExit(1)
+    run([python, ".agent/tools/agent_session.py", "doctor"], cwd=target)
+    run([python, "scripts/agent_check.py"], cwd=target)
+    run([python, "scripts/agent_verify.py", "doctor"], cwd=target)
+    score = json.loads(run([python, "scripts/agent_score.py", "score", "--json"], cwd=target).stdout)
+    if score.get("dimensions", {}).get("session_offload", {}).get("status") != "pass":
+        print("session_offload score did not pass for a valid offload session", file=sys.stderr)
+        print(json.dumps(score, indent=2), file=sys.stderr)
+        raise SystemExit(1)
+
+    original = (session_dir / "offload.jsonl").read_text(encoding="utf-8")
+    (session_dir / "offload.jsonl").write_text(original + "{bad json\n", encoding="utf-8")
+    invalid_outputs = [
+        run([python, ".agent/tools/agent_session.py", "doctor"], cwd=target, expect_ok=False),
+        run([python, "scripts/agent_check.py"], cwd=target, expect_ok=False),
+        run([python, "scripts/agent_verify.py", "doctor"], cwd=target, expect_ok=False),
+        run([python, "scripts/agent_score.py", "score", "--json"], cwd=target, expect_ok=False),
+    ]
+    invalid_text = "\n".join(item.stdout + item.stderr for item in invalid_outputs)
+    if "offload" not in invalid_text.lower():
+        print("invalid offload JSONL was not reported", file=sys.stderr)
+        print(invalid_text, file=sys.stderr)
+        raise SystemExit(1)
+
+    bad_entry = dict(add)
+    bad_entry["id"] = "offload-bad-evidence"
+    bad_entry["evidence"] = ["missing-evidence.md"]
+    (session_dir / "offload.jsonl").write_text(json.dumps(bad_entry) + "\n", encoding="utf-8")
+    dangling_outputs = [
+        run([python, ".agent/tools/agent_session.py", "doctor"], cwd=target, expect_ok=False),
+        run([python, "scripts/agent_check.py"], cwd=target, expect_ok=False),
+        run([python, "scripts/agent_verify.py", "doctor"], cwd=target, expect_ok=False),
+        run([python, "scripts/agent_score.py", "score", "--json"], cwd=target, expect_ok=False),
+    ]
+    dangling_text = "\n".join(item.stdout + item.stderr for item in dangling_outputs)
+    if "missing-evidence.md" not in dangling_text:
+        print("dangling offload evidence was not reported", file=sys.stderr)
+        print(dangling_text, file=sys.stderr)
+        raise SystemExit(1)
+
+    bad_entry["evidence"] = ["scripts/agent_check.py"]
+    bad_entry["authority"] = "authoritative"
+    (session_dir / "offload.jsonl").write_text(json.dumps(bad_entry) + "\n", encoding="utf-8")
+    authority_outputs = [
+        run([python, ".agent/tools/agent_session.py", "doctor"], cwd=target, expect_ok=False),
+        run([python, "scripts/agent_check.py"], cwd=target, expect_ok=False),
+        run([python, "scripts/agent_verify.py", "doctor"], cwd=target, expect_ok=False),
+        run([python, "scripts/agent_score.py", "score", "--json"], cwd=target, expect_ok=False),
+    ]
+    authority_text = "\n".join(item.stdout + item.stderr for item in authority_outputs)
+    if "advisory" not in authority_text:
+        print("memory-as-truth offload authority was not reported", file=sys.stderr)
+        print(authority_text, file=sys.stderr)
+        raise SystemExit(1)
+
+    (session_dir / "offload.jsonl").write_text(original, encoding="utf-8")
+    run([python, ".agent/tools/agent_session.py", "doctor"], cwd=target)
+    run([python, "scripts/agent_verify.py", "doctor"], cwd=target)
+
+
 def main() -> int:
     python = sys.executable
     temp_root = Path(tempfile.mkdtemp(prefix="agent-gov-regression-"))
@@ -500,6 +628,16 @@ def main() -> int:
         if sorted(manifest.get("required_paths", [])) != sorted(harness.get("invariants", {}).get("required_paths", [])):
             print(".agent/manifest.json required_paths does not match .agent/harness.json", file=sys.stderr)
             return 1
+        for relative in (
+            ".agent/templates/grounding.md.tmpl",
+            ".agent/templates/offload.jsonl.tmpl",
+            ".agent/templates/offload-index.md.tmpl",
+            ".agent/templates/task-map.mmd.tmpl",
+            ".agent/templates/refs/.gitkeep",
+        ):
+            if not (target / relative).exists():
+                print(f"{relative} was not created", file=sys.stderr)
+                return 1
         if not (target / "docs" / "AI_CODING_GLOSSARY.md").exists():
             print("docs/AI_CODING_GLOSSARY.md was not created", file=sys.stderr)
             return 1
@@ -517,6 +655,7 @@ def main() -> int:
         assert_workflow_stage_closure(target)
         run([python, "scripts/agent_check.py"], cwd=target)
         run([python, "scripts/agent_migrate.py", "doctor"], cwd=target)
+        assert_session_offload_protocol(target, python)
         run([python, "scripts/agent_gc.py", "doctor", "--fail-on-warning"], cwd=target)
         run([python, "scripts/agent_skill_hygiene.py", "doctor"], cwd=target)
         hygiene_report = json.loads(run([python, "scripts/agent_skill_hygiene.py", "report", "--json"], cwd=target).stdout)
@@ -643,7 +782,7 @@ def main() -> int:
             return 1
         run([python, "scripts/agent_score.py", "doctor"], cwd=target)
         score_report = json.loads(run([python, "scripts/agent_score.py", "score", "--json"], cwd=target).stdout)
-        for dimension in ("dev_map", "skill_hygiene", "harness_evolution", "mcp_policy", "governance_gc"):
+        for dimension in ("dev_map", "skill_hygiene", "harness_evolution", "mcp_policy", "governance_gc", "session_offload"):
             if dimension not in score_report.get("dimensions", {}):
                 print(f"agent_score.py did not include {dimension}", file=sys.stderr)
                 return 1

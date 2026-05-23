@@ -31,6 +31,11 @@ Long-term memory is a retrieval aid layered on top of durable project files. It 
     resume-prompt.md
     bootstrap.md
     artifacts.json
+    grounding.md
+    offload.jsonl
+    offload-index.md
+    task-map.mmd
+    refs/
   bootstrap.md
 .agent/memory/
   events.jsonl
@@ -56,6 +61,7 @@ docs/DEV_MAP.md
 
 1. **start**
    - Create a session directory.
+   - Create `grounding.md`, `offload.jsonl`, `offload-index.md`, `task-map.mmd`, and `refs/.gitkeep`.
    - Append a `started` event to `.agent/sessions/events.jsonl`.
    - Record goal, remote workspace path, git branch, git commit, embedded spec change, and client surface.
    - Record current workflow stage, base branch, and worktree path when isolated work is used.
@@ -73,6 +79,7 @@ docs/DEV_MAP.md
 3. **pre-compact**
    - Summarize task state into files before the session becomes too large.
    - Update `.agent/task-board.json` and relevant `docs/features/<task-id>/` stage documents before compaction.
+   - Add evidence-backed offload entries with `python3 .agent/tools/agent_session.py offload-add --summary "..." --evidence <path-or-runlog-id>` for context that would otherwise be lost.
    - Do not wait for OOM or context failure.
    - Run `python3 .agent/tools/agent_session.py compact`.
    - Run `python3 .agent/tools/agent_memory.py ingest-session --reason compact` to refresh searchable long-term memory; identical compact summaries should not create duplicate memory records.
@@ -81,6 +88,8 @@ docs/DEV_MAP.md
 
 4. **rollover**
    - Start a new Codex session with `bootstrap.md` or `resume-prompt.md`.
+   - Run `python3 .agent/tools/agent_session.py rollover` before leaving a long session when possible.
+   - Read `grounding.md` and `offload-index.md` after `active.md`; treat offload recall as advisory until verified against current files.
    - Read recent append-only session events with `python3 .agent/tools/agent_session.py events --limit 10` when handoff state is unclear.
    - Use progressive memory retrieval: `timeline` first, `search` second, `detail` only for selected records.
    - Use runlog retrieval: `tail` first, then `summary` when validation or session evidence is unclear.
@@ -115,6 +124,7 @@ docs/DEV_MAP.md
 9. Run `python3 .agent/tools/agent_memory.py timeline --limit 10`, then search/detail only if needed.
 10. Run `python3 .agent/tools/agent_context.py scan --limit 10` when bootstrap, docs, or memory digest look large.
 11. Run `python3 scripts/agent_runlog.py tail --limit 10` when validation or handoff evidence is unclear.
+12. Use `python3 .agent/tools/agent_session.py offload-recall <query>` only after reading `offload-index.md`; verify recalled facts against repository truth sources.
 
 ## Automation Commands
 
@@ -122,6 +132,11 @@ Use these commands instead of manually stitching session files together:
 
 ```bash
 python3 .agent/tools/agent_session.py bootstrap
+python3 .agent/tools/agent_session.py grounding --checked "git status --short"
+python3 .agent/tools/agent_session.py offload-add --summary "..." --evidence <path-or-runlog-id>
+python3 .agent/tools/agent_session.py offload-recall "<query>"
+python3 .agent/tools/agent_session.py offload-map
+python3 .agent/tools/agent_session.py rollover --summary "..." --next "..."
 python3 .agent/tools/agent_session.py compact --summary "..." --next "..."
 python3 .agent/tools/agent_session.py doctor
 python3 .agent/tools/agent_session.py events --limit 10
@@ -136,6 +151,11 @@ python3 .agent/tools/governance_hook.py --event session-start
 ```
 
 - `bootstrap` prints and refreshes the active session startup packet.
+- `grounding` refreshes the truth-first repository snapshot; current files, configs, specs, task-board state, runlog evidence, and validation notes override memory and prior chat.
+- `offload-add` records compact session context with evidence handles. Entries are advisory and must not contain raw transcripts, terminal scrollback, secrets, or unsupported claims.
+- `offload-recall` searches advisory offload entries; use it after `offload-index.md`, then verify selected facts.
+- `offload-map` refreshes a small Mermaid task canvas from structured offload entries.
+- `rollover` refreshes handoff, grounding, offload index, task map, bootstrap, and resume prompt for a new native session.
 - `compact` refreshes `handoff.md`, `resume-prompt.md`, and `bootstrap.md`.
 - `events` reads the append-only session event stream. It is the session lifecycle event source; markdown files remain the human-readable handoff layer.
 - `doctor` checks the active session files, validation notes, and dirty worktree continuity.

@@ -60,6 +60,13 @@ APPEND_ONLY_PATHS = {
     ".agent/memory/events.jsonl",
     ".agent/context/stats.jsonl",
 }
+SESSION_OFFLOAD_TEMPLATES = (
+    "grounding.md.tmpl",
+    "offload.jsonl.tmpl",
+    "offload-index.md.tmpl",
+    "task-map.mmd.tmpl",
+    "refs/.gitkeep",
+)
 
 
 def utc_now() -> str:
@@ -249,6 +256,11 @@ def harness_config(
             ".agent/templates/validation.md.tmpl",
             ".agent/templates/resume-prompt.md.tmpl",
             ".agent/templates/artifacts.json.tmpl",
+            ".agent/templates/grounding.md.tmpl",
+            ".agent/templates/offload.jsonl.tmpl",
+            ".agent/templates/offload-index.md.tmpl",
+            ".agent/templates/task-map.mmd.tmpl",
+            ".agent/templates/refs/.gitkeep",
         ]
     )
     if profile_at_least(governance_profile, "standard"):
@@ -1534,7 +1546,15 @@ def memory_config(project_name: str, created_at: str) -> dict:
     }
 
 
-def context_budget_config(project_name: str, created_at: str) -> dict:
+def context_budget_config(project_name: str, created_at: str, governance_profile: str) -> dict:
+    total_budget = 30000
+    agent_instruction_budget = 2200
+    if profile_at_least(governance_profile, "full"):
+        # Full profile tracks native adapters, subagents, security/tooling, and
+        # skill distribution. Keep it bounded, but avoid shipping a scaffold
+        # that immediately warns before the project has added any content.
+        total_budget = 38000
+        agent_instruction_budget = 2400
     return {
         "schema": "agent-context-budget-v1",
         "project_name": project_name,
@@ -1598,9 +1618,9 @@ def context_budget_config(project_name: str, created_at: str) -> dict:
             "openspec/changes/*/tasks.md",
         ],
         "budgets": {
-            "max_total_tracked_tokens": 30000,
+            "max_total_tracked_tokens": total_budget,
             "max_single_doc_tokens": 5000,
-            "max_agent_instruction_tokens": 2200,
+            "max_agent_instruction_tokens": agent_instruction_budget,
             "max_claude_instruction_tokens": 2500,
             "max_bootstrap_tokens": 5000,
             "max_memory_digest_tokens": 1200,
@@ -2209,6 +2229,7 @@ def evals_config(project_name: str, created_at: str, governance_profile: str) ->
         "required_paths": {"weight": 16},
         "validation": {"weight": 10},
         "session_continuity": {"weight": 8},
+        "session_offload": {"weight": 8},
         "runlog": {"weight": 6},
     }
     if profile_at_least(governance_profile, "standard"):
@@ -2312,6 +2333,7 @@ def mechanical_checks_config(project_name: str, created_at: str, governance_prof
             "enabled": True,
             "fail_on_invalid": True,
             "paths": [".agent/runlog.jsonl", ".agent/sessions/events.jsonl", ".agent/memory/events.jsonl", ".agent/context/stats.jsonl"],
+            "session_offload_glob": ".agent/sessions/*/offload.jsonl",
         },
         "required_paths": {
             "enabled": True,
@@ -2332,6 +2354,16 @@ def mechanical_checks_config(project_name: str, created_at: str, governance_prof
             "enabled": True,
             "path": ".agent/role-contracts.json",
             "enforce_finder_cannot_fix": True,
+        },
+        "session_offload": {
+            "enabled": True,
+            "session_root": ".agent/sessions",
+            "schema": "agent-session-offload-v1",
+            "require_grounding_for_active_session": True,
+            "require_evidence_handles": True,
+            "evidence_must_exist": True,
+            "memory_is_advisory": True,
+            "bootstrap_must_include_grounding_and_offload": True,
         },
         "manifest": {
             "enabled": True,
@@ -2490,6 +2522,14 @@ def manifest_config(project_name: str, created_at: str, harness: dict, evals: di
         "critical_json": critical_json,
         "json_without_schema": json_without_schema,
         "jsonl_files": jsonl_files,
+        "session_offload": {
+            "schema": "agent-session-offload-v1",
+            "glob": ".agent/sessions/*/offload.jsonl",
+            "grounding": ".agent/sessions/*/grounding.md",
+            "index": ".agent/sessions/*/offload-index.md",
+            "task_map": ".agent/sessions/*/task-map.mmd",
+            "authority": "advisory",
+        },
         "score_dimensions": sorted(evals.get("dimensions", {})),
         "policy": {
             "generated_scripts_should_prefer_manifest": True,
@@ -2751,26 +2791,13 @@ def agent_ground_rules(governance_profile: str) -> tuple[str, str]:
     full = []
     if profile_at_least(governance_profile, "standard"):
         standard = [
-            "- Use `.agent/workflow.json` and `.agent/workflow-profiles.json` for risk, profile selection, spec, plan, implementation, diff, worktree, TDD/debugging, review, and completion gates.",
-            "- Use `.agent/task-board.json` and `docs/features/` for cross-session task state and feature-stage documents.",
-            "- Use `.agent/risk-zones.json`, `.agent/review-policy.json`, and `.agent/worktrees.json` for autonomy, diff traceability, human review evidence, and isolated work.",
-            "- Use `.agent/role-contracts.json` so verifier/reviewer roles report findings and route fixes back instead of fixing directly.",
-            "- Use `.agent/knowledge.json`, `.agent/memory.json`, and `.agent/context.json` for durable docs, memory retrieval, and context budgets.",
-            "- Use `.agent/dev-map.json` and `docs/DEV_MAP.md` to find entry points, ownership, and read-before-edit docs before broad changes.",
-            "- Use `.agent/skill-hygiene.json` and `scripts/agent_skill_hygiene.py` for read-only skill topology, source, hash, symlink, frontmatter, stale, and risk-signal scans.",
-            "- Use `.agent/capabilities.json`, `.agent/mechanical-checks.json`, and `.agent/baselines.json` for capability risk, hard checks, and before/after baselines.",
-            "- Use `.agent/harness-evolution.json` for incident taxonomy and for promoting repeated failures into rules, skills, scripts, workflow gates, role contracts, tools, or docs.",
-            "- Use `.agent/mcp-policy.json` as the disabled-by-default trust-boundary policy before enabling any MCP or external integration.",
-            "- Use `.agent/governance-gc.json` and `scripts/agent_gc.py` for periodic governance gardening.",
-            "- Use `docs/AI_CODING_GLOSSARY.md` for shared skill/tool/MCP, harness, session, memory, and review terms.",
-            "- Use `docs/DOMAIN_GLOSSARY.md` for project-domain terminology; resolve naming conflicts before implementation.",
+            "- Use `.agent/workflow*.json`, `.agent/task-board.json`, `docs/features/`, `.agent/risk-zones.json`, `.agent/review-policy.json`, `.agent/worktrees.json`, and `.agent/role-contracts.json` for task flow, autonomy, isolation, review evidence, and finder-cannot-fix separation.",
+            "- Use `.agent/knowledge.json`, `.agent/memory.json`, `.agent/context.json`, `.agent/dev-map.json`, `docs/DEV_MAP.md`, `docs/AI_CODING_GLOSSARY.md`, and `docs/DOMAIN_GLOSSARY.md` for durable knowledge, memory retrieval, context budgets, navigation, and terminology.",
+            "- Use `.agent/capabilities.json`, `.agent/mechanical-checks.json`, `.agent/baselines.json`, `.agent/harness-evolution.json`, `.agent/mcp-policy.json`, `.agent/governance-gc.json`, and `scripts/agent_*` doctors for capability risk, hard checks, incident promotion, integration boundaries, and governance gardening.",
         ]
     if profile_at_least(governance_profile, "full"):
         full = [
-            "- Use `.agent/subagents.json` for delegated work when the active platform allows it; require disjoint write boundaries and concise `===SNAPSHOT===` JSON reports.",
-            "- Use `.agent/hooks.json` for advisory bootstrap and checkpoint reminders.",
-            "- Use `.agent/tooling.json` and `.agent/security.json` for bounded inspection and optional security/supply-chain suites.",
-            "- Use `.agent/skill-distribution.json` when project skills need to be mirrored into current agent skill directories.",
+            "- Use `.agent/subagents.json`, `.agent/hooks.json`, `.agent/tooling.json`, `.agent/security.json`, and `.agent/skill-distribution.json` only when delegated work, native adapters, bounded inspection, security suites, or skill mirroring are actually in scope.",
         ]
     return lines(standard), lines(full)
 
@@ -3051,6 +3078,7 @@ def build_values(root: Path, args: argparse.Namespace) -> dict[str, str]:
         "openspec_change": "none",
         "session_id": "template",
         "goal": "Start a durable agent development session.",
+        "workspace_path": str(root),
     }
 
 
@@ -3167,7 +3195,7 @@ def init_project(args: argparse.Namespace) -> int:
         )
         writer.write(
             ".agent/context.json",
-            json.dumps(context_budget_config(project_name, values["created_at"]), indent=2) + "\n",
+            json.dumps(context_budget_config(project_name, values["created_at"], governance_profile), indent=2) + "\n",
         )
         writer.write(
             ".agent/capabilities.json",
@@ -3238,6 +3266,7 @@ def init_project(args: argparse.Namespace) -> int:
         "validation.md.tmpl",
         "resume-prompt.md.tmpl",
         "artifacts.json.tmpl",
+        *SESSION_OFFLOAD_TEMPLATES,
     )
     standard_templates = (
         "project-review.md.tmpl",

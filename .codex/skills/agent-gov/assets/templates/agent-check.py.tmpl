@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -55,6 +56,11 @@ BASE_REQUIRED = [
     ".agent/sessions/events.jsonl",
     ".agent/sessions/active.md",
     ".agent/sessions/bootstrap.md",
+    ".agent/templates/grounding.md.tmpl",
+    ".agent/templates/offload.jsonl.tmpl",
+    ".agent/templates/offload-index.md.tmpl",
+    ".agent/templates/task-map.mmd.tmpl",
+    ".agent/templates/refs/.gitkeep",
     ".agent/templates/project-review.md.tmpl",
     ".agent/templates/project-fix-log.md.tmpl",
     ".agent/templates/implementation-plan.md.tmpl",
@@ -192,6 +198,7 @@ REQUIREMENT_PROTECTED_STAGES = {
     "handoff",
     "finish",
 }
+OFFLOAD_SCHEMA = "agent-session-offload-v1"
 
 
 def load_json(path: Path, label: str) -> dict:
@@ -218,6 +225,79 @@ def load_jsonl(path: Path, label: str) -> list[dict]:
             print(f"error: {label} line {index} is invalid JSON: {exc}")
             raise SystemExit(1)
     return rows
+
+
+def load_jsonl_with_errors(path: Path, label: str) -> tuple[list[dict], list[str]]:
+    rows: list[dict] = []
+    errors: list[str] = []
+    if not path.exists():
+        return rows, errors
+    for index, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError as exc:
+            errors.append(f"{label} line {index} is invalid JSON: {exc}")
+    return rows, errors
+
+
+def strip_line_suffix(handle: str) -> str:
+    match = re.match(r"^(.+?):\d+(?::\d+)?$", handle)
+    return match.group(1) if match else handle
+
+
+def evidence_exists(root: Path, handle: str, runlog_ids: set[str], session_event_ids: set[str]) -> bool:
+    handle = handle.strip()
+    if not handle:
+        return False
+    if handle in runlog_ids or handle in session_event_ids:
+        return True
+    return (root / strip_line_suffix(handle)).exists()
+
+
+def check_session_offload(root: Path) -> list[str]:
+    errors: list[str] = []
+    index_path = root / ".agent/sessions/index.json"
+    if not index_path.exists():
+        return errors
+    try:
+        index = load_json(index_path, ".agent/sessions/index.json")
+    except SystemExit:
+        raise
+    active_session = index.get("active_session")
+    if not active_session:
+        return errors
+    session_dir = root / ".agent/sessions" / str(active_session)
+    required = ["grounding.md", "offload.jsonl", "offload-index.md", "task-map.mmd", "refs/.gitkeep"]
+    for name in required:
+        if not (session_dir / name).exists():
+            errors.append(f"active session missing {session_dir / name}")
+    grounding_text = (session_dir / "grounding.md").read_text(encoding="utf-8", errors="ignore") if (session_dir / "grounding.md").exists() else ""
+    if "Repository Truth" not in grounding_text or "override memory summaries" not in grounding_text:
+        errors.append(f"{session_dir / 'grounding.md'} must record truth-first repository grounding")
+    bootstrap_text = (root / ".agent/sessions/bootstrap.md").read_text(encoding="utf-8", errors="ignore") if (root / ".agent/sessions/bootstrap.md").exists() else ""
+    if "Truth-First Grounding" not in bootstrap_text or "Offload Index" not in bootstrap_text:
+        errors.append(".agent/sessions/bootstrap.md must include grounding and offload sections")
+    runlog_ids = {str(item.get("id")) for item in load_jsonl(root / ".agent/runlog.jsonl", ".agent/runlog.jsonl") if item.get("id")} if (root / ".agent/runlog.jsonl").exists() else set()
+    event_ids = {str(item.get("id")) for item in load_jsonl(root / ".agent/sessions/events.jsonl", ".agent/sessions/events.jsonl") if item.get("id")} if (root / ".agent/sessions/events.jsonl").exists() else set()
+    for offload_file in (root / ".agent/sessions").glob("*/offload.jsonl"):
+        rows, parse_errors = load_jsonl_with_errors(offload_file, str(offload_file.relative_to(root)))
+        errors.extend(parse_errors)
+        for item in rows:
+            entry_id = item.get("id") or "<missing-id>"
+            if item.get("schema") != OFFLOAD_SCHEMA:
+                errors.append(f"{offload_file.relative_to(root)} entry {entry_id} schema must be {OFFLOAD_SCHEMA}")
+            if item.get("authority") != "advisory":
+                errors.append(f"{offload_file.relative_to(root)} entry {entry_id} must be advisory")
+            evidence = item.get("evidence")
+            if not isinstance(evidence, list) or not evidence:
+                errors.append(f"{offload_file.relative_to(root)} entry {entry_id} must include evidence handles")
+                continue
+            for handle in evidence:
+                if not isinstance(handle, str) or not evidence_exists(root, handle, runlog_ids, event_ids):
+                    errors.append(f"{offload_file.relative_to(root)} entry {entry_id} evidence is missing: {handle}")
+    return errors
 
 
 def config_path_pointers(config: dict) -> dict[str, str]:
@@ -376,6 +456,9 @@ def main() -> int:
             if item.get("schema") != "agent-session-event-v1":
                 print("error: .agent/sessions/events.jsonl entries must use schema agent-session-event-v1")
                 return 1
+    for error in check_session_offload(root):
+        print(f"error: {error}")
+        return 1
 
     spec_path = root / ".agent/spec.json"
     if openspec_enabled:
@@ -888,6 +971,7 @@ def main() -> int:
             "feature_templates",
             "task_board",
             "role_contracts",
+            "session_offload",
             "manifest",
             "dev_map",
             "skill_hygiene",

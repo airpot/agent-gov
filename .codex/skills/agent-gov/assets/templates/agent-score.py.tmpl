@@ -74,6 +74,7 @@ JSONL_FILES = [
     ".agent/memory/events.jsonl",
     ".agent/context/stats.jsonl",
 ]
+OFFLOAD_SCHEMA = "agent-session-offload-v1"
 CRITICAL_JSON_FILES = {
     ".agent/config.json",
     ".agent/manifest.json",
@@ -109,13 +110,14 @@ DEFAULT_DIMENSION_WEIGHTS = {
     "review_policy": 8,
     "context_budget": 8,
     "session_continuity": 8,
+    "session_offload": 8,
     "memory": 8,
     "capabilities": 8,
     "security": 8,
     "knowledge": 6,
     "runlog": 6,
 }
-HARD_FAIL_DIMENSIONS = {"project_integrity", "required_paths", "workflow_profiles", "task_board", "mechanical_verification", "governance_gc"}
+HARD_FAIL_DIMENSIONS = {"project_integrity", "required_paths", "workflow_profiles", "task_board", "mechanical_verification", "session_offload", "governance_gc"}
 REVIEW_STATUSES = {"pending", "needs-fix", "pass", "accepted-with-exceptions", "not-required"}
 REQUIREMENT_STATUSES = {"pending", "in-progress", "complete", "blocked", "not-required"}
 REQUIREMENT_PROTECTED_STAGES = {
@@ -200,6 +202,40 @@ def iter_jsonl(path: Path) -> list[dict]:
         except json.JSONDecodeError:
             rows.append({"schema": "invalid", "raw": line})
     return rows
+
+
+def iter_jsonl_with_errors(path: Path) -> tuple[list[dict], list[str]]:
+    rows: list[dict] = []
+    errors: list[str] = []
+    if not path.exists():
+        return rows, errors
+    for index, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError as exc:
+            errors.append(f"{path}:{index}: {exc}")
+    return rows, errors
+
+
+def strip_line_suffix(handle: str) -> str:
+    match = re.match(r"^(.+?):\d+(?::\d+)?$", handle)
+    return match.group(1) if match else handle
+
+
+def jsonl_ids(path: Path) -> set[str]:
+    rows, _ = iter_jsonl_with_errors(path)
+    return {str(item.get("id")) for item in rows if item.get("id")}
+
+
+def evidence_exists(handle: str, runlog_ids: set[str], event_ids: set[str]) -> bool:
+    handle = handle.strip()
+    if not handle:
+        return False
+    if handle in runlog_ids or handle in event_ids:
+        return True
+    return Path(strip_line_suffix(handle)).exists()
 
 
 def run_json_command(args: list[str]) -> tuple[dict | None, str | None]:
@@ -966,6 +1002,55 @@ def score_session_continuity() -> dict:
     return dimension("session_continuity", score, findings, evidence)
 
 
+def score_session_offload() -> dict:
+    session_root = Path(".agent/sessions")
+    findings: list[str] = []
+    evidence: list[str] = []
+    if not session_root.exists():
+        return dimension("session_offload", 0, ["missing .agent/sessions"], [])
+    index = load_json(session_root / "index.json", {})
+    active_session = index.get("active_session")
+    offload_files = sorted(session_root.glob("*/offload.jsonl"))
+    evidence.append(f"active_session={active_session or 'none'}")
+    evidence.append(f"{len(offload_files)} offload file(s)")
+    if active_session:
+        active_dir = session_root / str(active_session)
+        for name in ("grounding.md", "offload.jsonl", "offload-index.md", "task-map.mmd", "refs/.gitkeep"):
+            if not (active_dir / name).exists():
+                findings.append(f"active session missing {active_dir / name}")
+        grounding_text = (active_dir / "grounding.md").read_text(encoding="utf-8", errors="ignore") if (active_dir / "grounding.md").exists() else ""
+        if grounding_text and "override memory summaries" not in grounding_text:
+            findings.append("grounding missing truth-first memory boundary")
+        bootstrap_text = (session_root / "bootstrap.md").read_text(encoding="utf-8", errors="ignore") if (session_root / "bootstrap.md").exists() else ""
+        if "Truth-First Grounding" not in bootstrap_text or "Offload Index" not in bootstrap_text:
+            findings.append("bootstrap missing grounding/offload sections")
+    runlog_ids = jsonl_ids(RUNLOG_PATH)
+    event_ids = jsonl_ids(session_root / "events.jsonl")
+    entry_count = 0
+    for path in offload_files:
+        rows, errors = iter_jsonl_with_errors(path)
+        findings.extend(f"invalid offload jsonl: {error}" for error in errors)
+        for item in rows:
+            entry_count += 1
+            entry_id = item.get("id") or "<missing-id>"
+            if item.get("schema") != OFFLOAD_SCHEMA:
+                findings.append(f"{path} entry {entry_id} schema mismatch")
+            if item.get("authority") != "advisory":
+                findings.append(f"{path} entry {entry_id} must be advisory")
+            evidence_handles = item.get("evidence")
+            if not isinstance(evidence_handles, list) or not evidence_handles:
+                findings.append(f"{path} entry {entry_id} missing evidence handles")
+                continue
+            for handle in evidence_handles:
+                if not isinstance(handle, str) or not evidence_exists(handle, runlog_ids, event_ids):
+                    findings.append(f"{path} entry {entry_id} dangling evidence: {handle}")
+    evidence.append(f"{entry_count} offload entr(ies)")
+    if not active_session and not offload_files:
+        return dimension("session_offload", 100, findings, evidence)
+    score = 0 if findings else 100
+    return dimension("session_offload", score, findings, evidence)
+
+
 def score_memory() -> dict:
     memory = load_json(Path(".agent/memory.json"))
     findings: list[str] = []
@@ -1152,6 +1237,7 @@ def collect_scores(extra_runlog_events: int = 0) -> dict:
         "review_policy": score_review_policy,
         "context_budget": score_context_budget,
         "session_continuity": score_session_continuity,
+        "session_offload": score_session_offload,
         "memory": score_memory,
         "capabilities": score_capabilities,
         "security": score_security,

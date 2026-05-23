@@ -63,6 +63,9 @@ Do not adopt these as absolute project rules:
     <session-id>/
       validation.md
       handoff.md
+      grounding.md
+      offload-index.md
+      offload.jsonl
 docs/
   DOMAIN_GLOSSARY.md
   features/
@@ -217,4 +220,5 @@ Before saying work is complete:
 - For standard and full work, confirm task-board `review_gate.status=pass` with no open blocker, major, or minor findings.
 - Read the output and exit status.
 - Record the command, result, and runlog id or session validation note.
+- Before rollover or compaction for long-running work, refresh `grounding.md` and add only evidence-backed offload entries for context that would otherwise be lost.
 - State skipped checks plainly with reasons and residual risk.

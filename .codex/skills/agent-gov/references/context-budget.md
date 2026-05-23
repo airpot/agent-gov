@@ -109,12 +109,13 @@ python3 .agent/tools/agent_context.py suggest
 python3 .agent/tools/agent_context.py validate-pair <original> <compressed>
 ```
 
-`doctor` is read-only by default. Run `scan` before compaction or when `AGENTS.md`, `CLAUDE.md`, docs, embedded spec change docs, workflow policy, risk policy, review policy, worktree policy, or session bootstraps grow substantially. Use `doctor --write` only when you want a health check to refresh the latest context digest.
+`doctor` is read-only by default. Run `scan` before compaction or when `AGENTS.md`, `CLAUDE.md`, docs, embedded spec change docs, workflow policy, risk policy, review policy, worktree policy, session bootstraps, or offload indexes grow substantially. Use `doctor --write` only when you want a health check to refresh the latest context digest.
 
 ## Lifecycle Integration
 
 - Session start hook is read-only: it runs a no-write context preview and prints a short budget view.
 - Session compact refreshes `.agent/context/latest.md`.
 - Bootstrap includes the latest context digest.
+- Session rollover should prefer `offload-index.md` plus `offload-recall` commands over copying long histories into bootstrap.
 - Review-fix gates check whether governance files exceed budgets or duplicate instructions.
 - Subagent dispatch packets include an output budget so tool results do not flood the parent context.
