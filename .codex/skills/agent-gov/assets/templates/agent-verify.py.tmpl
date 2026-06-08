@@ -30,6 +30,15 @@ REQUIREMENT_PROTECTED_STAGES = {
     "handoff",
     "finish",
 }
+STAGE_REVIEW_REQUIRED_STAGES = (
+    "spec",
+    "plan",
+    "implementation",
+    "spec_review",
+    "quality_review",
+    "verification",
+    "handoff",
+)
 
 
 def utc_now() -> str:
@@ -280,6 +289,66 @@ def review_gate_errors(task_id: str, item: dict, profile: dict, policy: dict) ->
     return errors
 
 
+def stage_reviews(item: dict) -> dict:
+    reviews = item.get("stage_reviews")
+    return reviews if isinstance(reviews, dict) else {}
+
+
+def stage_review_required_for_profile(profile_name: str, policy: dict) -> bool:
+    required_profiles = set(policy.get("stage_review_loop_required_for_profiles", []))
+    return profile_name in required_profiles
+
+
+def stage_review_required_stages(policy: dict) -> list[str]:
+    configured = policy.get("stage_review_required_before_stage_exit")
+    if isinstance(configured, list) and configured:
+        return [str(stage) for stage in configured]
+    return list(STAGE_REVIEW_REQUIRED_STAGES)
+
+
+def required_stage_reviews_for_item(item: dict, profile: dict, policy: dict) -> list[str]:
+    profile_name = str(item.get("profile", ""))
+    if not stage_review_required_for_profile(profile_name, policy):
+        return []
+    stages = [str(stage) for stage in profile.get("stages", [])]
+    current_stage = str(item.get("current_stage", ""))
+    required_before_exit = set(stage_review_required_stages(policy))
+    if item.get("state") in {"done", "archived"}:
+        exited = stages
+    elif current_stage in stages:
+        exited = stages[: stages.index(current_stage)]
+    else:
+        exited = []
+    return [stage for stage in exited if stage in required_before_exit]
+
+
+def stage_review_errors(task_id: str, item: dict, profile: dict, policy: dict) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(item.get("stage_reviews", {}), dict):
+        return [f"{task_id} stage_reviews must be an object"]
+    reviews = stage_reviews(item)
+    pass_status = policy.get("review_gate_pass_status", "pass")
+    for stage in required_stage_reviews_for_item(item, profile, policy):
+        review = reviews.get(stage)
+        if not isinstance(review, dict):
+            errors.append(f"{task_id} missing stage review for exited stage: {stage}")
+            continue
+        status = review.get("status")
+        if status not in REVIEW_STATUSES:
+            errors.append(f"{task_id} stage review {stage} invalid status: {status}")
+        if status != pass_status:
+            errors.append(f"{task_id} stage review {stage} must be {pass_status}")
+        open_findings = [finding for finding in review.get("open_findings", []) if str(finding).strip()]
+        if policy.get("review_gate_open_findings_must_be_empty") is True and open_findings:
+            errors.append(f"{task_id} stage review {stage} has open findings")
+        latest_review = str(review.get("latest_review", "")).strip()
+        if not latest_review:
+            errors.append(f"{task_id} stage review {stage} missing latest_review")
+        elif policy.get("review_gate_latest_review_must_exist") is True and not Path(latest_review).exists():
+            errors.append(f"{task_id} stage review {stage} latest_review path missing: {latest_review}")
+    return errors
+
+
 def check_task_board() -> list[str]:
     board = load_json(Path(".agent/task-board.json"), {})
     profiles = load_json(Path(".agent/workflow-profiles.json"), {})
@@ -291,11 +360,15 @@ def check_task_board() -> list[str]:
     states = set(board.get("states", []))
     profile_names = set(profiles.get("profiles", {}))
     policy = board.get("policy", {})
-    for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path", "requirements", "review_gate"):
+    for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path", "requirements", "review_gate", "stage_reviews"):
         if field not in required_fields:
             errors.append(f"task board missing required field declaration: {field}")
     if set(policy.get("done_requires_review_gate_pass_for_profiles", [])) != {"standard", "full"}:
         errors.append("task board must require review_gate pass for standard and full done tasks")
+    if policy.get("review_fix_loop_required_at_stage_exit") is not True:
+        errors.append("task board must require review-fix loops at stage exit")
+    if set(policy.get("stage_review_loop_required_for_profiles", [])) != {"standard", "full"}:
+        errors.append("task board must require stage review loops for standard and full profiles")
     for item in board.get("items", []):
         task_id = item.get("id")
         if not task_id:
@@ -321,6 +394,7 @@ def check_task_board() -> list[str]:
                 errors.append(f"{task_id} done without delivery_conclusion")
         errors.extend(requirements_errors(task_id, item, profile, policy))
         errors.extend(review_gate_errors(task_id, item, profile, policy))
+        errors.extend(stage_review_errors(task_id, item, profile, policy))
         docs_path = item.get("docs_path")
         if profile.get("feature_doc_templates") and (not docs_path or not Path(docs_path).exists()):
             errors.append(f"{task_id} docs_path missing or absent: {docs_path}")
@@ -375,11 +449,23 @@ def check_governance_configs(config: dict) -> list[str]:
     harness_required = sorted(harness.get("invariants", {}).get("required_paths", []))
     if manifest_required and harness_required and manifest_required != harness_required:
         errors.append(".agent/manifest.json required_paths must match .agent/harness.json invariants.required_paths")
+    spec_config = load_json(Path(".agent/spec.json"), {})
+    if spec_config.get("schema") == "agent-spec-v1":
+        spec_policy = spec_config.get("policy", {})
+        for key in (
+            "archive_requires_completed_tasks_or_force",
+            "completed_active_changes_fail_validation",
+            "archive_before_completion_claim",
+        ):
+            if spec_policy.get(key) is not True:
+                errors.append(f".agent/spec.json policy must enable {key}")
     workflow = load_json(Path(".agent/workflow.json"), {})
     profiles = load_json(Path(".agent/workflow-profiles.json"), {})
     workflow_stages = set(workflow.get("stages", []))
-    review_fix = workflow.get("gates", {}).get("review_fix_gate", {})
-    requirements_gate = workflow.get("gates", {}).get("requirements_interview", {})
+    gates = workflow.get("gates", {})
+    review_fix = gates.get("review_fix_gate", {})
+    stage_loop = gates.get("stage_review_loop", {})
+    requirements_gate = gates.get("requirements_interview", {})
     for key in ("ask_one_question_at_a_time", "provide_recommended_answer_and_reason", "cross_check_user_claims_against_code_and_docs", "update_domain_glossary_for_new_or_ambiguous_terms"):
         if requirements_gate.get(key) is not True:
             errors.append(f"workflow requirements_interview missing {key}")
@@ -387,6 +473,23 @@ def check_governance_configs(config: dict) -> list[str]:
         errors.append("workflow review_fix_gate must require latest review status pass")
     if review_fix.get("open_findings_must_be_empty") is not True:
         errors.append("workflow review_fix_gate must require empty open findings")
+    if review_fix.get("applies_to_stage_review_loop") is not True:
+        errors.append("workflow review_fix_gate must apply to stage review loops")
+    if set(stage_loop.get("required_for_profiles", [])) != {"standard", "full"}:
+        errors.append("workflow stage_review_loop must apply to standard and full profiles")
+    if stage_loop.get("loop") != ["review", "fix", "re_review"]:
+        errors.append("workflow stage_review_loop must require review, fix, and re_review")
+    for key in (
+        "latest_stage_review_must_be_clean",
+        "finding_bearing_stage_review_must_remain_needs_fix",
+        "fix_requires_revalidation",
+        "fix_requires_next_review_round",
+    ):
+        if stage_loop.get(key) is not True:
+            errors.append(f"workflow stage_review_loop missing {key}")
+    completion = gates.get("completion_verification", {})
+    if completion.get("completed_spec_changes_must_be_archived") is not True:
+        errors.append("workflow completion gate must require completed spec changes to be archived")
     if workflow_stages:
         for name, profile in profiles.get("profiles", {}).items():
             if name in {"standard", "full"} and profile.get("review_gate_required") is not True:

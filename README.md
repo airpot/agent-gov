@@ -18,12 +18,12 @@
 | OpenSpec | https://github.com/Fission-AI/OpenSpec | 借鉴 proposal、design、tasks、archive 的规格变更结构；`agent-gov` 已内嵌实现，不依赖全局 OpenSpec CLI。 |
 | OpenAI Harness Engineering | https://openai.com/index/harness-engineering/ | 借鉴 harness 作为可执行反馈面、验证命令注册、证据记录和回归检查的思想。 |
 | claude-mem | https://github.com/thedotmack/claude-mem | 借鉴 repo-local 长期记忆、摘要化存储、检索优先和记忆提升/审阅机制。 |
-| TencentDB-Agent-Memory | https://github.com/Tencent/TencentDB-Agent-Memory | 借鉴长会话记忆分层、上下文卸载、可检索记忆和事实回溯边界，用于 session offload、truth-first grounding 和 memory-as-advisory 设计。 |
+| TencentDB-Agent-Memory | https://github.com/TencentCloud/TencentDB-Agent-Memory | 借鉴长会话记忆分层、上下文卸载、可检索记忆、recall 上下文预算和事实回溯边界，用于 session offload、truth-first grounding 和 memory-as-advisory 设计。 |
 | caveman | https://github.com/juliusbrussee/caveman | 借鉴上下文经济、token budget、压缩安全检查和精简输出机制；未采纳其 persona 风格。 |
 | superpowers | https://github.com/obra/superpowers | 借鉴可复用 capability / skill 分发、薄说明面和跨工具组织方式。 |
-| andrej-karpathy-skills | https://github.com/forrestchang/andrej-karpathy-skills | 借鉴先澄清、简单优先、精准改动、目标驱动验证，落实为 `implementation_discipline` gate。 |
+| andrej-karpathy-skills | https://github.com/multica-ai/andrej-karpathy-skills | 借鉴先澄清、简单优先、精准改动、目标驱动验证，落实为 `implementation_discipline` gate。 |
 | mattpocock/skills | https://github.com/mattpocock/skills | 借鉴小而明确的 skill 组织方式、轻量说明面和按场景激活的 skill 包结构，用于 profile 化初始化和 `SKILL.md` 入口收敛。 |
-| dictionary-of-ai-coding | https://github.com/mattpocock/dictionary-of-ai-coding | 借鉴统一 AI coding 术语表的思想，生成 `docs/AI_CODING_GLOSSARY.md`。 |
+| dictionary-of-ai-coding | https://github.com/mattpocock/dictionary-of-ai-coding | 借鉴统一 AI coding 术语表的思想，生成 `docs/AI_CODING_GLOSSARY.md`；已吸收 AX/DX、primary/secondary source、context pointer、compaction 等治理相关术语，但不镜像完整词典。 |
 | agent-coding-playbook | https://github.com/bravekingzhang/agent-coding-playbook | 借鉴 task 风险分级、自治边界、human-in-the-loop 和 review 证据化的工作流思想。 |
 | Agent-Coding-Governance-Methodology | https://github.com/johnrucnapier-sketch/Agent-Coding-Governance-Methodology | 借鉴长期 agent coding 治理、证据化结论、旧文档漂移治理和 review gate 思想，用于 task-board、governance-gc、mechanical checks 和 review-fix-review。 |
 
@@ -72,6 +72,7 @@
 5. repo-local 长期记忆
    - 生成 `.agent/memory.json`、`.agent/memory/events.jsonl` 和 `agent_memory.py`。
    - 支持 `timeline`、`search`、`detail`、`ingest-session`。
+   - `search` 默认受 recall 输出预算约束，长记录通过 `detail <id>` 按需读取。
    - 只存摘要、决策、验证和检索线索，不存原始聊天记录和密钥。
 
 6. 上下文预算管理

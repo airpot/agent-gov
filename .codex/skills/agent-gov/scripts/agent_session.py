@@ -23,6 +23,10 @@ RUNLOG_PATH = Path(".agent/runlog.jsonl")
 CONFIG_PATH = Path(".agent/config.json")
 OFFLOAD_SCHEMA = "agent-session-offload-v1"
 VALID_OFFLOAD_PRIVACY = {"public", "internal", "private-redacted"}
+DEFAULT_OFFLOAD_RECALL = {
+    "max_chars_per_entry": 700,
+    "max_total_chars": 5000,
+}
 
 
 def utc_now() -> str:
@@ -63,6 +67,40 @@ def load_project_config() -> dict:
         return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return {}
+
+
+def positive_int(value: object, fallback: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return parsed if parsed > 0 else fallback
+
+
+def offload_recall_policy() -> dict:
+    raw = load_project_config().get("session_offload_recall", {})
+    return {
+        "max_chars_per_entry": positive_int(
+            raw.get("max_chars_per_entry"),
+            DEFAULT_OFFLOAD_RECALL["max_chars_per_entry"],
+        ),
+        "max_total_chars": positive_int(
+            raw.get("max_total_chars"),
+            DEFAULT_OFFLOAD_RECALL["max_total_chars"],
+        ),
+    }
+
+
+def compact_one_line(text: str) -> str:
+    return " ".join(text.split())
+
+
+def clip_text(text: str, limit: int) -> tuple[str, bool]:
+    if len(text) <= limit:
+        return text, False
+    if limit <= 20:
+        return text[:limit], True
+    return text[: limit - 15].rstrip() + " ... [truncated]", True
 
 
 def governance_profile() -> str:
@@ -1210,6 +1248,9 @@ def cmd_offload_recall(args: argparse.Namespace) -> int:
     session_id = args.session_id or require_active()
     query = args.query.lower()
     entries, errors = session_offload_entries(session_id)
+    policy = offload_recall_policy()
+    max_chars_per_entry = positive_int(args.max_chars_per_entry, policy["max_chars_per_entry"])
+    max_total_chars = positive_int(args.max_total_chars, policy["max_total_chars"])
     matches = []
     for item in entries:
         haystack = " ".join(
@@ -1240,9 +1281,23 @@ def cmd_offload_recall(args: argparse.Namespace) -> int:
         if not result["matches"]:
             print("no matching offload entries")
             return 0
+        emitted_chars = 0
         for item in result["matches"]:
-            print(f"{item.get('created_at')} | {item.get('id')} | {item.get('kind')} | {item.get('summary')}")
-            print(f"  evidence: {', '.join(str(handle) for handle in item.get('evidence', []))}")
+            summary = compact_one_line(str(item.get("summary", "")))
+            summary, summary_truncated = clip_text(summary, max_chars_per_entry)
+            evidence = ", ".join(str(handle) for handle in item.get("evidence", []))
+            block = f"{item.get('created_at')} | {item.get('id')} | {item.get('kind')} | {summary}\n  evidence: {evidence}"
+            if emitted_chars + len(block) > max_total_chars:
+                remaining = max_total_chars - emitted_chars
+                if remaining > 80:
+                    clipped, _ = clip_text(block, remaining)
+                    print(clipped)
+                print("offload recall output budget reached; use evidence handles or `offload-index.md` for selected detail.")
+                break
+            print(block)
+            if summary_truncated:
+                print("  note: summary truncated; verify selected facts against evidence handles.")
+            emitted_chars += len(block)
     return 0
 
 
@@ -1352,6 +1407,8 @@ def build_parser() -> argparse.ArgumentParser:
     offload_recall.add_argument("query")
     offload_recall.add_argument("--session-id")
     offload_recall.add_argument("--limit", type=int, default=10)
+    offload_recall.add_argument("--max-chars-per-entry", type=int, help="Override session_offload_recall.max_chars_per_entry")
+    offload_recall.add_argument("--max-total-chars", type=int, help="Override session_offload_recall.max_total_chars")
     offload_recall.add_argument("--json", action="store_true")
     offload_recall.set_defaults(func=cmd_offload_recall)
 

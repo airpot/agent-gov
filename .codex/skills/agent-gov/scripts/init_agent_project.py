@@ -168,8 +168,10 @@ def config_path_pointers(governance_profile: str, openspec_enabled: bool, claude
                 "knowledge_manifest": ".agent/knowledge.json",
                 "dev_map": ".agent/dev-map.json",
                 "skill_hygiene": ".agent/skill-hygiene.json",
+                "project_skills": ".agent/project-skills.json",
                 "memory_config": ".agent/memory.json",
                 "context_config": ".agent/context.json",
+                "security_config": ".agent/security.json",
                 "capabilities_config": ".agent/capabilities.json",
                 "mechanical_checks": ".agent/mechanical-checks.json",
                 "baselines": ".agent/baselines.json",
@@ -184,7 +186,6 @@ def config_path_pointers(governance_profile: str, openspec_enabled: bool, claude
                 "subagent_config": ".agent/subagents.json",
                 "hooks_config": ".agent/hooks.json",
                 "tooling_config": ".agent/tooling.json",
-                "security_config": ".agent/security.json",
                 "mcp_policy": ".agent/mcp-policy.json",
                 "skill_distribution": ".agent/skill-distribution.json",
                 "codex_config": ".codex/config.toml",
@@ -276,8 +277,10 @@ def harness_config(
                 ".agent/knowledge.json",
                 ".agent/dev-map.json",
                 ".agent/skill-hygiene.json",
+                ".agent/project-skills.json",
                 ".agent/memory.json",
                 ".agent/context.json",
+                ".agent/security.json",
                 ".agent/capabilities.json",
                 ".agent/mechanical-checks.json",
                 ".agent/baselines.json",
@@ -314,9 +317,11 @@ def harness_config(
                 "scripts/agent_invariants.py",
                 "scripts/agent_capabilities.py",
                 "scripts/agent_skill_hygiene.py",
+                "scripts/agent_project_skills.py",
                 "scripts/agent_task.py",
                 "scripts/agent_verify.py",
                 "scripts/agent_gc.py",
+                "scripts/agent_security.py",
                 "docs/ARCHITECTURE.md",
                 "docs/RELIABILITY.md",
                 "docs/QUALITY_SCORE.md",
@@ -337,7 +342,6 @@ def harness_config(
                 ".agent/subagents.json",
                 ".agent/hooks.json",
                 ".agent/tooling.json",
-                ".agent/security.json",
                 ".agent/skill-distribution.json",
                 ".agent/templates/subagent-task.md.tmpl",
                 ".agent/tools/governance_hook.py",
@@ -352,7 +356,6 @@ def harness_config(
                 ".codex/agents/governance-reviewer.toml",
                 ".codex/agents/governance-coordinator.toml",
                 "scripts/agent_tooling.py",
-                "scripts/agent_security.py",
                 "scripts/agent_sync_skills.py",
                 "docs/TOOLING.md",
                 "docs/SECURITY.md",
@@ -446,13 +449,22 @@ def harness_config(
 
 
 def project_layout_config(project_name: str, layout: str, tech_stack: list[str], dirs: list[str]) -> dict:
-    return {
+    payload = {
         "schema": "agent-project-layout-v1",
         "project_name": project_name,
         "layout": layout,
         "tech_stack": tech_stack,
         "directories": dirs,
     }
+    payload["policy"] = {
+        "architecture_boundaries_required": True,
+        "empty_directories_require_architecture_boundary_exception": True,
+    }
+    if not dirs:
+        payload["policy"]["architecture_boundary_exception"] = (
+            "No application directories were declared at initialization; fill project-layout, ARCHITECTURE, and DEV_MAP before non-tiny application work."
+        )
+    return payload
 
 
 def spec_config(project_name: str, created_at: str) -> dict:
@@ -479,6 +491,8 @@ def spec_config(project_name: str, created_at: str) -> dict:
             "non_trivial_changes_require_change": True,
             "tasks_are_markdown_checkboxes": True,
             "archive_requires_completed_tasks_or_force": True,
+            "completed_active_changes_fail_validation": True,
+            "archive_before_completion_claim": True,
             "record_session_links": True,
         },
         "commands": {
@@ -654,17 +668,29 @@ def task_board_config(project_name: str, created_at: str) -> dict:
             "updated_at",
             "delivery_conclusion",
             "review_gate",
+            "stage_reviews",
             "related_tasks",
         ],
         "policy": {
             "non_tiny_work_requires_task": True,
             "new_session_reads_board_before_edits": True,
             "stage_changes_update_current_stage": True,
+            "review_fix_loop_required_at_stage_exit": True,
+            "stage_review_loop_required_for_profiles": ["standard", "full"],
             "done_requires_delivery_conclusion": True,
             "done_requires_review_gate_pass_for_profiles": ["standard", "full"],
             "review_gate_pass_status": "pass",
             "review_gate_open_findings_must_be_empty": True,
             "review_gate_latest_review_must_exist": True,
+            "stage_review_required_before_stage_exit": [
+                "spec",
+                "plan",
+                "implementation",
+                "spec_review",
+                "quality_review",
+                "verification",
+                "handoff",
+            ],
             "docs_path_required_when_profile_requires_docs": True,
             "requirements_complete_before_protected_stages": True,
             "requirements_complete_before_done": True,
@@ -902,9 +928,28 @@ def workflow_config(project_name: str, created_at: str, openspec_enabled: bool) 
                 "re_review_after_fixes": True,
                 "finder_cannot_fix": True,
             },
+            "stage_review_loop": {
+                "required_for_profiles": ["standard", "full"],
+                "required_before_stage_exit": [
+                    "spec",
+                    "plan",
+                    "implementation",
+                    "spec_review",
+                    "quality_review",
+                    "verification",
+                    "handoff",
+                ],
+                "loop": ["review", "fix", "re_review"],
+                "latest_stage_review_must_be_clean": True,
+                "finding_bearing_stage_review_must_remain_needs_fix": True,
+                "fix_requires_revalidation": True,
+                "fix_requires_next_review_round": True,
+                "accepted_exceptions_require_owner_date_and_residual_risk": True,
+            },
             "review_fix_gate": {
                 "required_for": ["standard_task_done", "full_task_done", "handoff", "merge", "pull_request", "archive", "release_claim"],
                 "source": ".agent/task-board.json#/items/*/review_gate",
+                "applies_to_stage_review_loop": True,
                 "latest_review_status_must_be": "pass",
                 "open_findings_must_be_empty": True,
                 "latest_review_path_must_exist": True,
@@ -918,15 +963,17 @@ def workflow_config(project_name: str, created_at: str, openspec_enabled: bool) 
                 "requires_diff_or_file_review": True,
             },
             "completion_verification": {
-                "required_for": ["handoff", "merge", "pull_request", "archive"],
+                "required_for": ["handoff", "merge", "pull_request", "archive", "spec_archive"],
                 "fresh_validation_required": True,
                 "review_fix_gate_required_for_profiles": ["standard", "full"],
                 "record_results_in_runlog": True,
                 "no_completion_claim_without_command_evidence": True,
+                "completed_spec_changes_must_be_archived": True,
             },
         },
         "commands": {
             "list_validation": "python3 scripts/agent_validate.py --list",
+            "archive_completed_spec": "python3 scripts/agent_spec.py archive <name>",
             "record_runlog": "python3 scripts/agent_runlog.py record --kind validation --outcome <pass|fail|skipped> --summary <summary>",
             "session_checkpoint": "python3 .agent/tools/agent_session.py checkpoint --summary <summary>",
             "session_compact": "python3 .agent/tools/agent_session.py compact --summary <summary> --next <next>",
@@ -1337,6 +1384,18 @@ def knowledge_config(project_name: str, created_at: str, governance_profile: str
 
 
 def dev_map_config(project_name: str, created_at: str, dirs: list[str]) -> dict:
+    application_area = {
+        "id": "application",
+        "name": "Application code",
+        "entry_points": dirs[:3],
+        "read_before_edit": ["docs/ARCHITECTURE.md", "docs/QUALITY.md", "docs/DOMAIN_GLOSSARY.md"],
+        "owned_paths": dirs,
+        "common_patterns": ["Update this area when application entry points, module ownership, or implementation patterns change."],
+    }
+    if not dirs:
+        application_area["architecture_boundary_exception"] = (
+            "No application directories were declared at initialization; fill this area before non-tiny application work."
+        )
     areas = [
         {
             "id": "governance",
@@ -1346,14 +1405,7 @@ def dev_map_config(project_name: str, created_at: str, dirs: list[str]) -> dict:
             "owned_paths": [".agent/", "docs/", "scripts/agent_*.py"],
             "common_patterns": ["Keep durable truth in repository files, not chat history."],
         },
-        {
-            "id": "application",
-            "name": "Application code",
-            "entry_points": dirs[:3],
-            "read_before_edit": ["docs/ARCHITECTURE.md", "docs/QUALITY.md", "docs/DOMAIN_GLOSSARY.md"],
-            "owned_paths": dirs,
-            "common_patterns": ["Fill this section after the project architecture is known."],
-        },
+        application_area,
     ]
     return {
         "schema": "agent-dev-map-v1",
@@ -1528,6 +1580,10 @@ def memory_config(project_name: str, created_at: str) -> dict:
             "procedural_requires_reviewed_true": True,
             "do_not_promote_from_single_unverified_session": True,
         },
+        "recall": {
+            "max_chars_per_memory": 600,
+            "max_total_chars": 4000,
+        },
         "privacy": {
             "private_start": "<private>",
             "private_end": "</private>",
@@ -1633,7 +1689,7 @@ def context_budget_config(project_name: str, created_at: str, governance_profile
             "compress_only_natural_language": True,
             "preserve_code_urls_paths_headings": True,
             "do_not_send_sensitive_files_to_external_models": True,
-            "doctor_fails_on_budget_excess": False,
+            "doctor_fails_on_budget_excess": True,
         },
         "commands": {
             "doctor": "python3 .agent/tools/agent_context.py doctor",
@@ -1704,6 +1760,58 @@ def skill_hygiene_config(project_name: str, created_at: str) -> dict:
             "report": "python3 scripts/agent_skill_hygiene.py report",
             "json": "python3 scripts/agent_skill_hygiene.py report --json",
         },
+    }
+
+
+def project_skills_config(project_name: str, created_at: str) -> dict:
+    return {
+        "schema": "agent-project-skills-v1",
+        "project_name": project_name,
+        "created_at": created_at,
+        "updated_at": created_at,
+        "registry_inputs": {
+            "skill_hygiene": ".agent/skill-hygiene.json",
+            "production_manifest": "skills.manifest.json",
+            "workspace_tools_manifest": "workspace-tools.manifest.json",
+            "capabilities": ".agent/capabilities.json",
+        },
+        "policy": {
+            "repo_local": True,
+            "dependency_free": True,
+            "no_auto_delete": True,
+            "no_auto_install": True,
+            "scripts_collect_facts_ai_interprets": True,
+            "requires_review_fix_review_for_lifecycle_changes": True,
+            "archive_completed_skill_changes": True,
+            "fail_on_unmanaged_project_skills": True,
+            "fail_on_orphaned_project_skills": True,
+            "review_artifact_required": True,
+            "destructive_delete_requires_explicit_user_approval": True,
+            "do_not_merge_workspace_helpers_into_production_manifest": True,
+        },
+        "status_values": [
+            "managed",
+            "unmanaged",
+            "orphaned",
+            "missing",
+            "drifted",
+            "pinned",
+            "unpinned",
+            "unknown_source",
+            "manifest_mismatch",
+            "review_pending",
+            "unsafe_path",
+            "capability_mismatch",
+        ],
+        "commands": {
+            "doctor": "python3 scripts/agent_project_skills.py doctor",
+            "report": "python3 scripts/agent_project_skills.py report",
+            "json": "python3 scripts/agent_project_skills.py report --json",
+            "snapshot": "python3 scripts/agent_project_skills.py snapshot",
+            "snapshot_write": "python3 scripts/agent_project_skills.py snapshot --write",
+            "check": "python3 scripts/agent_project_skills.py check <skill>",
+        },
+        "skills": {},
     }
 
 
@@ -1910,6 +2018,17 @@ def capabilities_config(
             "validation": ["python3 scripts/agent_skill_hygiene.py doctor"],
         },
         {
+            "id": "project-skill-governance",
+            "kind": "tool",
+            "provider": "agent-gov",
+            "enabled": True,
+            "risk": "medium",
+            "owner": "governance-owner",
+            "description": "Repo-local project skill registry, provenance, drift, manifest boundary, and lifecycle gate reporting.",
+            "permissions": {"read": True, "write": "bounded", "network": False, "secrets": False},
+            "validation": ["python3 scripts/agent_project_skills.py doctor"],
+        },
+        {
             "id": "dev-map",
             "kind": "knowledge",
             "provider": "local",
@@ -2088,6 +2207,7 @@ def capabilities_config(
         "governance-score": "executable",
         "mechanical-verification": "executable",
         "skill-hygiene": "executable",
+        "project-skill-governance": "executable",
         "dev-map": "instruction",
         "harness-evolution": "instruction",
         "mcp-policy": "integration",
@@ -2117,6 +2237,7 @@ def capabilities_config(
         "governance-score",
         "mechanical-verification",
         "skill-hygiene",
+        "project-skill-governance",
         "dev-map",
         "harness-evolution",
         "mcp-policy",
@@ -2201,10 +2322,14 @@ def security_config(project_name: str, created_at: str) -> dict:
             "do_not_store_secrets": True,
             "raw_credentials_stay_outside_repo_harness_and_sandbox": True,
             "external_secret_use_requires_vault_or_proxy_boundary": True,
+            "do_not_read_secret_contents": True,
+            "sensitive_path_scan_in_doctor": True,
+            "sensitive_path_scan_limit": 100,
+            "doctor_fails_on_sensitive_paths": True,
             "review_high_risk_findings_before_handoff": True,
         },
         "suites": {
-            "policy_as_code": [],
+            "policy_as_code": ["python3 scripts/agent_security.py scan-paths --fail-on-findings"],
             "secret_scan": [],
             "dependency_audit": [],
             "sbom": [],
@@ -2217,7 +2342,7 @@ def security_config(project_name: str, created_at: str) -> dict:
         "commands": {
             "doctor": "python3 scripts/agent_security.py doctor",
             "list": "python3 scripts/agent_security.py list",
-            "scan_paths": "python3 scripts/agent_security.py scan-paths",
+            "scan_paths": "python3 scripts/agent_security.py scan-paths --fail-on-findings",
             "run": "python3 scripts/agent_security.py run <suite>",
         },
     }
@@ -2241,6 +2366,7 @@ def evals_config(project_name: str, created_at: str, governance_profile: str) ->
                 "mechanical_verification": {"weight": 10},
                 "dev_map": {"weight": 6},
                 "skill_hygiene": {"weight": 6},
+                "project_skills": {"weight": 6},
                 "harness_evolution": {"weight": 6},
                 "mcp_policy": {"weight": 4},
                 "governance_gc": {"weight": 6},
@@ -2250,11 +2376,10 @@ def evals_config(project_name: str, created_at: str, governance_profile: str) ->
                 "context_budget": {"weight": 8},
                 "memory": {"weight": 8},
                 "capabilities": {"weight": 8},
+                "security": {"weight": 8},
                 "knowledge": {"weight": 6},
             }
         )
-    if profile_at_least(governance_profile, "full"):
-        dimensions.update({"security": {"weight": 8}})
     return {
         "schema": "agent-evals-v1",
         "project_name": project_name,
@@ -2269,6 +2394,8 @@ def evals_config(project_name: str, created_at: str, governance_profile: str) ->
             "invalid_project_json_is_hard_fail": True,
             "record_score_runs_in_runlog": True,
             "periodic_review_cadence": "weekly",
+            "validation_freshness_required": True,
+            "validation_freshness_days": 7,
             "do_not_read_secret_contents": True,
         },
         "thresholds": {
@@ -2302,6 +2429,7 @@ def mechanical_checks_config(project_name: str, created_at: str, governance_prof
         ".agent/knowledge.json",
         ".agent/dev-map.json",
         ".agent/skill-hygiene.json",
+        ".agent/project-skills.json",
         ".agent/memory.json",
         ".agent/context.json",
         ".agent/capabilities.json",
@@ -2380,6 +2508,13 @@ def mechanical_checks_config(project_name: str, created_at: str, governance_prof
             "path": ".agent/skill-hygiene.json",
             "script": "scripts/agent_skill_hygiene.py",
             "doctor_is_read_only": True,
+        },
+        "project_skills": {
+            "enabled": True,
+            "path": ".agent/project-skills.json",
+            "script": "scripts/agent_project_skills.py",
+            "doctor_is_non_destructive": True,
+            "requires_review_fix_review_for_lifecycle_changes": True,
         },
         "harness_evolution": {
             "enabled": True,
@@ -2483,6 +2618,7 @@ def manifest_config(project_name: str, created_at: str, harness: dict, evals: di
         ".agent/knowledge.json": "agent-knowledge-v1",
         ".agent/dev-map.json": "agent-dev-map-v1",
         ".agent/skill-hygiene.json": "agent-skill-hygiene-v1",
+        ".agent/project-skills.json": "agent-project-skills-v1",
         ".agent/memory.json": "agent-memory-v1",
         ".agent/context.json": "agent-context-budget-v1",
         ".agent/capabilities.json": "agent-capabilities-v1",
@@ -2867,6 +3003,7 @@ def harness_commands(governance_profile: str) -> str:
                 "python3 scripts/agent_invariants.py",
                 "python3 scripts/agent_capabilities.py doctor",
                 "python3 scripts/agent_skill_hygiene.py doctor",
+                "python3 scripts/agent_project_skills.py doctor",
                 "python3 scripts/agent_task.py doctor",
                 "python3 scripts/agent_verify.py doctor",
                 "python3 scripts/agent_gc.py doctor",
@@ -2901,6 +3038,9 @@ python3 .agent/tools/agent_context.py scan --limit 10
 python3 .agent/tools/agent_context.py suggest
 python3 scripts/agent_capabilities.py doctor
 python3 scripts/agent_skill_hygiene.py doctor
+python3 scripts/agent_project_skills.py doctor
+python3 scripts/agent_project_skills.py report
+python3 scripts/agent_security.py doctor
 python3 scripts/agent_capabilities.py list --enabled
 python3 scripts/agent_task.py list
 python3 scripts/agent_verify.py snapshot --name before-change
@@ -2976,7 +3116,10 @@ def build_values(root: Path, args: argparse.Namespace) -> dict[str, str]:
         "layout_name_json": json.dumps(args.layout),
         "governance_profile": args.governance_profile,
         "governance_profile_json": json.dumps(args.governance_profile),
-        "layout_dirs": "\n".join(f"- `{path}/`" for path in dirs),
+        "layout_dirs": "\n".join(f"- `{path}/`" for path in dirs)
+        or "- No required application directories declared at initialization; `.agent/project-layout.json` records an architecture boundary exception.",
+        "layout_dirs_inline": ", ".join(f"`{path}/`" for path in dirs)
+        or "none declared; `.agent/project-layout.json` records an architecture boundary exception",
         "client_surface": args.client_surface,
         "client_surface_json": json.dumps(args.client_surface),
         "remote_kind": args.remote_kind,
@@ -3000,8 +3143,10 @@ def build_values(root: Path, args: argparse.Namespace) -> dict[str, str]:
             "Development navigation is tracked in `.agent/dev-map.json` and `docs/DEV_MAP.md`.\n"
             "Project-domain terminology is tracked in `docs/DOMAIN_GLOSSARY.md`; use it to resolve naming conflicts before implementation.\n"
             "Skill topology and hygiene policy are tracked in `.agent/skill-hygiene.json`; scans are read-only and cleanup requires human confirmation.\n"
+            "Project skill lifecycle governance is tracked in `.agent/project-skills.json`; use `scripts/agent_project_skills.py` to report managed, unmanaged, missing, drifted, pinned, and manifest boundary states.\n"
             "Cross-session working memory is tracked in `.agent/memory.json` and `.agent/memory/`. Store summaries, decisions, validation, and retrieval handles; do not store raw transcripts.\n"
             "Capability governance is tracked in `.agent/capabilities.json`.\n"
+            "Lightweight security governance is tracked in `.agent/security.json`; standard profile scans sensitive-looking paths without reading secret contents.\n"
             "Workflow gates, including risk classification, implementation discipline, diff traceability, and review evidence, are tracked in `.agent/workflow.json`.\n"
             "Workflow profiles are tracked in `.agent/workflow-profiles.json`. Cross-session task state is tracked in `.agent/task-board.json` and `docs/features/`.\n"
             "Risk autonomy is tracked in `.agent/risk-zones.json`. Diff and review policy is tracked in `.agent/review-policy.json`.\n"
@@ -3037,8 +3182,10 @@ def build_values(root: Path, args: argparse.Namespace) -> dict[str, str]:
             "Update `.agent/role-contracts.json` when role inputs, outputs, forbidden actions, or finder-cannot-fix policy changes.\n"
             "Update `.agent/memory.json` when memory stores, privacy tags, or retention policy change.\n"
             "Update `.agent/capabilities.json` when agent-visible tools, external integrations, permissions, owners, or risk levels change.\n"
+            "Update `.agent/security.json` when credential boundary policy, sensitive-path scans, or local security suites change.\n"
             "Update `.agent/dev-map.json` and `docs/DEV_MAP.md` when entry points, ownership, read-before-edit guidance, or common project patterns change.\n"
             "Update `.agent/skill-hygiene.json` when skill scan roots, stale thresholds, risk signals, or canary policy change.\n"
+            "Update `.agent/project-skills.json` when project-level skills are added, adopted, updated, deprecated, removed, pinned, or reclassified between production and workspace-only intent.\n"
             "Update `.agent/mechanical-checks.json` and `.agent/baselines.json` when hard checks or baseline comparison policy changes.\n"
             "Update `.agent/harness-evolution.json` when incident categories or promotion targets change.\n"
             "Update `.agent/governance-gc.json` when periodic governance cleanup checks or thresholds change."
@@ -3190,12 +3337,20 @@ def init_project(args: argparse.Namespace) -> int:
             json.dumps(skill_hygiene_config(project_name, values["created_at"]), indent=2) + "\n",
         )
         writer.write(
+            ".agent/project-skills.json",
+            json.dumps(project_skills_config(project_name, values["created_at"]), indent=2) + "\n",
+        )
+        writer.write(
             ".agent/memory.json",
             json.dumps(memory_config(project_name, values["created_at"]), indent=2) + "\n",
         )
         writer.write(
             ".agent/context.json",
             json.dumps(context_budget_config(project_name, values["created_at"], governance_profile), indent=2) + "\n",
+        )
+        writer.write(
+            ".agent/security.json",
+            json.dumps(security_config(project_name, values["created_at"]), indent=2) + "\n",
         )
         writer.write(
             ".agent/capabilities.json",
@@ -3234,10 +3389,6 @@ def init_project(args: argparse.Namespace) -> int:
         writer.write(
             ".agent/tooling.json",
             json.dumps(tooling_config(project_name, values["created_at"]), indent=2) + "\n",
-        )
-        writer.write(
-            ".agent/security.json",
-            json.dumps(security_config(project_name, values["created_at"]), indent=2) + "\n",
         )
         writer.write(
             ".agent/skill-distribution.json",
@@ -3318,12 +3469,13 @@ def init_project(args: argparse.Namespace) -> int:
         writer.write("scripts/agent_invariants.py", template("agent-invariants.py.tmpl"), executable=True)
         writer.write("scripts/agent_capabilities.py", template("agent-capabilities.py.tmpl"), executable=True)
         writer.write("scripts/agent_skill_hygiene.py", template("agent-skill-hygiene.py.tmpl"), executable=True)
+        writer.write("scripts/agent_project_skills.py", template("agent-project-skills.py.tmpl"), executable=True)
         writer.write("scripts/agent_task.py", template("agent-task.py.tmpl"), executable=True)
         writer.write("scripts/agent_verify.py", template("agent-verify.py.tmpl"), executable=True)
         writer.write("scripts/agent_gc.py", template("agent-gc.py.tmpl"), executable=True)
+        writer.write("scripts/agent_security.py", template("agent-security.py.tmpl"), executable=True)
     if full_enabled:
         writer.write("scripts/agent_tooling.py", template("agent-tooling.py.tmpl"), executable=True)
-        writer.write("scripts/agent_security.py", template("agent-security.py.tmpl"), executable=True)
         writer.write("scripts/agent_sync_skills.py", template("agent-sync-skills.py.tmpl"), executable=True)
 
     writer.write("docs/index.md", render(template("docs-index.md.tmpl"), values))

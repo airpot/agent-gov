@@ -153,13 +153,13 @@ python3 .agent/tools/governance_hook.py --event session-start
 - `bootstrap` prints and refreshes the active session startup packet.
 - `grounding` refreshes the truth-first repository snapshot; current files, configs, specs, task-board state, runlog evidence, and validation notes override memory and prior chat.
 - `offload-add` records compact session context with evidence handles. Entries are advisory and must not contain raw transcripts, terminal scrollback, secrets, or unsupported claims.
-- `offload-recall` searches advisory offload entries; use it after `offload-index.md`, then verify selected facts.
+- `offload-recall` searches advisory offload entries with bounded human-readable output; use it after `offload-index.md`, then verify selected facts from evidence handles.
 - `offload-map` refreshes a small Mermaid task canvas from structured offload entries.
 - `rollover` refreshes handoff, grounding, offload index, task map, bootstrap, and resume prompt for a new native session.
 - `compact` refreshes `handoff.md`, `resume-prompt.md`, and `bootstrap.md`.
 - `events` reads the append-only session event stream. It is the session lifecycle event source; markdown files remain the human-readable handoff layer.
 - `doctor` checks the active session files, validation notes, and dirty worktree continuity.
-- `agent_memory.py` provides cross-session timeline/search/detail over concise summaries, decisions, validations, and handoffs. Its `doctor` command is read-only by default; use `init`, `ingest-session`, or `doctor --write` when refreshing stores is intended.
+- `agent_memory.py` provides cross-session timeline/search/detail over concise summaries, decisions, validations, and handoffs. Search output is bounded by `.agent/memory.json` recall limits; use `detail <id>` for selected full records. Its `doctor` command is read-only by default; use `init`, `ingest-session`, or `doctor --write` when refreshing stores is intended.
 - `agent_context.py` keeps governance docs, bootstraps, memory digests, embedded spec change docs, and subagent outputs within measured budgets. Its `doctor` command is read-only by default; use `scan` or `doctor --write` when refreshing the latest digest is intended.
 - `agent_runlog.py` records and retrieves compact evidence for validations, session lifecycle actions, and high-risk capability use.
 - `governance_hook.py` is an advisory native-hook bridge; session-start is read-only, and hooks should never be the only place session state is updated.

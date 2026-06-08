@@ -4,7 +4,7 @@ Use this reference when agent-governed development needs stronger protection aga
 
 ## Source Mechanism
 
-The `forrestchang/andrej-karpathy-skills` project packages a compact coding discipline across Claude, Cursor, and skill/plugin surfaces. The useful mechanism for `agent-gov` is not a standalone dependency. It is a governance gate that makes four behaviors explicit:
+The `multica-ai/andrej-karpathy-skills` project packages a compact coding discipline across Claude, Cursor, and skill/plugin surfaces. The useful mechanism for `agent-gov` is not a standalone dependency. It is a governance gate that makes four behaviors explicit:
 
 - Clarify assumptions before implementation when a request has multiple plausible meanings.
 - Prefer the smallest readable implementation that satisfies the current request.
@@ -13,10 +13,10 @@ The `forrestchang/andrej-karpathy-skills` project packages a compact coding disc
 
 Source links:
 
-- `https://github.com/forrestchang/andrej-karpathy-skills`
-- `https://github.com/forrestchang/andrej-karpathy-skills/blob/main/CLAUDE.md`
-- `https://github.com/forrestchang/andrej-karpathy-skills/blob/main/skills/karpathy-guidelines/SKILL.md`
-- `https://github.com/forrestchang/andrej-karpathy-skills/blob/main/.cursor/rules/karpathy-guidelines.mdc`
+- `https://github.com/multica-ai/andrej-karpathy-skills`
+- `https://github.com/multica-ai/andrej-karpathy-skills/blob/main/CLAUDE.md`
+- `https://github.com/multica-ai/andrej-karpathy-skills/blob/main/skills/karpathy-guidelines/SKILL.md`
+- `https://github.com/multica-ai/andrej-karpathy-skills/blob/main/.cursor/rules/karpathy-guidelines.mdc`
 
 ## Adopted Policy
 

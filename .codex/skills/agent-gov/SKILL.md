@@ -7,7 +7,7 @@ description: Govern Codex/Claude-ready repositories with embedded OpenSpec-style
 
 ## Overview
 
-Govern a repository so long-running Codex/Claude work can be specified, planned, isolated, executed, checkpointed, resumed, reviewed, validated, and maintained without depending on a fragile chat transcript.
+Govern a repository so long-running Codex/Claude work can be specified, planned, isolated, executed, checkpointed, resumed, reviewed, validated, archived, and maintained without depending on a fragile chat transcript.
 
 ## Workflow
 
@@ -19,10 +19,10 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
    - Ask for or infer the technology stack before initialization. If unknown, ask whether to continue with `unspecified`.
    - Ask for the fixed project directory layout. Use a built-in layout (`minimal`, `python-app`, `node-app`, `web-app`, `service`, `library`) or explicit extra directories.
    - Choose the initialization profile that matches the repository maturity: `core` for minimal spec/harness/session continuity, `standard` for durable workflow/task/memory/context governance plus disabled-by-default MCP policy, or `full` for native Codex/Claude adapters, subagent orchestration, security/tooling, and skill distribution. Default to `standard`; use `full` only when the user asks for the complete framework.
-   - Use `references/spec-management.md` for embedded OpenSpec-style project specification setup.
+   - Use `references/spec-management.md` for embedded OpenSpec-style project specification setup, status checks, and mandatory archival of completed changes.
    - Use `references/workflow-governance.md` for workflow profiles, lifecycle gates, task-board continuity, feature-stage documents, task risk/autonomy, plan quality, TDD/debugging evidence, diff traceability, worktree isolation, review order, human review evidence, and completion proof.
    - Use `references/implementation-discipline.md` for assumption clarification, simplicity-first implementation, surgical diffs, and verifiable goals.
-   - Use `references/harness-management.md` for command, validation, capability governance, runlog evidence, ACI tooling, security/supply-chain suites, governance scoring/evals, dev map, harness evolution, MCP policy, governance-gc, ADR/RFC/postmortem records, native adapters, context budget, skill distribution, and repo-harness setup.
+   - Use `references/harness-management.md` for command, validation, capability governance, runlog evidence, ACI tooling, security/supply-chain suites, governance scoring/evals, dev map, harness evolution, MCP policy, governance-gc, ADR/RFC/postmortem records, native adapters, context budget, project skill governance, skill distribution, and repo-harness setup.
    - Use `references/session-continuity.md` for `.agent/sessions/`, `.agent/memory/`, rollover, checkpoint, memory retrieval, and resume behavior.
    - Use `references/context-budget.md` for compression-safe governance docs, token budget scans, and subagent output limits.
    - Use `references/subagent-orchestration.md` when the project needs delegated agent roles, snapshot contracts, or multi-agent handoff rules.
@@ -65,11 +65,13 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
    - Choose the lightest workflow profile that covers the task risk: `tiny`, `bugfix`, `standard`, or `full`.
    - Use `scripts/agent_task.py` to keep non-tiny task state in `.agent/task-board.json` and feature-stage documents under `docs/features/<task-id>/`.
    - For non-tiny tasks, complete the requirements interview gate before design or implementation: ask one unresolved question at a time, give a recommended answer with rationale, cross-check user claims against current code/docs, and update `docs/DOMAIN_GLOSSARY.md` for stable terms.
+   - For `standard` and `full` tasks, run review -> fix -> re-review at protected stage exits, especially after spec, plan, implementation, spec review, quality review, verification, and handoff.
    - For `standard` and `full` tasks, require `review_gate.status=pass`, an existing latest review document, and no open blocker/major/minor findings before task state can become `done`.
    - Use workflow gates for task risk/autonomy, design/spec approval, plan quality, implementation discipline, diff traceability, isolated execution, TDD evidence, systematic debugging, spec review, quality review, human review evidence, completion verification, handoff, and finish choices.
    - Require high and critical risk work to record approval/review evidence; critical work is not autonomous modification work.
    - Prefer ignored git worktrees for feature work, implementation-plan execution, and risky refactors; record baseline validation before edits.
    - Require fresh validation evidence before completion, merge, PR, archive, or handoff claims.
+   - When an embedded spec change reaches `all_done`, archive it with `python3 scripts/agent_spec.py archive <name>` before claiming completion, handoff, release, or archive readiness.
    - Treat destructive branch/worktree cleanup as explicit-user-confirmation work.
 
 8. **Create or verify capability governance and runlog evidence**
@@ -86,6 +88,10 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
    - Ensure `docs/DEV_MAP.md` exists as a concise repository navigation map, not a full file inventory.
    - Use `.agent/harness-evolution.json` and `python3 scripts/agent_gc.py classify ...` to classify repeated failures and promote fixes into rules, skills, scripts, workflow gates, role contracts, tool/MCP policy, or docs.
    - Use `.agent/skill-hygiene.json` and `scripts/agent_skill_hygiene.py` as a read-only skill topology/source/hash/frontmatter/symlink/risk-signal scan; cleanup and canary injection require explicit human confirmation.
+   - For `standard` and `full`, ensure `.agent/project-skills.json` and `scripts/agent_project_skills.py` exist.
+   - Use `.agent/project-skills.json` as the canonical repo-local registry for intentionally governed project skills; keep `skills.manifest.json` as the production/release boundary and `workspace-tools.manifest.json` as workspace-only helper awareness when present.
+   - Use `scripts/agent_project_skills.py report --json` before adopting, updating, deprecating, removing, pinning, or reclassifying project skills; use `snapshot --write` only after the lifecycle change has been reviewed and validated.
+   - Treat project skill lifecycle changes as non-trivial governance work: open or use an embedded spec, run review -> fix -> review through the controlling skill lifecycle, run validation, and archive the completed embedded spec before claiming completion.
    - Treat `.agent/mcp-policy.json` as optional and disabled by default until the project explicitly enables external integrations; it defines trust boundaries even when no MCP server is active, and raw credentials must stay behind vault/proxy boundaries outside the repo, harness, and sandbox.
    - Keep runlog entries structured and concise; do not store raw transcripts, terminal scrollback, secrets, or private host data.
 
@@ -108,12 +114,12 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
 11. **Validate**
    - Run the generated project check when available: `python3 scripts/agent_check.py`.
    - Check migration and version drift when available: `python3 scripts/agent_migrate.py doctor`.
-   - Run `python3 scripts/agent_spec.py doctor` and `python3 scripts/agent_spec.py list --json`.
+   - Run `python3 scripts/agent_spec.py doctor` and `python3 scripts/agent_spec.py list --json`; `doctor` must fail while a completed `all_done` change remains active instead of archived.
    - Inspect executable feedback commands: `python3 scripts/agent_validate.py --list`.
    - Check the knowledge store and invariants: `python3 scripts/agent_knowledge.py` and `python3 scripts/agent_invariants.py`.
    - Check capability governance and runlog health: `python3 scripts/agent_capabilities.py doctor` and `python3 scripts/agent_runlog.py doctor`.
    - Check ACI tooling and security baseline health: `python3 scripts/agent_tooling.py doctor` and `python3 scripts/agent_security.py doctor`.
-   - Check task-board, skill hygiene, and mechanical verification health: `python3 scripts/agent_task.py doctor`, `python3 scripts/agent_skill_hygiene.py doctor`, and `python3 scripts/agent_verify.py doctor`.
+   - Check task-board, skill hygiene, project skill governance, and mechanical verification health: `python3 scripts/agent_task.py doctor`, `python3 scripts/agent_skill_hygiene.py doctor`, `python3 scripts/agent_project_skills.py doctor`, and `python3 scripts/agent_verify.py doctor`.
    - Check governance-gc health: `python3 scripts/agent_gc.py doctor`.
    - Check governance score health: `python3 scripts/agent_score.py doctor`; refresh score with `python3 scripts/agent_score.py score --write` before release handoff.
    - Check session offload health through `python3 .agent/tools/agent_session.py doctor`, `python3 scripts/agent_verify.py doctor`, and `python3 scripts/agent_score.py score --json`.
@@ -128,6 +134,7 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
 12. **Review before handoff**
    - For substantial initialization work, create or update a review-fix record in the controlling skill lifecycle.
    - If the user asks to review or audit an agent-governed project, use `references/review-fix-loop.md` and repeat review, fix, revalidation, and review until the latest review has no blocker, major, or minor findings.
+   - For active embedded spec changes, run `python3 scripts/agent_spec.py status --change <name> --json`; if the state is `all_done`, archive it before final response or handoff.
    - Do not claim completion, handoff, merge readiness, archive readiness, or release readiness for `standard` or `full` tasks until the generated task-board review gate is `pass`.
    - Confirm that resume instructions do not depend on unsaved editor buffers, terminal scrollback, or Codex native thread history.
 
@@ -139,6 +146,7 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
 - `assets/templates/agent-context.py.tmpl`: Source for generated target-project `.agent/tools/agent_context.py`.
 - `assets/templates/agent-capabilities.py.tmpl`: Source for generated target-project `scripts/agent_capabilities.py`.
 - `assets/templates/agent-skill-hygiene.py.tmpl`: Source for generated target-project `scripts/agent_skill_hygiene.py`.
+- `assets/templates/agent-project-skills.py.tmpl`: Source for generated target-project `scripts/agent_project_skills.py`.
 - `assets/templates/agent-runlog.py.tmpl`: Source for generated target-project `scripts/agent_runlog.py`.
 - `assets/templates/agent-tooling.py.tmpl`: Source for generated target-project `scripts/agent_tooling.py`.
 - `assets/templates/agent-security.py.tmpl`: Source for generated target-project `scripts/agent_security.py`.
@@ -170,4 +178,5 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
 - Keep context compression semantic, not stylistic: compress redundancy and filler, preserve technical facts and retrieval handles.
 - Do not force subagent use, model pinning, or delegation-only execution when the active Codex/Claude environment does not permit it.
 - Do not claim completion, merge readiness, PR readiness, or successful handoff without fresh validation evidence recorded in session or runlog state.
+- Do not leave a completed embedded spec change active; archive `all_done` changes before completion, handoff, release, or archive-readiness claims.
 - Do not create, discard, or force-delete worktrees or branches without following the project worktree policy and explicit user confirmation for destructive actions.

@@ -87,11 +87,114 @@ def assert_workflow_stage_closure(target: Path) -> None:
     workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
     profiles = json.loads(profiles_path.read_text(encoding="utf-8"))
     workflow_stages = set(workflow.get("stages", []))
+    gates = workflow.get("gates", {})
+    stage_loop = gates.get("stage_review_loop", {})
+    review_fix = gates.get("review_fix_gate", {})
+    completion = gates.get("completion_verification", {})
+    if set(stage_loop.get("required_for_profiles", [])) != {"standard", "full"}:
+        print("stage_review_loop does not apply to standard/full profiles", file=sys.stderr)
+        raise SystemExit(1)
+    if stage_loop.get("loop") != ["review", "fix", "re_review"]:
+        print("stage_review_loop does not require review-fix-re_review", file=sys.stderr)
+        raise SystemExit(1)
+    if review_fix.get("applies_to_stage_review_loop") is not True:
+        print("review_fix_gate is not tied to stage review loops", file=sys.stderr)
+        raise SystemExit(1)
+    if completion.get("completed_spec_changes_must_be_archived") is not True:
+        print("completion gate does not require completed spec changes to be archived", file=sys.stderr)
+        raise SystemExit(1)
     for name, profile in profiles.get("profiles", {}).items():
         for stage in profile.get("stages", []):
             if stage not in workflow_stages:
                 print(f"workflow profile {name} references unknown stage: {stage}", file=sys.stderr)
                 raise SystemExit(1)
+
+
+def assert_spec_archive_gate(target: Path, python: str) -> None:
+    run(
+        [
+            python,
+            "scripts/agent_spec.py",
+            "new-change",
+            "archive-gate",
+            "--summary",
+            "Verify completed active changes are archived.",
+            "--profile",
+            "tiny",
+        ],
+        cwd=target,
+    )
+    change = target / "openspec" / "changes" / "archive-gate"
+    (change / "proposal.md").write_text(
+        """# Proposal: archive-gate
+
+## Summary
+
+Verify completed active changes cannot pass doctor.
+
+## Goals
+
+- Catch completed active changes.
+
+## Non-Goals
+
+- Change production application behavior.
+
+## User Impact
+
+- Agents get a hard reminder to archive completed specs.
+""",
+        encoding="utf-8",
+    )
+    (change / "design.md").write_text(
+        """# Design: archive-gate
+
+## Approach
+
+- Use the generated spec doctor as the release gate.
+
+## Architecture Notes
+
+- Keep archive policy in repo-local scripts.
+
+## Risks
+
+- False positives are limited to completed active changes.
+
+## Validation Strategy
+
+- Doctor fails before archive and passes after archive.
+""",
+        encoding="utf-8",
+    )
+    (change / "tasks.md").write_text(
+        """# Tasks: archive-gate
+
+## Validation
+
+- [x] Verify spec archive gate catches completed active changes.
+""",
+        encoding="utf-8",
+    )
+    status = json.loads(run([python, "scripts/agent_spec.py", "status", "--change", "archive-gate", "--json"], cwd=target).stdout)
+    if status.get("state") != "all_done":
+        print("archive-gate fixture did not reach all_done", file=sys.stderr)
+        print(json.dumps(status, indent=2), file=sys.stderr)
+        raise SystemExit(1)
+    doctor = run([python, "scripts/agent_spec.py", "doctor"], cwd=target, expect_ok=False)
+    doctor_text = doctor.stdout + doctor.stderr
+    if "complete but still active" not in doctor_text or "archive archive-gate" not in doctor_text:
+        print("agent_spec.py doctor did not reject a completed active change", file=sys.stderr)
+        print(doctor_text, file=sys.stderr)
+        raise SystemExit(1)
+    run([python, "scripts/agent_spec.py", "archive", "archive-gate"], cwd=target)
+    if change.exists():
+        print("archive-gate active change still exists after archive", file=sys.stderr)
+        raise SystemExit(1)
+    if not list((target / "openspec" / "changes" / "archive").glob("*-archive-gate")):
+        print("archive-gate was not moved into openspec/changes/archive", file=sys.stderr)
+        raise SystemExit(1)
+    run([python, "scripts/agent_spec.py", "doctor"], cwd=target)
 
 
 def assert_project_review_templates_are_profile_safe(target: Path) -> None:
@@ -289,6 +392,23 @@ def assert_task_board_guards(init_script: Path, temp_root: Path, python: str) ->
         print("agent_task.py did not reject done without a passing review gate", file=sys.stderr)
         print(done_without_review.stdout + done_without_review.stderr, file=sys.stderr)
         raise SystemExit(1)
+    for stage in ("spec", "plan", "implementation", "spec_review", "quality_review", "verification", "handoff"):
+        run(
+            [
+                python,
+                "scripts/agent_task.py",
+                "update",
+                "guard-task",
+                "--stage-review-stage",
+                stage,
+                "--stage-review-status",
+                "pass",
+                "--stage-review-path",
+                "docs/features/guard-task/05_CODE_REVIEW.md",
+                "--clear-stage-open-findings",
+            ],
+            cwd=guarded,
+        )
     run(
         [
             python,
@@ -653,6 +773,7 @@ def main() -> int:
 
         assert_no_missing_doc_refs(target)
         assert_workflow_stage_closure(target)
+        assert_spec_archive_gate(target, python)
         run([python, "scripts/agent_check.py"], cwd=target)
         run([python, "scripts/agent_migrate.py", "doctor"], cwd=target)
         assert_session_offload_protocol(target, python)
@@ -704,6 +825,24 @@ def main() -> int:
                 "Regression task scope is understood.",
                 "--domain-glossary-updated",
                 "--code-docs-cross-checked",
+            ],
+            cwd=target,
+        )
+        spec_review_path = target / "docs" / "features" / "regression-task" / "spec-review.md"
+        spec_review_path.write_text("# Spec Stage Review\n\n- Status: pass\n- Findings: none\n", encoding="utf-8")
+        run(
+            [
+                python,
+                "scripts/agent_task.py",
+                "update",
+                "regression-task",
+                "--stage-review-stage",
+                "spec",
+                "--stage-review-status",
+                "pass",
+                "--stage-review-path",
+                spec_review_path.relative_to(target).as_posix(),
+                "--clear-stage-open-findings",
             ],
             cwd=target,
         )

@@ -28,6 +28,15 @@ REQUIREMENT_PROTECTED_STAGES = {
     "handoff",
     "finish",
 }
+STAGE_REVIEW_REQUIRED_STAGES = (
+    "spec",
+    "plan",
+    "implementation",
+    "spec_review",
+    "quality_review",
+    "verification",
+    "handoff",
+)
 
 
 def utc_now() -> str:
@@ -84,6 +93,16 @@ def default_review_gate(required: bool) -> dict:
     }
 
 
+def default_stage_review() -> dict:
+    return {
+        "status": "pending",
+        "latest_review": "",
+        "latest_fix": "",
+        "open_findings": [],
+        "accepted_exception": "",
+    }
+
+
 def default_requirements(profile_name: str) -> dict:
     required = profile_name != "tiny"
     return {
@@ -124,6 +143,67 @@ def normalized_review_gate(item: dict, profile: dict, policy: dict) -> dict:
     if not isinstance(merged.get("open_findings"), list):
         merged["open_findings"] = [str(merged.get("open_findings"))]
     return merged
+
+
+def stage_reviews(item: dict) -> dict:
+    reviews = item.get("stage_reviews")
+    return reviews if isinstance(reviews, dict) else {}
+
+
+def stage_review_required_for_profile(profile_name: str, policy: dict) -> bool:
+    required_profiles = set(policy.get("stage_review_loop_required_for_profiles", []))
+    return profile_name in required_profiles
+
+
+def stage_review_required_stages(policy: dict) -> list[str]:
+    configured = policy.get("stage_review_required_before_stage_exit")
+    if isinstance(configured, list) and configured:
+        return [str(stage) for stage in configured]
+    return list(STAGE_REVIEW_REQUIRED_STAGES)
+
+
+def required_stage_reviews_for_item(item: dict, profile: dict, policy: dict) -> list[str]:
+    profile_name = str(item.get("profile", ""))
+    if not stage_review_required_for_profile(profile_name, policy):
+        return []
+    stages = [str(stage) for stage in profile.get("stages", [])]
+    current_stage = str(item.get("current_stage", ""))
+    required_before_exit = set(stage_review_required_stages(policy))
+    if item.get("state") in {"done", "archived"}:
+        exited = stages
+    elif current_stage in stages:
+        exited = stages[: stages.index(current_stage)]
+    else:
+        exited = []
+    return [stage for stage in exited if stage in required_before_exit]
+
+
+def stage_review_errors(task_id: str, item: dict, profile: dict, policy: dict) -> list[str]:
+    errors: list[str] = []
+    reviews = stage_reviews(item)
+    if not isinstance(item.get("stage_reviews", {}), dict):
+        errors.append(f"{task_id} stage_reviews must be an object")
+        return errors
+    pass_status = policy.get("review_gate_pass_status", "pass")
+    for stage in required_stage_reviews_for_item(item, profile, policy):
+        review = reviews.get(stage)
+        if not isinstance(review, dict):
+            errors.append(f"{task_id} missing stage review for exited stage: {stage}")
+            continue
+        status = review.get("status")
+        if status not in REVIEW_STATUSES:
+            errors.append(f"{task_id} stage review {stage} has invalid status: {status}")
+        if status != pass_status:
+            errors.append(f"{task_id} stage review {stage} must be {pass_status}")
+        open_findings = [finding for finding in review.get("open_findings", []) if str(finding).strip()]
+        if policy.get("review_gate_open_findings_must_be_empty") is True and open_findings:
+            errors.append(f"{task_id} stage review {stage} has open findings")
+        latest_review = str(review.get("latest_review", "")).strip()
+        if not latest_review:
+            errors.append(f"{task_id} stage review {stage} missing latest_review")
+        elif policy.get("review_gate_latest_review_must_exist") is True and not Path(latest_review).exists():
+            errors.append(f"{task_id} stage review {stage} latest_review path is missing: {latest_review}")
+    return errors
 
 
 def requirements_errors(task_id: str, item: dict, profile: dict, policy: dict) -> list[str]:
@@ -178,9 +258,15 @@ def validate_board(board: dict, profiles: dict) -> list[str]:
     states = set(board.get("states", []))
     required_fields = set(board.get("required_fields", []))
     policy = board.get("policy", {})
-    for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path", "requirements", "review_gate"):
+    for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path", "requirements", "review_gate", "stage_reviews"):
         if field not in required_fields:
             errors.append(f"missing required field declaration: {field}")
+    if set(policy.get("done_requires_review_gate_pass_for_profiles", [])) != {"standard", "full"}:
+        errors.append("task board must require review_gate pass for standard and full done tasks")
+    if policy.get("review_fix_loop_required_at_stage_exit") is not True:
+        errors.append("task board must require review-fix loops at stage exit")
+    if set(policy.get("stage_review_loop_required_for_profiles", [])) != {"standard", "full"}:
+        errors.append("task board must require stage review loops for standard and full profiles")
     seen: set[str] = set()
     profile_names = set(profiles.get("profiles", {}))
     for item in board.get("items", []):
@@ -209,6 +295,7 @@ def validate_board(board: dict, profiles: dict) -> list[str]:
                 errors.append(f"{task_id} is done without delivery_conclusion")
         errors.extend(requirements_errors(task_id, item, profile, policy))
         errors.extend(review_gate_errors(task_id, item, profile, policy))
+        errors.extend(stage_review_errors(task_id, item, profile, policy))
         if profile.get("feature_doc_templates") and (not docs_path or not Path(docs_path).exists()):
             errors.append(f"{task_id} docs_path missing or absent: {docs_path}")
     return errors
@@ -303,6 +390,7 @@ def cmd_new(args: argparse.Namespace) -> int:
         "updated_at": now,
         "delivery_conclusion": "",
         "review_gate": default_review_gate(profile_requires_review_gate(args.profile, profile, board.get("policy", {}))),
+        "stage_reviews": {},
         "related_tasks": [],
     }
     board.setdefault("items", []).append(item)
@@ -369,6 +457,39 @@ def cmd_update(args: argparse.Namespace) -> int:
     if args.accepted_exception is not None:
         gate["accepted_exception"] = args.accepted_exception
     item["review_gate"] = gate
+    if (
+        args.stage_review_stage
+        or args.stage_review_status
+        or args.stage_review_path is not None
+        or args.stage_fix_path is not None
+        or args.stage_open_finding
+        or args.clear_stage_open_findings
+        or args.stage_accepted_exception is not None
+    ):
+        stage = args.stage_review_stage or item.get("current_stage")
+        if not stage:
+            print("error: stage review update requires --stage-review-stage or current_stage", file=sys.stderr)
+            return 2
+        reviews = stage_reviews(item)
+        review = dict(default_stage_review())
+        existing = reviews.get(stage)
+        if isinstance(existing, dict):
+            review.update(existing)
+        if args.stage_review_status:
+            review["status"] = args.stage_review_status
+        if args.stage_review_path is not None:
+            review["latest_review"] = args.stage_review_path
+        if args.stage_fix_path is not None:
+            review["latest_fix"] = args.stage_fix_path
+        if args.clear_stage_open_findings:
+            review["open_findings"] = []
+        if args.stage_open_finding:
+            review.setdefault("open_findings", [])
+            review["open_findings"].extend(args.stage_open_finding)
+        if args.stage_accepted_exception is not None:
+            review["accepted_exception"] = args.stage_accepted_exception
+        reviews[stage] = review
+        item["stage_reviews"] = reviews
     if item.get("state") == "done" and board.get("policy", {}).get("done_requires_delivery_conclusion") is True:
         if not str(item.get("delivery_conclusion", "")).strip():
             print("error: done tasks require --conclusion", file=sys.stderr)
@@ -422,6 +543,13 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--open-finding", action="append", default=[])
     update.add_argument("--clear-open-findings", action="store_true")
     update.add_argument("--accepted-exception")
+    update.add_argument("--stage-review-stage")
+    update.add_argument("--stage-review-status", choices=sorted(REVIEW_STATUSES))
+    update.add_argument("--stage-review-path")
+    update.add_argument("--stage-fix-path")
+    update.add_argument("--stage-open-finding", action="append", default=[])
+    update.add_argument("--clear-stage-open-findings", action="store_true")
+    update.add_argument("--stage-accepted-exception")
     update.set_defaults(func=cmd_update)
     return parser
 

@@ -7,6 +7,7 @@ Use this reference when the initialized project needs a release-quality setup ra
 Review the initialized project before handoff. At minimum, check:
 
 - `.agent/spec.json`, `openspec/`, and `scripts/agent_spec.py` exist and identify agent-gov embedded spec management as the spec source.
+- `python3 scripts/agent_spec.py doctor` passes, and no active change under `openspec/changes/<name>/` is already `all_done`; completed changes are archived under `openspec/changes/archive/`.
 - `AGENTS.md` is short, stable, and agent-focused.
 - `CLAUDE.md` is thin and does not duplicate long instructions.
 - `.agent/workflow.json` records lifecycle gates for risk classification, spec approval, plan quality, implementation discipline, diff traceability, worktree isolation, TDD/debugging, review sequence, human review evidence, completion verification, and finish choices.
@@ -28,6 +29,7 @@ Review the initialized project before handoff. At minimum, check:
 - `.agent/mechanical-checks.json`, `.agent/baselines.json`, and `scripts/agent_verify.py` exist; hard mechanical checks and before/after baseline comparisons can run.
 - `.agent/dev-map.json` and `docs/DEV_MAP.md` exist and describe repository entry points without becoming a full file inventory.
 - `.agent/skill-hygiene.json` and `scripts/agent_skill_hygiene.py` exist; skill topology and risk signals can be scanned read-only, and cleanup/canary actions are explicit human-confirmation work.
+- `.agent/project-skills.json` and `scripts/agent_project_skills.py` exist; project skills are registered as managed, workspace-only helpers are not merged into `skills.manifest.json`, and lifecycle changes have embedded spec, review-fix-review, validation, and archive evidence.
 - `.agent/harness-evolution.json` exists and postmortem templates include harness gap classification.
 - `.agent/mcp-policy.json` exists and keeps MCP optional, credential-safe, vault/proxy-bounded, and approval-gated by default.
 - `.agent/governance-gc.json` and `scripts/agent_gc.py` exist and can report stale docs, stale tasks, baseline drift, config pointers, and owner gaps.
@@ -36,6 +38,7 @@ Review the initialized project before handoff. At minimum, check:
 - VS Code Remote assumptions are captured in session state.
 - Validation commands exist and run.
 - Substantial changes have fresh completion evidence; skipped checks have explicit reasons and residual risk.
+- Standard/full protected stage exits have review-fix-review evidence before progressing past spec, plan, implementation, spec review, quality review, verification, and handoff.
 - Delegated or substantial implementation ran spec compliance review before code quality review, or records an accepted exception.
 - Substantial implementation records assumptions, simplicity/abstraction justification, surgical diff scope, and success criteria, or records an accepted exception.
 - High-risk and critical changes have reviewer, diff range, reviewed files, high-risk paths checked, and conclusion recorded.
@@ -64,7 +67,7 @@ For task-managed work, the pass gate is also recorded in `.agent/task-board.json
 }
 ```
 
-`standard` and `full` tasks cannot be marked `done` unless the review gate is `pass`, the latest review path exists, and open blocker/major/minor findings are empty.
+`standard` and `full` tasks cannot be marked `done` unless the review gate is `pass`, the latest review path exists, and open blocker/major/minor findings are empty. They also should not leave protected stages while blocker, major, or minor findings remain open from that stage's review.
 
 ## Findings
 
@@ -92,6 +95,15 @@ review
 
 Do not convert a finding-bearing review to `pass`. Keep it as `needs-fix`, record the fix log, and use the next review round as proof that the fixes held.
 
-Generated projects enforce this through `scripts/agent_task.py`, `scripts/agent_skill_hygiene.py`, `scripts/agent_check.py`, `scripts/agent_verify.py`, and `scripts/agent_score.py`.
+For embedded spec work, include this archive check in the loop:
+
+```text
+status --change <name>
+  -> if state is all_done, archive <name>
+  -> run agent_spec.py doctor
+  -> proceed only when doctor passes
+```
+
+Generated projects enforce this through `scripts/agent_task.py`, `scripts/agent_skill_hygiene.py`, `scripts/agent_project_skills.py`, `scripts/agent_check.py`, `scripts/agent_verify.py`, and `scripts/agent_score.py`.
 
 For skill development in this repository, use `skill_lifecycle.py review`, `fix-log`, and `review-status`.

@@ -1,0 +1,690 @@
+#!/usr/bin/env python3
+"""Govern repo-local project skill inventory and lifecycle state."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+CONFIG_PATH = Path(".agent/project-skills.json")
+HYGIENE_SCRIPT = Path("scripts/agent_skill_hygiene.py")
+PRODUCTION_MANIFEST = Path("skills.manifest.json")
+WORKSPACE_TOOLS_MANIFEST = Path("workspace-tools.manifest.json")
+CAPABILITIES_CONFIG = Path(".agent/capabilities.json")
+SKIP_DIRS = {".git", "__pycache__", "node_modules", "dist", "build", "target"}
+SKIP_NAMES = {".DS_Store"}
+SENSITIVE_NAMES = {
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".netrc",
+    "credentials",
+    "credentials.json",
+    "secrets",
+    "secrets.json",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+}
+PINNED_REF_PREFIXES = ("refs/tags/",)
+COMMON_BRANCH_REFS = {"main", "master", "develop", "dev", "trunk", "latest", "head", "HEAD"}
+REVIEW_FINDING_SECTIONS = ("Blocker", "Major", "Minor")
+NONE_FINDING_VALUES = {"none", "none found", "no findings", "n/a", "not applicable"}
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def load_json(path: Path, fallback: Any | None = None) -> Any:
+    if not path.exists():
+        return fallback
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"error: invalid JSON in {path}: {exc}") from exc
+
+
+def write_json(path: Path, data: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def validate_repo_local_path(value: str) -> tuple[Path | None, str]:
+    raw = str(value).strip()
+    if not raw:
+        return None, "empty path"
+    path = Path(raw)
+    if path.is_absolute() or ".." in path.parts:
+        return None, f"unsafe path: {value}"
+    if path.exists():
+        try:
+            path.resolve().relative_to(Path.cwd().resolve())
+        except (OSError, ValueError):
+            return None, f"path escapes repository: {value}"
+    return path, ""
+
+
+def safe_rel_path(value: str) -> Path:
+    path, error = validate_repo_local_path(value)
+    if error or path is None:
+        raise ValueError(error or f"unsafe path: {value}")
+    return path
+
+
+def normalized_repo_path(value: Any) -> str:
+    path, error = validate_repo_local_path(str(value))
+    if error or path is None:
+        return str(value).strip()
+    return path.as_posix()
+
+
+def same_repo_path(left: Any, right: Any) -> bool:
+    return normalized_repo_path(left) == normalized_repo_path(right)
+
+
+def is_sensitive(path: Path) -> bool:
+    if path.name in SENSITIVE_NAMES:
+        return True
+    suffix = path.suffix.lower()
+    return suffix in {".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".gpg", ".asc"}
+
+
+def iter_skill_files(skill_dir: Path) -> list[Path]:
+    files: list[Path] = []
+    if not skill_dir.exists() or not skill_dir.is_dir():
+        return files
+    for path in sorted(skill_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        if set(path.parts) & SKIP_DIRS:
+            continue
+        if path.name in SKIP_NAMES or is_sensitive(path):
+            continue
+        files.append(path)
+    return files
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def tree_sha256(skill_dir: Path) -> str:
+    digest = hashlib.sha256()
+    for path in iter_skill_files(skill_dir):
+        relative = path.relative_to(skill_dir).as_posix()
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(file_sha256(path).encode("ascii"))
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def content_identity(skill_path: str) -> dict[str, str]:
+    try:
+        root = safe_rel_path(skill_path)
+    except ValueError:
+        return {"skill_md_sha256": "", "tree_sha256": ""}
+    skill_md = root / "SKILL.md"
+    return {
+        "skill_md_sha256": file_sha256(skill_md) if skill_md.exists() and skill_md.is_file() else "",
+        "tree_sha256": tree_sha256(root) if root.exists() and root.is_dir() else "",
+    }
+
+
+def run_hygiene_report() -> tuple[dict[str, Any], str]:
+    if not HYGIENE_SCRIPT.exists():
+        return {}, f"missing {HYGIENE_SCRIPT}"
+    result = subprocess.run(
+        [sys.executable, str(HYGIENE_SCRIPT), "report", "--json"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return {}, (result.stderr or result.stdout).strip() or "agent skill hygiene failed"
+    try:
+        return json.loads(result.stdout), ""
+    except json.JSONDecodeError as exc:
+        return {}, f"invalid hygiene report JSON: {exc}"
+
+
+def production_skills() -> dict[str, dict[str, Any]]:
+    manifest = load_json(PRODUCTION_MANIFEST, {})
+    if not isinstance(manifest, dict) or manifest.get("schema") != "project-skill-manifest-v1":
+        return {}
+    skills = manifest.get("skills", {})
+    return skills if isinstance(skills, dict) else {}
+
+
+def workspace_tools() -> dict[str, dict[str, Any]]:
+    manifest = load_json(WORKSPACE_TOOLS_MANIFEST, {})
+    if not isinstance(manifest, dict) or manifest.get("schema") != "project-workspace-tools-manifest-v1":
+        return {}
+    tools = manifest.get("tools", {})
+    return tools if isinstance(tools, dict) else {}
+
+
+def capabilities_path(config: dict[str, Any]) -> Path:
+    inputs = config.get("registry_inputs", {})
+    if isinstance(inputs, dict) and isinstance(inputs.get("capabilities"), str) and inputs.get("capabilities"):
+        path, error = validate_repo_local_path(inputs["capabilities"])
+        if not error and path is not None:
+            return path
+    return CAPABILITIES_CONFIG
+
+
+def capability_entries(config: dict[str, Any]) -> list[dict[str, Any]]:
+    payload = load_json(capabilities_path(config), {})
+    if not isinstance(payload, dict) or payload.get("schema") != "agent-capabilities-v1":
+        return []
+    capabilities = payload.get("capabilities", [])
+    return [item for item in capabilities if isinstance(item, dict)] if isinstance(capabilities, list) else []
+
+
+def discovered_project_skills(hygiene: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    discovered: dict[str, dict[str, Any]] = {}
+    for item in hygiene.get("skills", []):
+        if not isinstance(item, dict) or item.get("root_kind") != "project":
+            continue
+        name = str(item.get("name") or Path(str(item.get("path", ""))).parent.name)
+        if name:
+            discovered[name] = item
+    return discovered
+
+
+def is_pinned(source: dict[str, Any]) -> bool:
+    if source.get("pinned") is True:
+        return True
+    ref = str(source.get("ref", "")).strip()
+    if not ref:
+        return False
+    if ref.startswith(PINNED_REF_PREFIXES):
+        return True
+    if len(ref) in {7, 40, 64} and all(char in "0123456789abcdefABCDEF" for char in ref):
+        return True
+    if ref.startswith("v") and any(char.isdigit() for char in ref):
+        return True
+    return ref not in COMMON_BRANCH_REFS and "/" not in ref
+
+
+def frontmatter_status(text: str) -> str:
+    lines = text.lstrip().splitlines()
+    if not lines or lines[0].strip() != "---":
+        return ""
+    for index in range(1, len(lines)):
+        if lines[index].strip() != "---":
+            continue
+        for line in lines[1:index]:
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            if key.strip() == "status":
+                return value.strip().strip("\"'")
+        return ""
+    return ""
+
+
+def markdown_section_lines(text: str, heading: str) -> list[str] | None:
+    in_section = False
+    lines: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("### "):
+            title = stripped[4:].strip().strip("#").strip()
+            if in_section:
+                break
+            if title.lower() == heading.lower():
+                in_section = True
+                continue
+        elif in_section and stripped.startswith("## "):
+            break
+        if in_section:
+            lines.append(line)
+    return lines if in_section else None
+
+
+def review_section_has_open_findings(text: str, heading: str) -> bool:
+    lines = markdown_section_lines(text, heading)
+    if lines is None:
+        return True
+    significant: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("```") or stripped.startswith("#"):
+            continue
+        normalized = stripped.lstrip("-*0123456789. ").strip().lower().rstrip(".")
+        if normalized:
+            significant.append(normalized)
+    if not significant:
+        return True
+    return any(item not in NONE_FINDING_VALUES for item in significant)
+
+
+def matching_capability(name: str, path: str, capabilities: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for capability in capabilities:
+        kind = str(capability.get("kind", "")).strip()
+        capability_class = str(capability.get("capability_class", "")).strip()
+        if kind != "skill" and capability_class != "instruction":
+            continue
+        candidates = {
+            str(capability.get("id", "")).strip(),
+            str(capability.get("skill", "")).strip(),
+            str(capability.get("skill_name", "")).strip(),
+            str(capability.get("name", "")).strip(),
+        }
+        capability_path = str(capability.get("path", "")).strip()
+        if name in candidates or (capability_path and same_repo_path(path, capability_path)):
+            return capability
+    return None
+
+
+def capability_findings(name: str, path: str, registered: dict[str, Any], capabilities: list[dict[str, Any]]) -> list[dict[str, str]]:
+    capability = matching_capability(name, path, capabilities)
+    if not capability:
+        return []
+    findings: list[dict[str, str]] = []
+    checks = {
+        "risk": (registered.get("risk"), capability.get("risk")),
+        "owner": (registered.get("owner"), capability.get("owner")),
+        "path": (path, capability.get("path")),
+    }
+    for field, (left, right) in checks.items():
+        if left in {"", None} or right in {"", None}:
+            continue
+        same_value = same_repo_path(left, right) if field == "path" else left == right
+        if not same_value:
+            findings.append({"severity": "warning", "kind": "capability_mismatch", "summary": f"{name} capability {field} differs from project skill registry", "path": path})
+    capability_class = str(capability.get("capability_class", "")).strip()
+    if capability_class and capability_class != "instruction":
+        findings.append({"severity": "warning", "kind": "capability_mismatch", "summary": f"{name} capability class should be instruction", "path": path})
+    permissions = capability.get("permissions", {})
+    if isinstance(permissions, dict):
+        if permissions.get("network") is True:
+            findings.append({"severity": "warning", "kind": "capability_mismatch", "summary": f"{name} capability enables network access", "path": path})
+        if permissions.get("secrets") is True:
+            findings.append({"severity": "warning", "kind": "capability_mismatch", "summary": f"{name} capability enables secret access", "path": path})
+        if permissions.get("write") not in {False, None, "", "bounded"}:
+            findings.append({"severity": "warning", "kind": "capability_mismatch", "summary": f"{name} capability write permission is broader than bounded", "path": path})
+    return findings
+
+
+def review_gate_findings(name: str, path: str, review: dict[str, Any], policy: dict[str, Any]) -> tuple[list[str], list[dict[str, str]], list[str]]:
+    if review.get("requires_review") is not True:
+        return [], [], []
+    severity = "error" if policy.get("review_artifact_required", True) is True else "warning"
+    statuses = ["review_pending"]
+    findings: list[dict[str, str]] = []
+    evidence: list[str] = []
+    latest_status = str(review.get("latest_status", "")).strip()
+    if latest_status != "pass":
+        findings.append({"severity": severity, "kind": "review_pending", "summary": f"{name} latest review status is not pass", "path": path})
+    artifact = str(review.get("latest_artifact", "")).strip()
+    if not artifact:
+        findings.append({"severity": severity, "kind": "review_artifact_missing", "summary": f"{name} latest review artifact is missing", "path": path})
+        return statuses, findings, evidence
+    artifact_path, artifact_error = validate_repo_local_path(artifact)
+    evidence.append(artifact)
+    if artifact_error or artifact_path is None:
+        findings.append({"severity": "error", "kind": "review_artifact_missing", "summary": f"{name} latest review artifact path is unsafe", "path": artifact})
+        return statuses, findings, evidence
+    if not artifact_path.is_file():
+        findings.append({"severity": severity, "kind": "review_artifact_missing", "summary": f"{name} latest review artifact does not exist", "path": artifact})
+        return statuses, findings, evidence
+    text = artifact_path.read_text(encoding="utf-8")
+    artifact_status = frontmatter_status(text)
+    if artifact_status != "pass":
+        findings.append({"severity": severity, "kind": "review_pending", "summary": f"{name} latest review artifact status is not pass", "path": artifact})
+    for section in REVIEW_FINDING_SECTIONS:
+        if review_section_has_open_findings(text, section):
+            findings.append({"severity": severity, "kind": "review_findings_open", "summary": f"{name} latest review has open {section.lower()} findings", "path": artifact})
+    if not findings:
+        statuses = []
+    return statuses, findings, evidence
+
+
+def registry_policy(config: dict[str, Any]) -> dict[str, Any]:
+    policy = config.get("policy", {})
+    return policy if isinstance(policy, dict) else {}
+
+
+def load_config() -> dict[str, Any]:
+    config = load_json(CONFIG_PATH, {})
+    if not isinstance(config, dict):
+        raise SystemExit(f"error: {CONFIG_PATH} must be a JSON object")
+    return config
+
+
+def registry_skills(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    skills = config.get("skills", {})
+    return skills if isinstance(skills, dict) else {}
+
+
+def infer_path(name: str, registered: dict[str, Any], production: dict[str, Any], workspace: dict[str, Any], discovered: dict[str, Any]) -> str:
+    for source in (
+        registered.get("path"),
+        production.get("source"),
+        workspace.get("source"),
+        str(Path(str(discovered.get("path", ""))).parent) if discovered.get("path") else "",
+    ):
+        if isinstance(source, str) and source:
+            return source
+    return f".codex/skills/{name}"
+
+
+def status_for_skill(
+    name: str,
+    registered: dict[str, Any] | None,
+    production: dict[str, Any] | None,
+    workspace: dict[str, Any] | None,
+    discovered: dict[str, Any] | None,
+    policy: dict[str, Any],
+    capabilities: list[dict[str, Any]],
+) -> dict[str, Any]:
+    registered = registered or {}
+    production = production or {}
+    workspace = workspace or {}
+    discovered = discovered or {}
+    path = infer_path(name, registered, production, workspace, discovered)
+    statuses: list[str] = []
+    findings: list[dict[str, str]] = []
+    evidence = [path]
+    path_obj, path_error = validate_repo_local_path(path) if path else (None, "empty path")
+    exists = bool(path_obj and path_obj.exists())
+    registered_bool = bool(registered)
+    discovered_bool = bool(discovered)
+    production_bool = bool(production)
+    workspace_bool = bool(workspace)
+
+    if registered_bool:
+        if path_error:
+            statuses.append("unsafe_path")
+            findings.append({"severity": "error", "kind": "unsafe_path", "summary": f"{name} registered path is unsafe", "path": path})
+        elif exists:
+            statuses.append("managed")
+        else:
+            statuses.append("missing")
+            findings.append({"severity": "error", "kind": "missing", "summary": f"{name} registered path is missing", "path": path})
+    elif discovered_bool:
+        statuses.append("unmanaged" if production_bool or workspace_bool else "orphaned")
+        kind = "unmanaged" if production_bool or workspace_bool else "orphaned"
+        policy_key = "fail_on_unmanaged_project_skills" if kind == "unmanaged" else "fail_on_orphaned_project_skills"
+        severity = "error" if policy.get(policy_key, True) is True else "warning"
+        findings.append({"severity": severity, "kind": kind, "summary": f"{name} is installed without project skill registry entry", "path": path})
+
+    if registered_bool and exists and not path_error:
+        current = content_identity(path)
+        recorded = registered.get("content", {}) if isinstance(registered.get("content"), dict) else {}
+        for key in ("skill_md_sha256", "tree_sha256"):
+            expected = str(recorded.get(key, "")).strip()
+            actual = current.get(key, "")
+            if expected and actual and expected != actual:
+                if "drifted" not in statuses:
+                    statuses.append("drifted")
+                findings.append({"severity": "error", "kind": "drifted", "summary": f"{name} {key} differs from registry", "path": path})
+
+    if registered_bool:
+        source = registered.get("source", {}) if isinstance(registered.get("source"), dict) else {}
+        if not source or source.get("kind") in {"", None, "unknown"}:
+            statuses.append("unknown_source")
+        elif is_pinned(source):
+            statuses.append("pinned")
+        else:
+            statuses.append("unpinned")
+
+        intent = str(registered.get("intent", "")).strip()
+        release = registered.get("release", {}) if isinstance(registered.get("release"), dict) else {}
+        if intent == "production" and not path_error:
+            if not production_bool:
+                statuses.append("manifest_mismatch")
+                findings.append({"severity": "error", "kind": "manifest_mismatch", "summary": f"{name} intent is production but missing from skills.manifest.json", "path": path})
+            else:
+                checks = {
+                    "source": (path, production.get("source")),
+                    "publishable": (release.get("publishable"), production.get("publishable")),
+                    "release_gate": (release.get("release_gate"), production.get("release_gate")),
+                }
+                for field, (left, right) in checks.items():
+                    if left not in {"", None} and right not in {"", None} and left != right:
+                        statuses.append("manifest_mismatch")
+                        findings.append({"severity": "error", "kind": "manifest_mismatch", "summary": f"{name} {field} differs from skills.manifest.json", "path": path})
+                host = str(registered.get("host", "")).strip()
+                targets = production.get("targets", {}) if isinstance(production.get("targets"), dict) else {}
+                if host:
+                    target = targets.get(host) if isinstance(targets, dict) else None
+                    if not isinstance(target, dict):
+                        statuses.append("manifest_mismatch")
+                        findings.append({"severity": "error", "kind": "manifest_mismatch", "summary": f"{name} missing skills.manifest.json target for host {host}", "path": path})
+                    else:
+                        install_path = target.get("install_path")
+                        if install_path in {"", None}:
+                            statuses.append("manifest_mismatch")
+                            findings.append({"severity": "error", "kind": "manifest_mismatch", "summary": f"{name} missing skills.manifest.json target install_path for host {host}", "path": path})
+                        elif not same_repo_path(path, install_path):
+                            statuses.append("manifest_mismatch")
+                            findings.append({"severity": "error", "kind": "manifest_mismatch", "summary": f"{name} target install path differs from skills.manifest.json", "path": path})
+        elif intent == "workspace-only":
+            if not workspace_bool:
+                statuses.append("manifest_mismatch")
+                findings.append({"severity": "warning", "kind": "manifest_mismatch", "summary": f"{name} intent is workspace-only but missing from workspace-tools.manifest.json", "path": path})
+            elif workspace.get("source") and not same_repo_path(workspace.get("source"), path):
+                statuses.append("manifest_mismatch")
+                findings.append({"severity": "warning", "kind": "manifest_mismatch", "summary": f"{name} path differs from workspace-tools.manifest.json", "path": path})
+
+        review = registered.get("review", {}) if isinstance(registered.get("review"), dict) else {}
+        review_statuses, review_findings, review_evidence = review_gate_findings(name, path, review, policy)
+        statuses.extend(review_statuses)
+        findings.extend(review_findings)
+        evidence.extend(review_evidence)
+
+        capability_checks = capability_findings(name, path, registered, capabilities)
+        if capability_checks:
+            statuses.append("capability_mismatch")
+            findings.extend(capability_checks)
+
+    return {
+        "name": name,
+        "path": path,
+        "registered": registered_bool,
+        "discovered": discovered_bool,
+        "production_manifest": production_bool,
+        "workspace_manifest": workspace_bool,
+        "statuses": sorted(set(statuses)) or ["unknown"],
+        "findings": findings,
+        "evidence": evidence,
+    }
+
+
+def collect() -> dict[str, Any]:
+    config = load_config()
+    hygiene, hygiene_error = run_hygiene_report()
+    registered = registry_skills(config)
+    production = production_skills()
+    workspace = workspace_tools()
+    discovered = discovered_project_skills(hygiene)
+    policy = registry_policy(config)
+    capabilities = capability_entries(config)
+    names = sorted(set(registered) | set(production) | set(workspace) | set(discovered))
+    records = [
+        status_for_skill(
+            name,
+            registered.get(name),
+            production.get(name),
+            workspace.get(name),
+            discovered.get(name),
+            policy,
+            capabilities,
+        )
+        for name in names
+    ]
+    findings = [finding for record in records for finding in record.get("findings", [])]
+    if hygiene_error:
+        findings.append({"severity": "error", "kind": "hygiene_unavailable", "summary": hygiene_error, "path": str(HYGIENE_SCRIPT)})
+    errors = sum(1 for item in findings if item.get("severity") == "error")
+    warnings = sum(1 for item in findings if item.get("severity") == "warning")
+    return {
+        "schema": "agent-project-skills-report-v1",
+        "created_at": utc_now(),
+        "status": "fail" if errors else ("warn" if warnings else "pass"),
+        "counts": {
+            "registered": len(registered),
+            "discovered": len(discovered),
+            "production_manifest": len(production),
+            "workspace_manifest": len(workspace),
+            "skills": len(records),
+            "findings": len(findings),
+            "errors": errors,
+            "warnings": warnings,
+        },
+        "skills": records,
+        "findings": findings,
+        "policy": {
+            "repo_local": bool(policy.get("repo_local", True)),
+            "dependency_free": bool(policy.get("dependency_free", True)),
+            "no_auto_delete": bool(policy.get("no_auto_delete", True)),
+            "fail_on_unmanaged_project_skills": bool(policy.get("fail_on_unmanaged_project_skills", True)),
+            "fail_on_orphaned_project_skills": bool(policy.get("fail_on_orphaned_project_skills", True)),
+            "review_artifact_required": bool(policy.get("review_artifact_required", True)),
+        },
+    }
+
+
+def print_text(report: dict[str, Any]) -> None:
+    counts = report.get("counts", {})
+    print(f"project skills: {report.get('status')}")
+    print(f"skills: {counts.get('skills', 0)} ({counts.get('registered', 0)} registered, {counts.get('discovered', 0)} discovered)")
+    print(f"findings: {counts.get('findings', 0)} ({counts.get('errors', 0)} errors, {counts.get('warnings', 0)} warnings)")
+    for item in report.get("skills", []):
+        print(f"- {item.get('name')}: {', '.join(item.get('statuses', []))} ({item.get('path')})")
+    for item in report.get("findings", [])[:50]:
+        path = f" ({item.get('path')})" if item.get("path") else ""
+        print(f"{item.get('severity')}: {item.get('kind')}: {item.get('summary')}{path}")
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    report = collect()
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print_text(report)
+    return 1 if args.fail_on_error and report.get("counts", {}).get("errors", 0) else 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    errors: list[str] = []
+    config = load_config()
+    if config.get("schema") != "agent-project-skills-v1":
+        errors.append(f"{CONFIG_PATH} schema must be agent-project-skills-v1")
+    policy = registry_policy(config)
+    for key in (
+        "repo_local",
+        "dependency_free",
+        "no_auto_delete",
+        "requires_review_fix_review_for_lifecycle_changes",
+        "archive_completed_skill_changes",
+        "fail_on_unmanaged_project_skills",
+        "fail_on_orphaned_project_skills",
+        "review_artifact_required",
+    ):
+        if policy.get(key) is not True:
+            errors.append(f"{CONFIG_PATH} policy must enable {key}")
+    if not isinstance(config.get("skills", {}), dict):
+        errors.append(f"{CONFIG_PATH} skills must be an object")
+    report = collect() if not errors else {}
+    for finding in report.get("findings", []):
+        if finding.get("severity") == "error":
+            errors.append(f"{finding.get('kind')}: {finding.get('path')}: {finding.get('summary')}")
+    for error in errors:
+        print(f"error: {error}")
+    if errors:
+        return 1
+    print("agent project skills doctor passed")
+    return 0
+
+
+def cmd_snapshot(args: argparse.Namespace) -> int:
+    config = load_config()
+    skills = registry_skills(config)
+    snapshots: dict[str, dict[str, str]] = {}
+    for name, item in sorted(skills.items()):
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path", "")).strip()
+        if not path:
+            continue
+        snapshots[name] = content_identity(path)
+        if args.write:
+            item.setdefault("content", {})
+            if isinstance(item["content"], dict):
+                item["content"].update(snapshots[name])
+    if args.write:
+        config["updated_at"] = utc_now()
+        write_json(CONFIG_PATH, config)
+    if args.json:
+        print(json.dumps({"schema": "agent-project-skills-snapshot-v1", "created_at": utc_now(), "skills": snapshots}, indent=2))
+    else:
+        for name, values in snapshots.items():
+            print(f"{name}: skill_md={values.get('skill_md_sha256', '')} tree={values.get('tree_sha256', '')}")
+    return 0
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    report = collect()
+    for item in report.get("skills", []):
+        if item.get("name") == args.skill:
+            if args.json:
+                print(json.dumps(item, indent=2))
+            else:
+                print(f"{item.get('name')}: {', '.join(item.get('statuses', []))}")
+                print(f"path: {item.get('path')}")
+                for finding in item.get("findings", []):
+                    print(f"{finding.get('severity')}: {finding.get('kind')}: {finding.get('summary')}")
+            return 1 if any(f.get("severity") == "error" for f in item.get("findings", [])) else 0
+    print(f"error: skill not found in project inventory: {args.skill}", file=sys.stderr)
+    return 1
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    report = subparsers.add_parser("report", help="Report project skill governance inventory")
+    report.add_argument("--json", action="store_true")
+    report.add_argument("--fail-on-error", action="store_true")
+    report.set_defaults(func=cmd_report)
+
+    doctor = subparsers.add_parser("doctor", help="Validate project skill governance hard requirements")
+    doctor.set_defaults(func=cmd_doctor)
+
+    snapshot = subparsers.add_parser("snapshot", help="Compute registered skill content hashes")
+    snapshot.add_argument("--write", action="store_true", help="Write computed hashes into .agent/project-skills.json")
+    snapshot.add_argument("--json", action="store_true")
+    snapshot.set_defaults(func=cmd_snapshot)
+
+    check = subparsers.add_parser("check", help="Show one project's skill governance status")
+    check.add_argument("skill")
+    check.add_argument("--json", action="store_true")
+    check.set_defaults(func=cmd_check)
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

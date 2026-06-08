@@ -4,21 +4,27 @@ Use this glossary to keep agent, reviewer, and maintainer language precise. Pref
 
 ## Core Terms
 
+- AI: A broad umbrella label, not a precise technical component. In specs and reviews, replace it with the specific thing meant: model, agent, harness, tool, workflow, or generated output.
 - Agent: An AI worker operating in a repository under project instructions, tool permissions, and validation gates.
 - Model: The underlying AI system that reasons and writes text or code. The model is not the same thing as the agent harness.
 - Harness: The executable and procedural environment around the model: repo files, tools, commands, validation, prompts, policies, logs, and review gates.
 - Context: Information currently available to the agent for the task.
 - Context window: The maximum context the current model/client can use at once.
 - Attention budget: The practical amount of context that remains reliable before important facts become hard to use, even if the context window is not full.
+- Attention degradation: The drop in reliability that happens when too much or poorly ranked context competes for the model's attention.
 - Session: A bounded work interval with a goal, active state, decisions, changes, validation, and handoff records.
 - Handoff: A compact durable record that lets a later session continue without relying on chat transcript history.
-- Memory: Repo-local summarized records used for retrieval across sessions. Memory is advisory and must be checked against current files.
-- Progressive disclosure: Load summaries first, then targeted details only when needed.
+- Memory: Repo-local summarized records used for retrieval across sessions. Memory is a secondary source and must be checked against current primary sources when behavior or risk matters.
+- Compaction: A lossy session summary used to regain context headroom. Preserve decisions, validation, open risks, and context pointers to primary sources.
+- Context pointer: A stable path, line, id, command, runlog entry, or note that tells the agent when and where to load more context instead of inlining it.
+- Progressive disclosure: Load summaries and context pointers first, then targeted details only when needed.
 
 ## Governance Terms
 
 - Spec: Durable change intent, design, tasks, and acceptance criteria.
 - Plan: The execution map for a spec or task, including files, commands, expected results, risk, and success criteria.
+- Primary source: The authoritative artifact itself: current code, exact command output, raw runlog entry, active spec, or recorded reviewer decision.
+- Secondary source: A lossy account of a primary source, such as a summary, memory note, handoff, report, or generated documentation. Useful for orientation, but verify before relying on it.
 - Risk zone: A task risk class that controls how much autonomous action is allowed.
 - Autonomy level: The degree to which an agent may proceed without human approval or human review.
 - Diff traceability: The requirement that each changed line maps to a requested change, necessary support, a recorded exception, or a risky change needing review.
@@ -26,6 +32,12 @@ Use this glossary to keep agent, reviewer, and maintainer language precise. Pref
 - Automated review: A model or static tool review used as a precheck. It does not replace required tests or human review.
 - Validation evidence: Fresh command output or recorded result proving checks were run for the current change.
 - Runlog: Structured JSONL evidence for validation, evals, session events, accepted exceptions, and high-risk capability use.
+
+## Experience Terms
+
+- AX: Agent experience. How well the repo, instructions, architecture, checks, tools, and context budget let an agent do correct work.
+- DX: Developer experience. How well the repo, tools, documentation, feedback loops, and errors help human developers do good work.
+- AX/DX gap: A difference between what helps a human and what helps an agent; for example, tribal knowledge may support DX but fails AX unless captured as accessible project context.
 
 ## Capability Terms
 

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -32,6 +33,7 @@ BASE_REQUIRED = [
     ".agent/knowledge.json",
     ".agent/dev-map.json",
     ".agent/skill-hygiene.json",
+    ".agent/project-skills.json",
     ".agent/memory.json",
     ".agent/context.json",
     ".agent/capabilities.json",
@@ -101,6 +103,7 @@ BASE_REQUIRED = [
     "scripts/agent_invariants.py",
     "scripts/agent_capabilities.py",
     "scripts/agent_skill_hygiene.py",
+    "scripts/agent_project_skills.py",
     "scripts/agent_runlog.py",
     "scripts/agent_tooling.py",
     "scripts/agent_security.py",
@@ -166,6 +169,7 @@ LEGACY_CONFIG_PATH_KEYS = {
     "knowledge_manifest",
     "dev_map",
     "skill_hygiene",
+    "project_skills",
     "memory_config",
     "context_config",
     "capabilities_config",
@@ -198,7 +202,23 @@ REQUIREMENT_PROTECTED_STAGES = {
     "handoff",
     "finish",
 }
+STAGE_REVIEW_REQUIRED_STAGES = (
+    "spec",
+    "plan",
+    "implementation",
+    "spec_review",
+    "quality_review",
+    "verification",
+    "handoff",
+)
 OFFLOAD_SCHEMA = "agent-session-offload-v1"
+PLACEHOLDER_PATTERNS = (
+    "TBD",
+    "Describe the primary modules",
+    "Record allowed dependency direction here",
+    "fill in after project structure is known",
+    "Fill this section",
+)
 
 
 def load_json(path: Path, label: str) -> dict:
@@ -254,6 +274,51 @@ def evidence_exists(root: Path, handle: str, runlog_ids: set[str], session_event
     if handle in runlog_ids or handle in session_event_ids:
         return True
     return (root / strip_line_suffix(handle)).exists()
+
+
+def has_placeholder_text(text: str) -> bool:
+    text = re.sub(r"`[^`]*`", "", text)
+    text = re.sub(r'"[^"\n]*"', "", text)
+    text = re.sub(r"'[^'\n]*'", "", text)
+    lowered = text.lower()
+    return any(pattern.lower() in lowered for pattern in PLACEHOLDER_PATTERNS)
+
+
+def estimate_tokens(path: Path) -> int:
+    if not path.exists() or not path.is_file():
+        return 0
+    return int(math.ceil(len(path.read_text(encoding="utf-8", errors="ignore")) / 4))
+
+
+def context_threshold(path: str, context: dict) -> int:
+    budgets = context.get("budgets", {})
+    if path == "AGENTS.md":
+        return int(budgets.get("max_agent_instruction_tokens", 1600))
+    if path == "CLAUDE.md":
+        return int(budgets.get("max_claude_instruction_tokens", 2500))
+    if path == ".agent/sessions/bootstrap.md":
+        return int(budgets.get("max_bootstrap_tokens", 5000))
+    if path == ".agent/memory/latest.md":
+        return int(budgets.get("max_memory_digest_tokens", 1200))
+    return int(budgets.get("max_single_doc_tokens", 3000))
+
+
+def context_tracked_files(root: Path, context: dict) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in context.get("tracked_files", []):
+        path = root / str(value)
+        if path.exists() and path.is_file() and str(value) not in seen:
+            seen.add(str(value))
+            result.append(str(value))
+    for pattern in context.get("tracked_globs", []):
+        for path in sorted(root.glob(str(pattern))):
+            if path.is_file():
+                rel = path.relative_to(root).as_posix()
+                if rel not in seen:
+                    seen.add(rel)
+                    result.append(rel)
+    return result
 
 
 def check_session_offload(root: Path) -> list[str]:
@@ -402,6 +467,108 @@ def validate_review_gate(task_id: str, item: dict, profile: dict, policy: dict, 
     return None
 
 
+def stage_reviews(item: dict) -> dict:
+    reviews = item.get("stage_reviews")
+    return reviews if isinstance(reviews, dict) else {}
+
+
+def stage_review_required_for_profile(profile_name: str, policy: dict) -> bool:
+    required_profiles = set(policy.get("stage_review_loop_required_for_profiles", []))
+    return profile_name in required_profiles
+
+
+def stage_review_required_stages(policy: dict) -> list[str]:
+    configured = policy.get("stage_review_required_before_stage_exit")
+    if isinstance(configured, list) and configured:
+        return [str(stage) for stage in configured]
+    return list(STAGE_REVIEW_REQUIRED_STAGES)
+
+
+def required_stage_reviews_for_item(item: dict, profile: dict, policy: dict) -> list[str]:
+    profile_name = str(item.get("profile", ""))
+    if not stage_review_required_for_profile(profile_name, policy):
+        return []
+    stages = [str(stage) for stage in profile.get("stages", [])]
+    current_stage = str(item.get("current_stage", ""))
+    required_before_exit = set(stage_review_required_stages(policy))
+    if item.get("state") in {"done", "archived"}:
+        exited = stages
+    elif current_stage in stages:
+        exited = stages[: stages.index(current_stage)]
+    else:
+        exited = []
+    return [stage for stage in exited if stage in required_before_exit]
+
+
+def validate_stage_reviews(task_id: str, item: dict, profile: dict, policy: dict, root: Path) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(item.get("stage_reviews", {}), dict):
+        return [f"task {task_id} stage_reviews must be an object"]
+    reviews = stage_reviews(item)
+    pass_status = policy.get("review_gate_pass_status", "pass")
+    for stage in required_stage_reviews_for_item(item, profile, policy):
+        review = reviews.get(stage)
+        if not isinstance(review, dict):
+            errors.append(f"task {task_id} missing stage review for exited stage: {stage}")
+            continue
+        status = review.get("status")
+        if status not in REVIEW_STATUSES:
+            errors.append(f"task {task_id} stage review {stage} has invalid status: {status}")
+        if status != pass_status:
+            errors.append(f"task {task_id} stage review {stage} must be {pass_status}")
+        open_findings = [finding for finding in review.get("open_findings", []) if str(finding).strip()]
+        if policy.get("review_gate_open_findings_must_be_empty") is True and open_findings:
+            errors.append(f"task {task_id} stage review {stage} has open findings")
+        latest_review = str(review.get("latest_review", "")).strip()
+        if not latest_review:
+            errors.append(f"task {task_id} stage review {stage} missing latest_review")
+        elif policy.get("review_gate_latest_review_must_exist") is True and not (root / latest_review).exists():
+            errors.append(f"task {task_id} stage review {stage} latest_review path is missing: {latest_review}")
+    return errors
+
+
+def spec_delta_errors(root: Path, change_dir: Path, metadata: dict) -> list[str]:
+    errors: list[str] = []
+    if metadata.get("requires_spec_delta") is not True:
+        return errors
+    spec_files = sorted((change_dir / "specs").rglob("*.md"))
+    name = metadata.get("name", change_dir.name)
+    if not spec_files:
+        return [f"change {name} requires spec delta but has no specs/**/*.md files"]
+    for path in spec_files:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        rel = path.relative_to(root).as_posix()
+        if has_placeholder_text(text):
+            errors.append(f"{rel} contains placeholder text")
+        if "## ADDED Requirements" not in text and "## MODIFIED Requirements" not in text:
+            errors.append(f"{rel} missing ADDED or MODIFIED requirements section")
+        if "### Requirement:" not in text:
+            errors.append(f"{rel} missing requirement heading")
+        if "#### Scenario:" not in text:
+            errors.append(f"{rel} missing scenario heading")
+    return errors
+
+
+def validate_spec_task_links(root: Path, task_ids: set[str]) -> list[str]:
+    errors: list[str] = []
+    metadata_paths = list((root / "openspec/changes").glob("*/.agent-spec.json"))
+    metadata_paths.extend((root / "openspec/changes/archive").glob("*/.agent-spec.json"))
+    for metadata_path in sorted(metadata_paths):
+        metadata = load_json(metadata_path, metadata_path.relative_to(root).as_posix())
+        name = str(metadata.get("name") or metadata_path.parent.name)
+        profile = str(metadata.get("profile", "")).strip()
+        if profile and profile not in {"tiny", "bugfix", "standard", "full"}:
+            errors.append(f"change {name} has invalid profile: {profile}")
+        task_id = str(metadata.get("task_id", "")).strip()
+        exception = str(metadata.get("task_link_exception", "")).strip()
+        if profile and profile != "tiny" and not task_id and not exception:
+            errors.append(f"change {name} missing task_id for non-tiny profile")
+        if task_id and task_id not in task_ids:
+            errors.append(f"change {name} task_id not found in task board: {task_id}")
+        errors.extend(spec_delta_errors(root, metadata_path.parent, metadata))
+    return errors
+
+
 def main() -> int:
     root = Path.cwd()
 
@@ -475,6 +642,15 @@ def main() -> int:
                 if key not in paths:
                     print(f"error: .agent/spec.json missing path: {key}")
                     return 1
+            spec_policy = spec_config.get("policy", {})
+            for key in (
+                "archive_requires_completed_tasks_or_force",
+                "completed_active_changes_fail_validation",
+                "archive_before_completion_claim",
+            ):
+                if spec_policy.get(key) is not True:
+                    print(f"error: .agent/spec.json policy must enable {key}")
+                    return 1
         else:
             missing.append(".agent/spec.json")
 
@@ -494,9 +670,27 @@ def main() -> int:
         if layout.get("schema") != "agent-project-layout-v1":
             print("error: .agent/project-layout.json schema must be agent-project-layout-v1")
             return 1
-        for directory in layout.get("directories", []):
+        directories = layout.get("directories", [])
+        exception = str(layout.get("policy", {}).get("architecture_boundary_exception", "")).strip()
+        if not directories and not exception:
+            print("error: .agent/project-layout.json directories cannot be empty without policy.architecture_boundary_exception")
+            return 1
+        for directory in directories:
             if not (root / directory).is_dir():
                 missing.append(directory)
+    architecture_path = root / "docs/ARCHITECTURE.md"
+    if architecture_path.exists():
+        architecture_text = architecture_path.read_text(encoding="utf-8", errors="ignore")
+        if has_placeholder_text(architecture_text):
+            print("error: docs/ARCHITECTURE.md contains architecture placeholder text")
+            return 1
+        for heading in ("## System Shape", "## Required Directories", "## Dependency Direction"):
+            if heading not in architecture_text:
+                print(f"error: docs/ARCHITECTURE.md missing heading: {heading}")
+                return 1
+        if "boundary" not in architecture_text.lower() or "dependency" not in architecture_text.lower():
+            print("error: docs/ARCHITECTURE.md must describe boundaries and dependency direction")
+            return 1
 
     workflow_path = root / ".agent/workflow.json"
     workflow = {}
@@ -536,6 +730,7 @@ def main() -> int:
             "tdd",
             "systematic_debugging",
             "review_sequence",
+            "stage_review_loop",
             "review_fix_gate",
             "human_review_evidence",
             "completion_verification",
@@ -563,7 +758,26 @@ def main() -> int:
         if gates.get("review_sequence", {}).get("finder_cannot_fix") is not True:
             print("error: .agent/workflow.json review sequence must enforce finder_cannot_fix")
             return 1
+        stage_loop = gates.get("stage_review_loop", {})
+        if set(stage_loop.get("required_for_profiles", [])) != {"standard", "full"}:
+            print("error: .agent/workflow.json stage_review_loop must apply to standard and full profiles")
+            return 1
+        if stage_loop.get("loop") != ["review", "fix", "re_review"]:
+            print("error: .agent/workflow.json stage_review_loop must require review, fix, and re_review")
+            return 1
+        for key in (
+            "latest_stage_review_must_be_clean",
+            "finding_bearing_stage_review_must_remain_needs_fix",
+            "fix_requires_revalidation",
+            "fix_requires_next_review_round",
+        ):
+            if stage_loop.get(key) is not True:
+                print(f"error: .agent/workflow.json stage_review_loop missing policy: {key}")
+                return 1
         review_fix = gates.get("review_fix_gate", {})
+        if review_fix.get("applies_to_stage_review_loop") is not True:
+            print("error: .agent/workflow.json review_fix_gate must apply to stage review loops")
+            return 1
         if review_fix.get("latest_review_status_must_be") != "pass":
             print("error: .agent/workflow.json review_fix_gate must require latest review status pass")
             return 1
@@ -576,6 +790,9 @@ def main() -> int:
         completion = gates.get("completion_verification", {})
         if "standard" not in completion.get("review_fix_gate_required_for_profiles", []) or "full" not in completion.get("review_fix_gate_required_for_profiles", []):
             print("error: .agent/workflow.json completion gate must require review_fix_gate for standard and full profiles")
+            return 1
+        if completion.get("completed_spec_changes_must_be_archived") is not True:
+            print("error: .agent/workflow.json completion gate must require completed spec changes to be archived")
             return 1
         if not gates.get("risk_classification", {}).get("record_in_plan"):
             print("error: .agent/workflow.json risk classification must be recorded in plans")
@@ -625,7 +842,7 @@ def main() -> int:
         if task_board.get("schema") != "agent-task-board-v1":
             print("error: .agent/task-board.json schema must be agent-task-board-v1")
             return 1
-        for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path", "requirements", "delivery_conclusion", "review_gate", "related_tasks"):
+        for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path", "requirements", "delivery_conclusion", "review_gate", "stage_reviews", "related_tasks"):
             if field not in task_board.get("required_fields", []):
                 print(f"error: .agent/task-board.json missing required field declaration: {field}")
                 return 1
@@ -635,6 +852,12 @@ def main() -> int:
         task_policy = task_board.get("policy", {})
         if set(task_policy.get("done_requires_review_gate_pass_for_profiles", [])) != {"standard", "full"}:
             print("error: .agent/task-board.json must require review_gate pass for standard and full done tasks")
+            return 1
+        if task_policy.get("review_fix_loop_required_at_stage_exit") is not True:
+            print("error: .agent/task-board.json must require review-fix loops at stage exit")
+            return 1
+        if set(task_policy.get("stage_review_loop_required_for_profiles", [])) != {"standard", "full"}:
+            print("error: .agent/task-board.json must require stage review loops for standard and full profiles")
             return 1
         if task_policy.get("review_gate_open_findings_must_be_empty") is not True:
             print("error: .agent/task-board.json must require empty review_gate open findings")
@@ -676,6 +899,14 @@ def main() -> int:
             if gate_error:
                 print(f"error: {gate_error}")
                 return 1
+            stage_review_errors = validate_stage_reviews(task_id, item, profile, task_policy, root)
+            if stage_review_errors:
+                print(f"error: {stage_review_errors[0]}")
+                return 1
+        spec_task_errors = validate_spec_task_links(root, seen_tasks)
+        if spec_task_errors:
+            print(f"error: {spec_task_errors[0]}")
+            return 1
 
     risk_path = root / ".agent/risk-zones.json"
     if risk_path.exists():
@@ -825,6 +1056,24 @@ def main() -> int:
         if not dev_map.get("areas"):
             print("error: .agent/dev-map.json must define at least one area")
             return 1
+        for area in dev_map.get("areas", []):
+            for key in ("id", "entry_points", "read_before_edit", "owned_paths", "common_patterns"):
+                if key not in area:
+                    print(f"error: .agent/dev-map.json area {area.get('id', 'unknown')} missing {key}")
+                    return 1
+            if area.get("id") == "application":
+                exception = str(area.get("architecture_boundary_exception", "")).strip()
+                if (not area.get("entry_points") or not area.get("owned_paths")) and not exception:
+                    print("error: .agent/dev-map.json application area needs entry_points and owned_paths or architecture_boundary_exception")
+                    return 1
+                text = " ".join(
+                    str(item)
+                    for values in (area.get("entry_points", []), area.get("owned_paths", []), area.get("common_patterns", []))
+                    for item in values
+                )
+                if has_placeholder_text(text):
+                    print("error: .agent/dev-map.json application area contains placeholder text")
+                    return 1
 
     skill_hygiene_path = root / ".agent/skill-hygiene.json"
     if skill_hygiene_path.exists():
@@ -844,6 +1093,33 @@ def main() -> int:
             if key not in hygiene.get("risk_signals", {}):
                 print(f"error: .agent/skill-hygiene.json missing risk signal: {key}")
                 return 1
+
+    project_skills_path = root / ".agent/project-skills.json"
+    if project_skills_path.exists():
+        project_skills = load_json(project_skills_path, ".agent/project-skills.json")
+        if project_skills.get("schema") != "agent-project-skills-v1":
+            print("error: .agent/project-skills.json schema must be agent-project-skills-v1")
+            return 1
+        policy = project_skills.get("policy", {})
+        for key in (
+            "repo_local",
+            "dependency_free",
+            "no_auto_delete",
+            "requires_review_fix_review_for_lifecycle_changes",
+            "archive_completed_skill_changes",
+            "fail_on_unmanaged_project_skills",
+            "fail_on_orphaned_project_skills",
+            "review_artifact_required",
+        ):
+            if policy.get(key) is not True:
+                print(f"error: .agent/project-skills.json policy must enable {key}")
+                return 1
+        if not isinstance(project_skills.get("skills", {}), dict):
+            print("error: .agent/project-skills.json skills must be an object")
+            return 1
+        if not (root / "scripts/agent_project_skills.py").exists():
+            print("error: missing scripts/agent_project_skills.py")
+            return 1
 
     memory_path = root / ".agent/memory.json"
     if memory_path.exists():
@@ -887,6 +1163,19 @@ def main() -> int:
             if key not in budgets:
                 print(f"error: .agent/context.json missing budget: {key}")
                 return 1
+        if context.get("policy", {}).get("doctor_fails_on_budget_excess") is True:
+            tracked = context_tracked_files(root, context)
+            total = sum(estimate_tokens(root / path) for path in tracked)
+            total_budget = int(budgets.get("max_total_tracked_tokens", 20000))
+            if total > total_budget:
+                print(f"error: total tracked context over budget: {total} > {total_budget}")
+                return 1
+            for path in tracked:
+                tokens = estimate_tokens(root / path)
+                threshold = context_threshold(path, context)
+                if tokens > threshold:
+                    print(f"error: {path} over context budget: {tokens} > {threshold}")
+                    return 1
 
     distribution_path = root / ".agent/skill-distribution.json"
     if distribution_path.exists():
@@ -975,6 +1264,7 @@ def main() -> int:
             "manifest",
             "dev_map",
             "skill_hygiene",
+            "project_skills",
             "harness_evolution",
             "governance_gc",
             "template_rendering",

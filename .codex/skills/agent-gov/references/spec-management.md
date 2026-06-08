@@ -41,6 +41,8 @@ scripts/
 - Use `python3 scripts/agent_spec.py archive <name>` for completed changes.
 - Treat artifact status as `missing`, `draft`, or `done`; scaffolded templates are drafts until their required sections and change-specific tasks are filled.
 - Treat change state as `blocked` until all required artifacts are `done`; `ready` means artifacts are complete but implementation tasks remain; `all_done` means all checkbox tasks are complete.
+- Treat an active `all_done` change as unfinished governance work. Archive it before completion, handoff, merge, release, or archive-readiness claims.
+- `python3 scripts/agent_spec.py doctor` must fail when an `all_done` change remains under `openspec/changes/<name>/`; the expected fix is `python3 scripts/agent_spec.py archive <name>`.
 - Add project context that tells agents this repository uses embedded spec-driven development.
 - Keep spec context short and stable.
 - Use embedded spec changes for non-trivial project changes, not for ordinary checkpoint notes.
@@ -67,3 +69,4 @@ Before considering a project initialized:
 - Agents know when to create or continue embedded spec changes.
 - Session records can reference `openspec/changes/<name>/` without duplicating its content.
 - The generated workflow policy points agents from spec approval to plan execution and fresh validation evidence.
+- No completed `all_done` change remains active under `openspec/changes/`; completed changes are under `openspec/changes/archive/`.

@@ -31,7 +31,15 @@ SENSITIVE_BASENAME_RE = re.compile(
     r")$"
 )
 SENSITIVE_COMPONENTS = {".ssh", ".aws", ".gnupg", ".kube", ".docker"}
-IGNORE_DIRS = {".git", "node_modules", "dist", "build", "target", "__pycache__", ".agent/memory"}
+IGNORE_DIRS = {".git", "node_modules", "dist", "build", "target", "__pycache__", ".agent/memory", ".venv", "venv"}
+SAMPLE_SECRET_NAMES = {".env.example", ".env.sample", ".env.template", "credentials.example", "secrets.example"}
+PLACEHOLDER_PATTERNS = (
+    "TBD",
+    "Describe the primary modules",
+    "Record allowed dependency direction here",
+    "fill in after project structure is known",
+    "Fill this section",
+)
 SCHEMA_JSON_FILES = {
     ".agent/config.json": "agent-project-config-v1",
     ".agent/manifest.json": "agent-governance-manifest-v1",
@@ -50,6 +58,7 @@ SCHEMA_JSON_FILES = {
     ".agent/knowledge.json": "agent-knowledge-v1",
     ".agent/dev-map.json": "agent-dev-map-v1",
     ".agent/skill-hygiene.json": "agent-skill-hygiene-v1",
+    ".agent/project-skills.json": "agent-project-skills-v1",
     ".agent/memory.json": "agent-memory-v1",
     ".agent/context.json": "agent-context-budget-v1",
     ".agent/capabilities.json": "agent-capabilities-v1",
@@ -85,6 +94,7 @@ CRITICAL_JSON_FILES = {
     ".agent/mechanical-checks.json",
     ".agent/dev-map.json",
     ".agent/skill-hygiene.json",
+    ".agent/project-skills.json",
     ".agent/harness-evolution.json",
     ".agent/mcp-policy.json",
     ".agent/governance-gc.json",
@@ -102,6 +112,7 @@ DEFAULT_DIMENSION_WEIGHTS = {
     "mechanical_verification": 10,
     "dev_map": 6,
     "skill_hygiene": 6,
+    "project_skills": 6,
     "harness_evolution": 6,
     "mcp_policy": 4,
     "governance_gc": 6,
@@ -132,10 +143,34 @@ REQUIREMENT_PROTECTED_STAGES = {
     "handoff",
     "finish",
 }
+STAGE_REVIEW_REQUIRED_STAGES = (
+    "spec",
+    "plan",
+    "implementation",
+    "spec_review",
+    "quality_review",
+    "verification",
+    "handoff",
+)
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_iso_datetime(value: str) -> datetime | None:
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+
+
+def has_placeholder_text(text: str) -> bool:
+    text = re.sub(r"`[^`]*`", "", text)
+    text = re.sub(r'"[^"\n]*"', "", text)
+    text = re.sub(r"'[^'\n]*'", "", text)
+    lowered = text.lower()
+    return any(pattern.lower() in lowered for pattern in PLACEHOLDER_PATTERNS)
 
 
 def load_json(path: Path, fallback: dict | None = None) -> dict:
@@ -333,6 +368,16 @@ def score_project_integrity() -> dict:
         if expected_schema and data.get("schema") != expected_schema:
             schema_mismatches += 1
             findings.append(f"{name} schema must be {expected_schema}")
+        if name == ".agent/spec.json" and data.get("schema") == "agent-spec-v1":
+            policy = data.get("policy", {})
+            for key in (
+                "archive_requires_completed_tasks_or_force",
+                "completed_active_changes_fail_validation",
+                "archive_before_completion_claim",
+            ):
+                if policy.get(key) is not True:
+                    schema_mismatches += 1
+                    findings.append(f".agent/spec.json policy must enable {key}")
 
     for name in json_without_schema_files():
         path = Path(name)
@@ -376,6 +421,7 @@ def score_required_paths() -> dict:
 
 def score_validation() -> dict:
     harness = load_json(Path(".agent/harness.json"))
+    evals = load_json(CONFIG_PATH)
     validation = harness.get("validation", {})
     commands = [command for values in validation.values() for command in values]
     findings: list[str] = []
@@ -385,7 +431,40 @@ def score_validation() -> dict:
         findings.append("no validation commands configured")
         return dimension("validation", 70, findings, ["validation registry exists"])
     suites = [suite for suite, values in validation.items() if values]
-    return dimension("validation", 100, findings, [f"{len(commands)} commands in {len(suites)} suite(s)"])
+    policy = evals.get("policy", {})
+    freshness_days = int(policy.get("validation_freshness_days", 7))
+    require_fresh = policy.get("validation_freshness_required", True) is True
+    cutoff = datetime.now(timezone.utc) if freshness_days < 0 else datetime.now(timezone.utc)
+    if freshness_days >= 0:
+        cutoff = cutoff.replace(microsecond=0)
+    rows = iter_jsonl(RUNLOG_PATH)
+    fresh_commands: set[str] = set()
+    latest_seen: dict[str, str] = {}
+    for row in rows:
+        command = str(row.get("command") or "")
+        if command not in commands or row.get("kind") != "validation" or row.get("outcome") != "pass":
+            continue
+        created = parse_iso_datetime(str(row.get("created_at") or ""))
+        if created is None:
+            continue
+        latest_seen[command] = max(latest_seen.get(command, ""), str(row.get("created_at") or ""))
+        if freshness_days < 0 or (cutoff - created).days <= freshness_days:
+            fresh_commands.add(command)
+    missing_fresh = [command for command in commands if command not in fresh_commands]
+    if require_fresh and missing_fresh:
+        findings.append(f"{len(missing_fresh)} validation command(s) missing fresh pass evidence")
+        for command in missing_fresh[:5]:
+            findings.append(f"missing fresh validation pass: {command}")
+    score = 100 - min(70, len(missing_fresh) * 12 if require_fresh else 0)
+    if require_fresh and missing_fresh:
+        score = min(score, 69)
+    evidence = [
+        f"{len(commands)} commands in {len(suites)} suite(s)",
+        f"{len(fresh_commands)}/{len(commands)} command(s) have pass evidence within {freshness_days} day(s)",
+    ]
+    if latest_seen:
+        evidence.append(f"{len(latest_seen)} command(s) have historical pass evidence")
+    return dimension("validation", score, findings, evidence)
 
 
 def score_workflow_profiles() -> dict:
@@ -424,6 +503,21 @@ def score_workflow_profiles() -> dict:
         findings.append("standard profile must require review gate")
     if configured.get("full", {}).get("review_gate_required") is not True:
         findings.append("full profile must require review gate")
+    gates = workflow.get("gates", {})
+    stage_loop = gates.get("stage_review_loop", {})
+    review_fix = gates.get("review_fix_gate", {})
+    completion = gates.get("completion_verification", {})
+    if set(stage_loop.get("required_for_profiles", [])) != {"standard", "full"}:
+        findings.append("stage_review_loop must apply to standard and full profiles")
+    if stage_loop.get("loop") != ["review", "fix", "re_review"]:
+        findings.append("stage_review_loop must require review, fix, and re_review")
+    for key in ("latest_stage_review_must_be_clean", "fix_requires_revalidation", "fix_requires_next_review_round"):
+        if stage_loop.get(key) is not True:
+            findings.append(f"stage_review_loop missing {key}")
+    if review_fix.get("applies_to_stage_review_loop") is not True:
+        findings.append("review_fix_gate must apply to stage review loops")
+    if completion.get("completed_spec_changes_must_be_archived") is not True:
+        findings.append("completion gate must require completed spec changes to be archived")
     score = 100 - min(90, len(findings) * 15)
     evidence = [f"{len(configured)} profiles", f"default={profiles.get('default_profile') or 'none'}"]
     return dimension("workflow_profiles", score, findings, evidence)
@@ -471,6 +565,66 @@ def review_gate_findings(task_id: str, item: dict, profile: dict, policy: dict) 
             findings.append(f"{task_id} done without review_gate latest_review")
         elif policy.get("review_gate_latest_review_must_exist") is True and not Path(latest_review).exists():
             findings.append(f"{task_id} review_gate latest_review path missing: {latest_review}")
+    return findings
+
+
+def stage_reviews(item: dict) -> dict:
+    reviews = item.get("stage_reviews")
+    return reviews if isinstance(reviews, dict) else {}
+
+
+def stage_review_required_for_profile(profile_name: str, policy: dict) -> bool:
+    required_profiles = set(policy.get("stage_review_loop_required_for_profiles", []))
+    return profile_name in required_profiles
+
+
+def stage_review_required_stages(policy: dict) -> list[str]:
+    configured = policy.get("stage_review_required_before_stage_exit")
+    if isinstance(configured, list) and configured:
+        return [str(stage) for stage in configured]
+    return list(STAGE_REVIEW_REQUIRED_STAGES)
+
+
+def required_stage_reviews_for_item(item: dict, profile: dict, policy: dict) -> list[str]:
+    profile_name = str(item.get("profile", ""))
+    if not stage_review_required_for_profile(profile_name, policy):
+        return []
+    stages = [str(stage) for stage in profile.get("stages", [])]
+    current_stage = str(item.get("current_stage", ""))
+    required_before_exit = set(stage_review_required_stages(policy))
+    if item.get("state") in {"done", "archived"}:
+        exited = stages
+    elif current_stage in stages:
+        exited = stages[: stages.index(current_stage)]
+    else:
+        exited = []
+    return [stage for stage in exited if stage in required_before_exit]
+
+
+def stage_review_findings(task_id: str, item: dict, profile: dict, policy: dict) -> list[str]:
+    findings: list[str] = []
+    if not isinstance(item.get("stage_reviews", {}), dict):
+        return [f"{task_id} stage_reviews must be an object"]
+    reviews = stage_reviews(item)
+    pass_status = policy.get("review_gate_pass_status", "pass")
+    for stage in required_stage_reviews_for_item(item, profile, policy):
+        review = reviews.get(stage)
+        if not isinstance(review, dict):
+            findings.append(f"{task_id} missing stage review for exited stage: {stage}")
+            continue
+        status = review.get("status")
+        if status not in REVIEW_STATUSES:
+            findings.append(f"{task_id} stage review {stage} invalid status: {status}")
+        if status != pass_status:
+            findings.append(f"{task_id} stage review {stage} must be {pass_status}")
+        open_findings = [finding for finding in review.get("open_findings", []) if str(finding).strip()]
+        if policy.get("review_gate_open_findings_must_be_empty") is True and open_findings:
+            findings.append(f"{task_id} stage review {stage} has open findings")
+        latest_review = str(review.get("latest_review", "")).strip()
+        if not latest_review:
+            findings.append(f"{task_id} stage review {stage} missing latest_review")
+        elif policy.get("review_gate_latest_review_must_exist") is True and not Path(latest_review).exists():
+            findings.append(f"{task_id} stage review {stage} latest_review path missing: {latest_review}")
     return findings
 
 
@@ -527,7 +681,7 @@ def score_task_board() -> dict:
     findings: list[str] = []
     if board.get("schema") != "agent-task-board-v1":
         findings.append("invalid task-board schema")
-    for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path", "requirements", "delivery_conclusion", "review_gate", "related_tasks"):
+    for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path", "requirements", "delivery_conclusion", "review_gate", "stage_reviews", "related_tasks"):
         if field not in board.get("required_fields", []):
             findings.append(f"task board missing required field declaration: {field}")
     policy = board.get("policy", {})
@@ -539,6 +693,10 @@ def score_task_board() -> dict:
         findings.append("task board must require review_gate pass for standard and full done tasks")
     if policy.get("review_gate_open_findings_must_be_empty") is not True:
         findings.append("task board must require empty review_gate open findings")
+    if policy.get("review_fix_loop_required_at_stage_exit") is not True:
+        findings.append("task board must require review-fix loops at stage exit")
+    if set(policy.get("stage_review_loop_required_for_profiles", [])) != {"standard", "full"}:
+        findings.append("task board must require stage review loops for standard and full profiles")
     if not Path("docs/features/INDEX.md").exists():
         findings.append("missing docs/features/INDEX.md")
     if not Path("scripts/agent_task.py").exists():
@@ -566,6 +724,7 @@ def score_task_board() -> dict:
                 findings.append(f"{task_id} is done without delivery_conclusion")
         findings.extend(requirement_findings(task_id, item, profile, policy))
         findings.extend(review_gate_findings(task_id, item, profile, policy))
+        findings.extend(stage_review_findings(task_id, item, profile, policy))
         docs_path = item.get("docs_path")
         if profile.get("feature_doc_templates") and (not docs_path or not Path(docs_path).exists()):
             findings.append(f"{task_id} docs_path missing or absent: {docs_path}")
@@ -682,7 +841,27 @@ def score_mechanical_verification() -> dict:
 
 def score_dev_map() -> dict:
     dev_map = load_json(Path(".agent/dev-map.json"))
+    layout = load_json(Path(".agent/project-layout.json"))
     findings: list[str] = []
+    architecture_path = Path("docs/ARCHITECTURE.md")
+    if layout.get("schema") == "agent-project-layout-v1":
+        directories = layout.get("directories", [])
+        exception = str(layout.get("policy", {}).get("architecture_boundary_exception", "")).strip()
+        if not directories and not exception:
+            findings.append("project layout directories empty without architecture_boundary_exception")
+        missing_dirs = [directory for directory in directories if not Path(directory).is_dir()]
+        findings.extend(f"project layout missing directory: {directory}" for directory in missing_dirs[:5])
+    if not architecture_path.exists():
+        findings.append("missing docs/ARCHITECTURE.md")
+    else:
+        architecture_text = architecture_path.read_text(encoding="utf-8", errors="ignore")
+        if has_placeholder_text(architecture_text):
+            findings.append("docs/ARCHITECTURE.md contains placeholder text")
+        for heading in ("## System Shape", "## Required Directories", "## Dependency Direction"):
+            if heading not in architecture_text:
+                findings.append(f"docs/ARCHITECTURE.md missing {heading}")
+        if "boundary" not in architecture_text.lower() or "dependency" not in architecture_text.lower():
+            findings.append("docs/ARCHITECTURE.md must describe boundaries and dependency direction")
     if dev_map.get("schema") != "agent-dev-map-v1":
         findings.append("invalid dev-map schema")
     if dev_map.get("doc") != "docs/DEV_MAP.md":
@@ -701,8 +880,20 @@ def score_dev_map() -> dict:
             for key in ("id", "entry_points", "read_before_edit", "owned_paths", "common_patterns"):
                 if key not in area:
                     findings.append(f"dev map area {area.get('id', 'unknown')} missing {key}")
+            if area.get("id") == "application":
+                exception = str(area.get("architecture_boundary_exception", "")).strip()
+                if (not area.get("entry_points") or not area.get("owned_paths")) and not exception:
+                    findings.append("dev map application area needs entry_points and owned_paths")
+                text = " ".join(
+                    str(item)
+                    for values in (area.get("entry_points", []), area.get("owned_paths", []), area.get("common_patterns", []))
+                    for item in values
+                )
+                if has_placeholder_text(text):
+                    findings.append("dev map application area contains placeholder text")
     score = 100 - min(90, len(findings) * 15)
-    return dimension("dev_map", score, findings, [f"{len(areas)} area(s)"])
+    evidence = [f"{len(areas)} area(s)", f"{len(layout.get('directories', []))} layout path(s)"]
+    return dimension("dev_map", score, findings, evidence)
 
 
 def score_skill_hygiene() -> dict:
@@ -735,6 +926,49 @@ def score_skill_hygiene() -> dict:
             findings.append(f"{item.get('severity')}: {item.get('kind')}: {item.get('summary')}{path}")
     score = 100 - min(90, len(findings) * 8) - min(90, errors * 35) - min(50, warnings * 5)
     return dimension("skill_hygiene", score, findings, [f"{skills} skill(s)", f"{errors} error(s)", f"{warnings} warning(s)"])
+
+
+def score_project_skills() -> dict:
+    config = load_json(Path(".agent/project-skills.json"))
+    findings: list[str] = []
+    if config.get("schema") != "agent-project-skills-v1":
+        findings.append("invalid project-skills schema")
+    policy = config.get("policy", {})
+    for key in (
+        "repo_local",
+        "dependency_free",
+        "no_auto_delete",
+        "requires_review_fix_review_for_lifecycle_changes",
+        "archive_completed_skill_changes",
+        "fail_on_unmanaged_project_skills",
+        "fail_on_orphaned_project_skills",
+        "review_artifact_required",
+    ):
+        if policy.get(key) is not True:
+            findings.append(f"project skills policy missing {key}")
+    if not isinstance(config.get("skills", {}), dict):
+        findings.append("project skills registry must use an object")
+    if not Path("scripts/agent_project_skills.py").exists():
+        findings.append("missing scripts/agent_project_skills.py")
+    report, error = run_json_command([sys.executable, "scripts/agent_project_skills.py", "report", "--json"])
+    errors = 0
+    warnings = 0
+    skills = 0
+    registered = 0
+    if error:
+        findings.append(f"agent_project_skills report unavailable: {error}")
+        errors += 1
+    else:
+        counts = report.get("counts", {})
+        errors = int(counts.get("errors", 0))
+        warnings = int(counts.get("warnings", 0))
+        skills = int(counts.get("skills", 0))
+        registered = int(counts.get("registered", 0))
+        for item in report.get("findings", [])[:10]:
+            path = f" ({item.get('path')})" if item.get("path") else ""
+            findings.append(f"{item.get('severity')}: {item.get('kind')}: {item.get('summary')}{path}")
+    score = 100 - min(90, len(findings) * 8) - min(90, errors * 35) - min(50, warnings * 4)
+    return dimension("project_skills", score, findings, [f"{skills} skill(s)", f"{registered} registered", f"{errors} error(s)", f"{warnings} warning(s)"])
 
 
 def score_harness_evolution() -> dict:
@@ -1122,6 +1356,8 @@ def is_ignored(path: Path) -> bool:
 
 
 def is_sensitive_path(path: Path) -> bool:
+    if path.name in SAMPLE_SECRET_NAMES:
+        return False
     if SENSITIVE_BASENAME_RE.match(path.name):
         return True
     lowered_parts = {part.lower() for part in path.parts}
@@ -1229,6 +1465,7 @@ def collect_scores(extra_runlog_events: int = 0) -> dict:
         "mechanical_verification": score_mechanical_verification,
         "dev_map": score_dev_map,
         "skill_hygiene": score_skill_hygiene,
+        "project_skills": score_project_skills,
         "harness_evolution": score_harness_evolution,
         "mcp_policy": score_mcp_policy,
         "governance_gc": score_governance_gc,

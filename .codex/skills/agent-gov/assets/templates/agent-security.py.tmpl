@@ -30,7 +30,8 @@ SENSITIVE_BASENAME_RE = re.compile(
     r")$"
 )
 SENSITIVE_COMPONENTS = {".ssh", ".aws", ".gnupg", ".kube", ".docker"}
-IGNORE_DIRS = {".git", "node_modules", "dist", "build", "target", "__pycache__", ".agent/memory"}
+IGNORE_DIRS = {".git", "node_modules", "dist", "build", "target", "__pycache__", ".agent/memory", ".venv", "venv"}
+SAMPLE_SECRET_NAMES = {".env.example", ".env.sample", ".env.template", "credentials.example", "secrets.example"}
 
 
 def utc_now() -> str:
@@ -69,6 +70,8 @@ def is_ignored(path: Path) -> bool:
 
 
 def is_sensitive_path(path: Path) -> bool:
+    if path.name in SAMPLE_SECRET_NAMES:
+        return False
     if SENSITIVE_BASENAME_RE.match(path.name):
         return True
     lowered_parts = {part.lower() for part in path.parts}
@@ -100,12 +103,24 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     errors: list[str] = []
     if config.get("schema") != "agent-security-v1":
         errors.append(".agent/security.json schema must be agent-security-v1")
+    policy = config.get("policy", {})
+    for key in ("raw_credentials_stay_outside_repo_harness_and_sandbox", "external_secret_use_requires_vault_or_proxy_boundary"):
+        if policy.get(key) is not True:
+            errors.append(f".agent/security.json missing credential boundary policy: {key}")
     suites = config.get("suites", {})
     for name in SUITES:
         if name not in suites:
             errors.append(f".agent/security.json missing suite: {name}")
         elif not isinstance(suites[name], list):
             errors.append(f".agent/security.json suite must be a list: {name}")
+    if policy.get("sensitive_path_scan_in_doctor", True) is True:
+        rows = sensitive_paths(int(policy.get("sensitive_path_scan_limit", 100)))
+        for path in rows:
+            message = f"sensitive-looking path: {path}"
+            if policy.get("doctor_fails_on_sensitive_paths", True) is True:
+                errors.append(message)
+            else:
+                print(f"warning: {message}")
     for error in errors:
         print(f"error: {error}")
     if errors:

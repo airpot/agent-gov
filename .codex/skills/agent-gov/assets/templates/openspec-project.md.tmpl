@@ -11,7 +11,9 @@ change intent, design decisions, task lists, and spec deltas.
 2. Fill `openspec/changes/<name>/proposal.md`, `design.md`, and `tasks.md`.
 3. Link active sessions to the change.
 4. Implement tasks with workflow evidence in `.agent/sessions/`.
-5. Archive completed changes with `python3 scripts/agent_spec.py archive <name>`.
+5. When `python3 scripts/agent_spec.py status --change <name> --json` reports `all_done`, archive the change with `python3 scripts/agent_spec.py archive <name>` before claiming completion, handoff, release, or archive readiness.
+
+`python3 scripts/agent_spec.py doctor` fails while a completed change remains active.
 
 ## Governance Links
 

@@ -21,7 +21,8 @@ Borrow these practices from mature agent workflow projects:
 - For behavior changes, capture failing-test evidence before production code and passing evidence after the fix.
 - For bugs and build/test failures, record reproduction, root cause, hypothesis, fix, and validation.
 - For delegated or substantial work, run spec compliance review before code quality review.
-- For `standard` and `full` tasks, keep review-fix-review running until the task-board `review_gate.status` is `pass`, `open_findings` is empty, and the latest review document exists.
+- For `standard` and `full` tasks, run review-fix-review at protected stage exits and keep it running until the task-board `review_gate.status` is `pass`, `open_findings` is empty, and the latest review document exists.
+- Archive embedded spec changes as soon as they reach `all_done`; do not leave completed work in `openspec/changes/<name>/`.
 - Require fresh validation evidence before claiming completion, merge readiness, or PR readiness.
 - Present branch finish choices explicitly; destructive cleanup needs explicit confirmation.
 
@@ -104,6 +105,14 @@ For `standard` and `full` tasks, `state=done` requires a passing review gate:
 - `review_gate.open_findings` is empty
 - the delivery conclusion is recorded
 
+For `standard` and `full` tasks, protected stage exits also require the same loop discipline:
+
+- create a review record for the stage result
+- keep any finding-bearing review as `needs-fix`
+- route fixes back to the coordinator or worker, not the reviewer
+- re-run relevant validation after fixes
+- create a fresh re-review round and only proceed when blocker, major, and minor findings are empty
+
 The task board is not a casual TODO list. It is the project-local source for current and historical agent work when a new session starts.
 
 ## Lifecycle Stages
@@ -121,6 +130,8 @@ Use these stages for substantial work:
 9. `verification`: run fresh validation commands and record output summaries.
 10. `handoff`: checkpoint session state, runlog ids, accepted subagent snapshots, and remaining risks.
 11. `finish`: merge, create PR, keep branch, or discard only after the user chooses.
+
+At minimum, standard/full work must pass review-fix-review before exiting `spec`, `plan`, `implementation`, `spec_review`, `quality_review`, `verification`, and `handoff`. If a review finds blocker, major, or minor issues, fix them, revalidate, and create the next review round rather than changing the original review to `pass`.
 
 ## Plan Quality
 
@@ -218,6 +229,7 @@ Before saying work is complete:
 - For standard and full work, compare before/after mechanical snapshots when available.
 - Treat new invalid JSON, missing required paths, newly broken local links, template-render failures, and test-count decreases as baseline regressions unless an explicit exception is recorded.
 - For standard and full work, confirm task-board `review_gate.status=pass` with no open blocker, major, or minor findings.
+- For embedded spec work, run `python3 scripts/agent_spec.py status --change <name> --json`; if the state is `all_done`, run `python3 scripts/agent_spec.py archive <name>` before the completion claim.
 - Read the output and exit status.
 - Record the command, result, and runlog id or session validation note.
 - Before rollover or compaction for long-running work, refresh `grounding.md` and add only evidence-backed offload entries for context that would otherwise be lost.

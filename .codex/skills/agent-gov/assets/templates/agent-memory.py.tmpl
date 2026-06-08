@@ -25,6 +25,10 @@ DEFAULT_TAXONOMY = {
     "semantic": {"kinds": ["project-fact", "architecture-fact", "dependency-fact", "api-behavior"]},
     "procedural": {"kinds": ["workflow-rule", "validation-rule", "coding-rule", "review-rule"]},
 }
+DEFAULT_RECALL = {
+    "max_chars_per_memory": 600,
+    "max_total_chars": 4000,
+}
 
 
 def utc_now() -> str:
@@ -65,6 +69,7 @@ def load_config() -> dict:
                 "procedural_requires_review_ref": True,
                 "procedural_requires_reviewed_true": True,
             },
+            "recall": DEFAULT_RECALL,
         },
     )
 
@@ -89,6 +94,40 @@ def redact_private(text: str, config: dict) -> str:
 
 def content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def recall_policy(config: dict) -> dict:
+    raw = config.get("recall", {})
+    return {
+        "max_chars_per_memory": positive_int(
+            raw.get("max_chars_per_memory"),
+            DEFAULT_RECALL["max_chars_per_memory"],
+        ),
+        "max_total_chars": positive_int(
+            raw.get("max_total_chars"),
+            DEFAULT_RECALL["max_total_chars"],
+        ),
+    }
+
+
+def positive_int(value: object, fallback: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return fallback
+    return parsed if parsed > 0 else fallback
+
+
+def compact_one_line(text: str) -> str:
+    return " ".join(text.split())
+
+
+def clip_text(text: str, limit: int) -> tuple[str, bool]:
+    if len(text) <= limit:
+        return text, False
+    if limit <= 20:
+        return text[:limit], True
+    return text[: limit - 15].rstrip() + " ... [truncated]", True
 
 
 def first_nonempty_lines(path: Path, limit: int = 80) -> list[str]:
@@ -513,11 +552,30 @@ def cmd_search(args: argparse.Namespace) -> int:
             )
             and (args.memory_class is None or item.get("memory_class") == args.memory_class)
         ][: args.limit]
+    recall = recall_policy(config)
+    max_chars_per_memory = positive_int(args.max_chars_per_memory, recall["max_chars_per_memory"])
+    max_total_chars = positive_int(args.max_total_chars, recall["max_total_chars"])
+    emitted_chars = 0
     for item in rows:
-        summary = item.get("summary", "").replace("\n", " ")
+        summary = compact_one_line(item.get("summary", ""))
+        summary, summary_truncated = clip_text(summary, max_chars_per_memory)
         memory_class = item.get("memory_class", infer_memory_class(item.get("kind", ""), config))
-        print(f"{item['id']} | {item.get('created_at')} | {memory_class} | {item.get('kind')} | {item.get('title')}")
-        print(f"  {summary[:240]}")
+        header = f"{item['id']} | {item.get('created_at')} | {memory_class} | {item.get('kind')} | {item.get('title')}"
+        block = f"{header}\n  {summary}"
+        if emitted_chars + len(block) > max_total_chars:
+            remaining = max_total_chars - emitted_chars
+            if remaining > 80:
+                clipped, _ = clip_text(block, remaining)
+                print(clipped)
+            print(
+                "recall output budget reached; use "
+                "`python3 .agent/tools/agent_memory.py detail <id>` for selected full records."
+            )
+            break
+        print(block)
+        if summary_truncated:
+            print("  note: summary truncated; use detail for the full memory record.")
+        emitted_chars += len(block)
     return 0
 
 
@@ -609,6 +667,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         memory_class = item.get("memory_class", infer_memory_class(item.get("kind", ""), config))
         if memory_class == "procedural" and (not item.get("reviewed") or not item.get("review_ref")):
             errors.append(f"procedural memory lacks review evidence: {item.get('id')}")
+    recall = recall_policy(config)
+    if recall["max_chars_per_memory"] > recall["max_total_chars"]:
+        warnings.append("recall.max_chars_per_memory exceeds recall.max_total_chars")
     for warning in warnings:
         print(f"warning: {warning}")
     for error in errors:
@@ -650,6 +711,8 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=8)
     search.add_argument("--memory-class", choices=["episodic", "semantic", "procedural"])
+    search.add_argument("--max-chars-per-memory", type=int, help="Override recall.max_chars_per_memory")
+    search.add_argument("--max-total-chars", type=int, help="Override recall.max_total_chars")
     search.set_defaults(func=cmd_search)
 
     timeline = subparsers.add_parser("timeline", help="Show recent memory records")

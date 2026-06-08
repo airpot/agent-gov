@@ -9,11 +9,14 @@
 
 {{layout_dirs}}
 
-Describe the primary modules and boundaries inside this fixed layout.
+These directories are the current fixed layout contract. Treat `.agent/` and `scripts/agent_*.py` as governance surfaces, application directories as product code surfaces, and generated output directories as downstream artifacts unless this project records a different boundary here.
 
 ## Dependency Direction
 
-- Record allowed dependency direction here.
+- Governance policy and harness scripts may inspect application code, docs, specs, and manifests.
+- Application code should not depend on mutable `.agent/` session, memory, runlog, or scoring state for runtime behavior.
+- Generated artifacts should be downstream of source files and manifests; update source first, then regenerate or synchronize.
+- Update this document and `.agent/dev-map.json` when module ownership or dependency direction changes.
 
 ## Decisions
 

@@ -35,6 +35,7 @@ openspec/config.yaml
   knowledge.json
   dev-map.json
   skill-hygiene.json
+  project-skills.json
   memory.json
   context.json
   capabilities.json
@@ -118,6 +119,7 @@ scripts/
   agent_invariants.py
   agent_capabilities.py
   agent_skill_hygiene.py
+  agent_project_skills.py
   agent_runlog.py
   agent_tooling.py
   agent_security.py
@@ -171,6 +173,9 @@ Makefile                   # optional if missing
 - Use `.agent/knowledge.json` as the durable knowledge manifest for ownership, review dates, source links, and known stale sections.
 - Use `.agent/dev-map.json` and `docs/DEV_MAP.md` as a concise repository navigation map for entry points, ownership, read-before-edit docs, and common patterns.
 - Use `.agent/skill-hygiene.json` and `scripts/agent_skill_hygiene.py` for read-only skill topology, source/hash, symlink, frontmatter, stale, and risk-signal scans.
+- Use `.agent/project-skills.json` and `scripts/agent_project_skills.py` as the repo-local project skill registry and lifecycle fact surface for managed, unmanaged, orphaned, missing, drifted, pinned, unpinned, unknown-source, unsafe-path, manifest-mismatch, capability-mismatch, and review-pending states.
+- Keep `skills.manifest.json` as the production/release registry; keep workspace-only helper skills in `.agent/project-skills.json` plus `workspace-tools.manifest.json` when present, not in the production manifest.
+- Do not let `scripts/agent_project_skills.py` install, update, delete, or overwrite skills. It reports, doctors, checks one skill, and snapshots hashes; agents perform lifecycle changes through embedded specs, validation, review-fix-review, and archive.
 - Use `.agent/memory.json` as the cross-session memory policy for summaries, indexes, privacy redaction, and progressive retrieval.
 - Use `.agent/sessions/<session-id>/offload.jsonl`, `offload-index.md`, `task-map.mmd`, and `grounding.md` for evidence-backed session offload and truth-first rollover. Offload entries are advisory; they must point to durable evidence and cannot override current repo truth.
 - Use `.agent/context.json` as the context budget policy for agent-facing docs, bootstrap packets, memory digests, embedded spec change docs, and subagent output size.
@@ -206,6 +211,8 @@ python3 scripts/agent_knowledge.py
 python3 scripts/agent_invariants.py
 python3 scripts/agent_capabilities.py doctor
 python3 scripts/agent_skill_hygiene.py doctor
+python3 scripts/agent_project_skills.py doctor
+python3 scripts/agent_project_skills.py report
 python3 scripts/agent_runlog.py doctor
 python3 scripts/agent_tooling.py doctor
 python3 scripts/agent_security.py doctor
@@ -279,6 +286,18 @@ Agents should run `python3 scripts/agent_validate.py --list` before choosing val
 - Empty extension points for MCP servers and external integrations.
 
 Use `python3 scripts/agent_capabilities.py list --enabled` before using optional tools or native integrations. High-risk enabled capabilities must have an owner and should leave evidence in `.agent/runlog.jsonl`.
+
+## Project Skill Governance Surface
+
+`.agent/project-skills.json` records the intentionally governed project-level skills in the repository:
+
+- Skill name, host, path, lifecycle, intent, owner, risk, source, content hashes, release boundary, and latest review status.
+- Policy flags that keep the mechanism repo-local, dependency-free, non-destructive, review-gated, and archive-aware.
+- Registry inputs for `.agent/skill-hygiene.json`, `skills.manifest.json`, `workspace-tools.manifest.json`, and `.agent/capabilities.json`.
+
+Use `python3 scripts/agent_project_skills.py report --json` to compare the registry with discovered project skills, production manifest entries, workspace-only helpers, capability entries, review artifacts, and hash snapshots. Use `doctor` as the hard gate for repo-local paths, complete project skill registry coverage, production target install paths, drift, and review-fix-review evidence. Use `check <skill>` for focused inspection, and `snapshot --write` only after the intended skill lifecycle change has passed review and validation.
+
+Adding, adopting, updating, deprecating, removing, pinning, or reclassifying a project skill is governance work. Use an embedded spec change, preserve `skills.manifest.json` as the production/release boundary, run review -> fix -> review through the controlling skill lifecycle, and archive the completed spec before handoff.
 
 ## Runlog Surface
 
@@ -376,7 +395,7 @@ The memory layer borrows the useful shape of hook-captured, compressed, searchab
 - `.agent/memory/latest.md` is a small bootstrap digest.
 - `.agent/memory/summaries/` stores detail records by memory id.
 
-Use `timeline -> search -> detail` to avoid loading excessive context. Store summaries and retrieval handles, not raw transcripts.
+Use `timeline -> search -> detail` to avoid loading excessive context. Search output is capped by `.agent/memory.json` recall budgets, and full records are loaded only by selected `detail <id>` calls. Store summaries and retrieval handles, not raw transcripts.
 
 Memory classes are explicit:
 
