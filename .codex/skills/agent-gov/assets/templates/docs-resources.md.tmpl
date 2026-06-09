@@ -1,0 +1,30 @@
+# Project Resources
+
+Project resources are governed in `.agent/resources.json`. Use this catalog before searching chat history, editor tabs, shell history, or ad hoc notes for servers, databases, remotes, deploy targets, or compute machines.
+
+## Rules
+
+- Store resource assets and usage boundaries in `.agent/resources.json`.
+- Store raw passwords, tokens, SSH private keys, database URLs with passwords, and private credential values outside the repository.
+- Use references such as `env:NAME`, `file-ref:path`, `vault:path`, `proxy:name`, `op:item`, or `keychain:name` for secret material.
+- Use `.agent/templates/resource-secrets.local.env.tmpl` as the placeholder template for local values.
+- Keep filled local values in `.agent/local/` or another ignored secret store.
+- Run `python3 scripts/agent_resources.py match --intent "<intent>" --json` before choosing a resource.
+- Run `python3 scripts/agent_resources.py resolve <resource-id> --json` before using a matched resource.
+- Ask for approval before production write, destructive, release, billing, privileged, or high-risk resource use.
+
+## Commands
+
+```bash
+python3 scripts/agent_resources.py doctor
+python3 scripts/agent_resources.py list
+python3 scripts/agent_resources.py match --intent "deploy staging backend" --json
+python3 scripts/agent_resources.py resolve staging-server-template --json
+python3 scripts/agent_resources.py template --print
+```
+
+`healthcheck` runs only declared low-risk checks by default. Runtime output is suppressed unless `--show-output` is provided, and high-risk, production, or release resources require explicit approval with `--approved` before execution:
+
+```bash
+python3 scripts/agent_resources.py healthcheck local-repository
+```

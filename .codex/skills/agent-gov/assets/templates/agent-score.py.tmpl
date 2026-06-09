@@ -62,6 +62,7 @@ SCHEMA_JSON_FILES = {
     ".agent/memory.json": "agent-memory-v1",
     ".agent/context.json": "agent-context-budget-v1",
     ".agent/capabilities.json": "agent-capabilities-v1",
+    ".agent/resources.json": "agent-resource-catalog-v1",
     ".agent/tooling.json": "agent-tooling-v1",
     ".agent/security.json": "agent-security-v1",
     ".agent/evals.json": "agent-evals-v1",
@@ -95,6 +96,7 @@ CRITICAL_JSON_FILES = {
     ".agent/dev-map.json",
     ".agent/skill-hygiene.json",
     ".agent/project-skills.json",
+    ".agent/resources.json",
     ".agent/harness-evolution.json",
     ".agent/mcp-policy.json",
     ".agent/governance-gc.json",
@@ -113,6 +115,7 @@ DEFAULT_DIMENSION_WEIGHTS = {
     "dev_map": 6,
     "skill_hygiene": 6,
     "project_skills": 6,
+    "resource_catalog": 8,
     "harness_evolution": 6,
     "mcp_policy": 4,
     "governance_gc": 6,
@@ -971,6 +974,45 @@ def score_project_skills() -> dict:
     return dimension("project_skills", score, findings, [f"{skills} skill(s)", f"{registered} registered", f"{errors} error(s)", f"{warnings} warning(s)"])
 
 
+def score_resource_catalog() -> dict:
+    config = load_json(Path(".agent/resources.json"))
+    findings: list[str] = []
+    if config.get("schema") != "agent-resource-catalog-v1":
+        findings.append("invalid resource catalog schema")
+    policy = config.get("policy", {})
+    for key in (
+        "repo_local_catalog",
+        "raw_secret_values_forbidden",
+        "match_requires_resolve_before_use",
+        "high_risk_use_requires_approval",
+    ):
+        if policy.get(key) is not True:
+            findings.append(f"resource catalog policy missing {key}")
+    template = policy.get("local_secret_material_template", "")
+    if template and not Path(str(template)).exists():
+        findings.append(f"missing local secret-material template: {template}")
+    if not Path("scripts/agent_resources.py").exists():
+        findings.append("missing scripts/agent_resources.py")
+    else:
+        result = subprocess.run([sys.executable, "scripts/agent_resources.py", "doctor"], text=True, capture_output=True, check=False)
+        if result.returncode != 0:
+            output = (result.stdout + result.stderr).strip()
+            findings.append(f"agent_resources doctor failed: {output}")
+    report, error = run_json_command([sys.executable, "scripts/agent_resources.py", "list", "--json"])
+    resource_count = 0
+    enabled_count = 0
+    if error:
+        findings.append(f"agent_resources list unavailable: {error}")
+    else:
+        rows = report.get("resources", [])
+        resource_count = len(rows)
+        enabled_count = sum(1 for row in rows if row.get("enabled") is True)
+        if resource_count == 0:
+            findings.append("resource catalog has no resources")
+    score = 100 - min(90, len(findings) * 15)
+    return dimension("resource_catalog", score, findings, [f"{resource_count} resource(s)", f"{enabled_count} enabled"])
+
+
 def score_harness_evolution() -> dict:
     evolution = load_json(Path(".agent/harness-evolution.json"))
     findings: list[str] = []
@@ -1028,7 +1070,7 @@ def score_governance_gc() -> dict:
     if config.get("schema") != "agent-governance-gc-v1":
         findings.append("invalid governance-gc schema")
     checks = config.get("checks", {})
-    for key in ("knowledge_owners", "stale_docs", "task_board_stale_active_items", "baseline_age", "config_pointer_consistency", "dev_map_presence", "mcp_policy_disabled_or_audited"):
+    for key in ("knowledge_owners", "stale_docs", "task_board_stale_active_items", "baseline_age", "config_pointer_consistency", "dev_map_presence", "resource_catalog_schema", "mcp_policy_disabled_or_audited"):
         if key not in checks:
             findings.append(f"governance-gc missing check: {key}")
     if not Path("scripts/agent_gc.py").exists():
@@ -1466,6 +1508,7 @@ def collect_scores(extra_runlog_events: int = 0) -> dict:
         "dev_map": score_dev_map,
         "skill_hygiene": score_skill_hygiene,
         "project_skills": score_project_skills,
+        "resource_catalog": score_resource_catalog,
         "harness_evolution": score_harness_evolution,
         "mcp_policy": score_mcp_policy,
         "governance_gc": score_governance_gc,

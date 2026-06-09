@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -180,6 +181,7 @@ LEGACY_CONFIG_PATH_KEYS = {
     "baselines",
     "harness_evolution",
     "mcp_policy",
+    "resources_config",
     "governance_gc",
     "governance_score",
     "runlog",
@@ -1215,6 +1217,26 @@ def main() -> int:
             print("error: .agent/capabilities.json has no capabilities")
             return 1
 
+    resources_path = root / ".agent/resources.json"
+    if resources_path.exists():
+        resource_catalog = load_json(resources_path, ".agent/resources.json")
+        if resource_catalog.get("schema") != "agent-resource-catalog-v1":
+            print("error: .agent/resources.json schema must be agent-resource-catalog-v1")
+            return 1
+        resource_policy = resource_catalog.get("policy", {})
+        for key in ("repo_local_catalog", "raw_secret_values_forbidden", "match_requires_resolve_before_use"):
+            if resource_policy.get(key) is not True:
+                print(f"error: .agent/resources.json policy must enable {key}")
+                return 1
+        if not (root / "scripts/agent_resources.py").exists():
+            print("error: missing scripts/agent_resources.py")
+            return 1
+        result = subprocess.run([sys.executable, "scripts/agent_resources.py", "doctor"], text=True, capture_output=True, check=False)
+        if result.returncode != 0:
+            output = (result.stdout + result.stderr).strip()
+            print(f"error: resource catalog doctor failed: {output}")
+            return 1
+
     tooling_path = root / ".agent/tooling.json"
     if tooling_path.exists():
         tooling = load_json(tooling_path, ".agent/tooling.json")
@@ -1270,6 +1292,7 @@ def main() -> int:
             "template_rendering",
             "test_baseline",
             "markdown_links",
+            "resource_catalog",
         ]
         if (root / ".agent/mcp-policy.json").exists():
             required_mechanical_checks.append("mcp_policy")
@@ -1339,7 +1362,7 @@ def main() -> int:
         if gc_config.get("schema") != "agent-governance-gc-v1":
             print("error: .agent/governance-gc.json schema must be agent-governance-gc-v1")
             return 1
-        for key in ("knowledge_owners", "stale_docs", "task_board_stale_active_items", "baseline_age", "config_pointer_consistency", "dev_map_presence", "mcp_policy_disabled_or_audited"):
+        for key in ("knowledge_owners", "stale_docs", "task_board_stale_active_items", "baseline_age", "config_pointer_consistency", "dev_map_presence", "resource_catalog_schema", "mcp_policy_disabled_or_audited"):
             if key not in gc_config.get("checks", {}):
                 print(f"error: .agent/governance-gc.json missing check: {key}")
                 return 1

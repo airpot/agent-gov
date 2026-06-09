@@ -1,6 +1,6 @@
 ---
 name: agent-gov
-description: Govern Codex/Claude-ready repositories with embedded OpenSpec-style specification management, harness engineering, technology stack and directory layout contracts, durable docs and knowledge metadata, repo-local long-term memory, session offload and truth-first grounding, context budget management, workflow and worktree governance, implementation discipline, capability and integration governance, runlog evidence tracing, ACI-friendly bounded tooling, optional policy-as-code and supply-chain checks, ADR/RFC/postmortem records, governance health scoring/evals, VS Code Remote-friendly session continuity, native hook adapters, subagent orchestration, skill distribution, handoff/resume automation, validation commands, and review-fix gates. Use when the user asks to initialize, retrofit, audit, or maintain an agent-governed project; make a repo agent-ready; add or repair embedded spec/harness/session/offload/grounding/memory/context/workflow/worktree/implementation-discipline/capabilities/runlog/tooling/security/evals/ADR/RFC/subagent/hooks/skills management; or recover long-running Codex work across sessions.
+description: Govern Codex/Claude-ready repositories with embedded OpenSpec-style specification management, harness engineering, technology stack and directory layout contracts, durable docs and knowledge metadata, repo-local long-term memory, session offload and truth-first grounding, context budget management, workflow and worktree governance, implementation discipline, capability and integration governance, project resource catalog management, runlog evidence tracing, ACI-friendly bounded tooling, optional policy-as-code and supply-chain checks, ADR/RFC/postmortem records, governance health scoring/evals, VS Code Remote-friendly session continuity, native hook adapters, subagent orchestration, skill distribution, handoff/resume automation, validation commands, and review-fix gates. Use when the user asks to initialize, retrofit, audit, or maintain an agent-governed project; make a repo agent-ready; add or repair embedded spec/harness/session/offload/grounding/memory/context/workflow/worktree/implementation-discipline/capabilities/resources/runlog/tooling/security/evals/ADR/RFC/subagent/hooks/skills management; or recover long-running Codex work across sessions.
 ---
 
 # Agent Gov
@@ -22,7 +22,7 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
    - Use `references/spec-management.md` for embedded OpenSpec-style project specification setup, status checks, and mandatory archival of completed changes.
    - Use `references/workflow-governance.md` for workflow profiles, lifecycle gates, task-board continuity, feature-stage documents, task risk/autonomy, plan quality, TDD/debugging evidence, diff traceability, worktree isolation, review order, human review evidence, and completion proof.
    - Use `references/implementation-discipline.md` for assumption clarification, simplicity-first implementation, surgical diffs, and verifiable goals.
-   - Use `references/harness-management.md` for command, validation, capability governance, runlog evidence, ACI tooling, security/supply-chain suites, governance scoring/evals, dev map, harness evolution, MCP policy, governance-gc, ADR/RFC/postmortem records, native adapters, context budget, project skill governance, skill distribution, and repo-harness setup.
+   - Use `references/harness-management.md` for command, validation, capability governance, project resource catalog governance, runlog evidence, ACI tooling, security/supply-chain suites, governance scoring/evals, dev map, harness evolution, MCP policy, governance-gc, ADR/RFC/postmortem records, native adapters, context budget, project skill governance, skill distribution, and repo-harness setup.
    - Use `references/session-continuity.md` for `.agent/sessions/`, `.agent/memory/`, rollover, checkpoint, memory retrieval, and resume behavior.
    - Use `references/context-budget.md` for compression-safe governance docs, token budget scans, and subagent output limits.
    - Use `references/subagent-orchestration.md` when the project needs delegated agent roles, snapshot contracts, or multi-agent handoff rules.
@@ -79,7 +79,10 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
    - For `standard` and `full`, ensure `.agent/capabilities.json`, `.agent/dev-map.json`, `.agent/skill-hygiene.json`, `.agent/harness-evolution.json`, `.agent/mcp-policy.json`, `.agent/governance-gc.json`, `scripts/agent_capabilities.py`, `scripts/agent_skill_hygiene.py`, `scripts/agent_verify.py`, and `scripts/agent_gc.py` exist.
    - For `full`, ensure `.agent/tooling.json`, `.agent/security.json`, `scripts/agent_tooling.py`, and `scripts/agent_security.py` exist.
    - Treat `.agent/manifest.json` as the generated governance manifest for required paths, JSON schemas, JSONL stores, and score dimensions; update it when the governance surface changes.
-   - Use `.agent/capabilities.json` to record enabled skills, tools, MCP/integration entries, resources, native adapters, owner, risk, capability class, permission shape, and validation commands.
+   - Use `.agent/capabilities.json` to record enabled skills, tools, MCP/integration entries, resource-catalog capability, native adapters, owner, risk, capability class, permission shape, and validation commands.
+   - Use `.agent/resources.json`, `scripts/agent_resources.py`, `.agent/templates/resource-secrets.local.env.tmpl`, and `docs/RESOURCES.md` to govern project resource assets such as servers, databases, repositories, deployment targets, compute machines, endpoint references, credential references, usage rules, allowed actions, and health checks.
+   - Before using a remote server, database, repository, deployment target, or compute machine, run `python3 scripts/agent_resources.py match --intent "<intent>" --json`, then `python3 scripts/agent_resources.py resolve <resource-id> --json`; do not rely on chat memory, shell history, or trial-and-error discovery.
+   - Keep raw account passwords, tokens, SSH private keys, database URLs with embedded credentials, and private secret material out of `.agent/resources.json`; store only refs such as `env:`, `file-ref:`, `vault:`, `proxy:`, `op:`, or `keychain:`.
    - Use `.agent/runlog.jsonl` for compact evidence of validation runs, session lifecycle events, accepted review exceptions, and high-risk capability use.
    - Use `.agent/tooling.json` and `scripts/agent_tooling.py` for bounded, path-first, line-numbered repository inspection.
    - Use `.agent/security.json` and `scripts/agent_security.py` for optional policy-as-code, secret scan, dependency audit, SBOM, and license scan command slots.
@@ -90,9 +93,12 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
    - Use `.agent/skill-hygiene.json` and `scripts/agent_skill_hygiene.py` as a read-only skill topology/source/hash/frontmatter/symlink/risk-signal scan; cleanup and canary injection require explicit human confirmation.
    - For `standard` and `full`, ensure `.agent/project-skills.json` and `scripts/agent_project_skills.py` exist.
    - Use `.agent/project-skills.json` as the canonical repo-local registry for intentionally governed project skills; keep `skills.manifest.json` as the production/release boundary and `workspace-tools.manifest.json` as workspace-only helper awareness when present.
+   - When installing a skill while operating in a project, default to project-local `.codex/skills/<skill>`; install to global/user skill directories only when the user explicitly requests a global install.
+   - Treat both project-local and global installed skills as governed inventory: `scripts/agent_project_skills.py report --json` must surface both, and unmanaged global installs require registration or an explicit policy exception.
    - Use `scripts/agent_project_skills.py report --json` before adopting, updating, deprecating, removing, pinning, or reclassifying project skills; use `snapshot --write` only after the lifecycle change has been reviewed and validated.
    - Treat project skill lifecycle changes as non-trivial governance work: open or use an embedded spec, run review -> fix -> review through the controlling skill lifecycle, run validation, and archive the completed embedded spec before claiming completion.
    - Treat `.agent/mcp-policy.json` as optional and disabled by default until the project explicitly enables external integrations; it defines trust boundaries even when no MCP server is active, and raw credentials must stay behind vault/proxy boundaries outside the repo, harness, and sandbox.
+   - Treat high-risk, production write, destructive, release, billing, privileged, or cost-bearing resource use as approval-gated work and record high-risk use in runlog when available.
    - Keep runlog entries structured and concise; do not store raw transcripts, terminal scrollback, secrets, or private host data.
 
 9. **Create or verify subagent orchestration**
@@ -145,6 +151,7 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
 - `assets/templates/agent-memory.py.tmpl`: Source for generated target-project `.agent/tools/agent_memory.py`.
 - `assets/templates/agent-context.py.tmpl`: Source for generated target-project `.agent/tools/agent_context.py`.
 - `assets/templates/agent-capabilities.py.tmpl`: Source for generated target-project `scripts/agent_capabilities.py`.
+- `assets/templates/agent-resources.py.tmpl`: Source for generated target-project `scripts/agent_resources.py`.
 - `assets/templates/agent-skill-hygiene.py.tmpl`: Source for generated target-project `scripts/agent_skill_hygiene.py`.
 - `assets/templates/agent-project-skills.py.tmpl`: Source for generated target-project `scripts/agent_project_skills.py`.
 - `assets/templates/agent-runlog.py.tmpl`: Source for generated target-project `scripts/agent_runlog.py`.
@@ -170,6 +177,7 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
 
 - Do not treat Codex thread history, VS Code tabs, terminal scrollback, or unsaved buffers as durable state.
 - Do not store secrets, SSH keys, tokens, host credentials, or private environment values in `.agent/`.
+- Do not store raw resource credentials or private secret material in `.agent/resources.json`; use generated local templates or external vault/proxy/keychain references.
 - Do not store raw transcripts, terminal scrollback, secrets, or private host data in `.agent/runlog.jsonl`.
 - Preserve existing project files by default; create missing files and report conflicts instead of silently rewriting.
 - Prefer simple, direct implementations and justify new abstractions, speculative flexibility, or broad cleanup with recorded evidence.

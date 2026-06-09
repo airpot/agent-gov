@@ -561,6 +561,14 @@ def first_nonempty_lines(path: Path, limit: int = 40) -> list[str]:
     return [line for line in lines if line.strip()][:limit]
 
 
+def limited_text_block(text: str, limit: int) -> list[str]:
+    lines = (text or "clean or unavailable").splitlines()
+    if len(lines) <= limit:
+        return lines
+    hidden = len(lines) - limit
+    return lines[:limit] + [f"... {hidden} more line(s); run `git status --short` for the full current state."]
+
+
 def artifacts_for(session_id: str) -> dict:
     path = session_dir(session_id) / "artifacts.json"
     if path.exists():
@@ -576,6 +584,7 @@ def write_bootstrap(session_id: str) -> Path:
     openspec_change = artifacts.get("openspec_change", "none")
     goal = artifacts.get("goal", "unknown")
     git_status = run_git(["status", "--short"], fallback="")
+    git_status_lines = limited_text_block(git_status, 40)
     start_steps = [
         f"`cd {workspace}`",
         "Read this file fully.",
@@ -609,7 +618,7 @@ def write_bootstrap(session_id: str) -> Path:
         "## Current Git Status Snapshot",
         "",
         "```text",
-        git_status or "clean or unavailable",
+        *git_status_lines,
         "```",
         "",
         "## Handoff Summary",
@@ -678,9 +687,10 @@ def compact_session(
     if next_step:
         append(directory / "handoff.md", f"\n## Next Step {timestamp}\n\n{next_step}\n")
     git_status = run_git(["status", "--short"], fallback="")
+    git_status_text = "\n".join(limited_text_block(git_status, 80))
     append(
         directory / "changes.md",
-        f"\n## Git Status Snapshot {timestamp}\n\n```text\n{git_status or 'clean or unavailable'}\n```\n",
+        f"\n## Git Status Snapshot {timestamp}\n\n```text\n{git_status_text}\n```\n",
     )
     if ingest_reason:
         maybe_ingest_memory(session_id, ingest_reason)

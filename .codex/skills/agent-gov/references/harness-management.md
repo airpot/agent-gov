@@ -39,6 +39,7 @@ openspec/config.yaml
   memory.json
   context.json
   capabilities.json
+  resources.json
   tooling.json
   security.json
   evals.json
@@ -88,6 +89,7 @@ openspec/config.yaml
       .gitkeep
     project-review.md.tmpl
     project-fix-log.md.tmpl
+    resource-secrets.local.env.tmpl
     implementation-plan.md.tmpl
     debugging-record.md.tmpl
     subagent-task.md.tmpl
@@ -118,6 +120,7 @@ scripts/
   agent_knowledge.py
   agent_invariants.py
   agent_capabilities.py
+  agent_resources.py
   agent_skill_hygiene.py
   agent_project_skills.py
   agent_runlog.py
@@ -136,6 +139,7 @@ docs/
   SECURITY.md
   TOOLING.md
   QUALITY_SCORE.md
+  RESOURCES.md
   AI_CODING_GLOSSARY.md
   DOMAIN_GLOSSARY.md
   DEV_MAP.md
@@ -174,12 +178,18 @@ Makefile                   # optional if missing
 - Use `.agent/dev-map.json` and `docs/DEV_MAP.md` as a concise repository navigation map for entry points, ownership, read-before-edit docs, and common patterns.
 - Use `.agent/skill-hygiene.json` and `scripts/agent_skill_hygiene.py` for read-only skill topology, source/hash, symlink, frontmatter, stale, and risk-signal scans.
 - Use `.agent/project-skills.json` and `scripts/agent_project_skills.py` as the repo-local project skill registry and lifecycle fact surface for managed, unmanaged, orphaned, missing, drifted, pinned, unpinned, unknown-source, unsafe-path, manifest-mismatch, capability-mismatch, and review-pending states.
+- Default skill installation inside a project to project-local `.codex/skills/<skill>`. A global/user-level install requires explicit user intent such as `--global`.
+- Include both project-local and global installed skills in governance reports. Global discoveries are external facts, not repo-editable source paths; unmanaged global installs require registry coverage or an explicit policy exception.
 - Keep `skills.manifest.json` as the production/release registry; keep workspace-only helper skills in `.agent/project-skills.json` plus `workspace-tools.manifest.json` when present, not in the production manifest.
 - Do not let `scripts/agent_project_skills.py` install, update, delete, or overwrite skills. It reports, doctors, checks one skill, and snapshots hashes; agents perform lifecycle changes through embedded specs, validation, review-fix-review, and archive.
 - Use `.agent/memory.json` as the cross-session memory policy for summaries, indexes, privacy redaction, and progressive retrieval.
 - Use `.agent/sessions/<session-id>/offload.jsonl`, `offload-index.md`, `task-map.mmd`, and `grounding.md` for evidence-backed session offload and truth-first rollover. Offload entries are advisory; they must point to durable evidence and cannot override current repo truth.
 - Use `.agent/context.json` as the context budget policy for agent-facing docs, bootstrap packets, memory digests, embedded spec change docs, and subagent output size.
 - Use `.agent/capabilities.json` as the capability, skill/tool/MCP taxonomy, integration, permission, and risk registry for agent-visible skills, tools, resources, adapters, and integrations.
+- Use `.agent/resources.json` as the concrete project resource asset catalog for servers, databases, repositories, deployment targets, compute machines, endpoint references, credential references, usage rules, allowed actions, owners, risk levels, lifecycle state, and health checks.
+- Use `scripts/agent_resources.py match --intent "<intent>" --json` before choosing a resource, then `scripts/agent_resources.py resolve <resource-id> --json` before using it.
+- Keep raw account passwords, tokens, SSH private keys, database URLs with embedded credentials, and private secret material out of `.agent/resources.json`; use `.agent/templates/resource-secrets.local.env.tmpl`, ignored `.agent/local/` files, or external `env:`, `file-ref:`, `vault:`, `proxy:`, `op:`, or `keychain:` references.
+- Treat high-risk, production write, destructive, release, billing, privileged, or cost-bearing resource use as approval-gated work and record high-risk use in `.agent/runlog.jsonl` when available.
 - Use `.agent/runlog.jsonl` as the append-only evidence ledger for validation runs, review-fix gates, and high-risk capability use; use `.agent/sessions/events.jsonl` as the append-only session lifecycle stream.
 - Use `.agent/tooling.json` as the agent-computer-interface policy for bounded, path-first, line-numbered repository inspection.
 - Use `.agent/security.json` as the optional policy-as-code and supply-chain command registry.
@@ -188,7 +198,7 @@ Makefile                   # optional if missing
 - Use `.agent/harness-evolution.json` as the incident taxonomy and promotion policy for repeated failures; record classifications with `python3 scripts/agent_gc.py classify --category <category> --summary <summary>`.
 - Use `.agent/mcp-policy.json` as the optional MCP trust-boundary and approval policy; it is generated disabled by default before any MCP server is enabled, and raw credentials must remain behind vault/proxy boundaries outside the repo, harness, and sandbox.
 - Use `.agent/governance-gc.json` and `scripts/agent_gc.py` for periodic governance gardening.
-- Use `.agent/skill-distribution.json` as the skill distribution policy for `.codex/skills`, `.agents/skills`, and `.claude/skills`.
+- Use `.agent/skill-distribution.json` as the skill distribution policy for project-local `.codex/skills`, optional compatibility sync directories, and explicit global installs.
 - Prefer `npx @airpot/agent-gov@latest` as the public one-command installer; it should copy bundled project skills before running the initializer.
 - Use `docs/AI_CODING_GLOSSARY.md` for shared AI coding terminology, `docs/DOMAIN_GLOSSARY.md` for project-domain terminology, and `docs/adr/`, `docs/rfcs/`, and `docs/incidents/` for durable decisions, proposals, and postmortems that should outlive a session.
 - Capture the technology stack during initialization and prefill harness commands when there is a known safe default.
@@ -210,6 +220,7 @@ python3 scripts/agent_spec.py doctor
 python3 scripts/agent_knowledge.py
 python3 scripts/agent_invariants.py
 python3 scripts/agent_capabilities.py doctor
+python3 scripts/agent_resources.py doctor
 python3 scripts/agent_skill_hygiene.py doctor
 python3 scripts/agent_project_skills.py doctor
 python3 scripts/agent_project_skills.py report

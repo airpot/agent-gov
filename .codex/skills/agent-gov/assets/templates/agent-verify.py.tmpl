@@ -7,6 +7,7 @@ import argparse
 import fnmatch
 import json
 import re
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -436,6 +437,7 @@ def check_governance_configs(config: dict) -> list[str]:
             ".agent/harness-evolution.json",
             ".agent/mcp-policy.json",
             ".agent/governance-gc.json",
+            ".agent/resources.json",
         }
     }
     expected.setdefault(".agent/manifest.json", "agent-governance-manifest-v1")
@@ -531,6 +533,19 @@ def check_governance_configs(config: dict) -> list[str]:
         for boundary in ("credential_vault", "credential_proxy"):
             if boundary not in mcp.get("trust_boundaries", {}):
                 errors.append(f"{mcp_path} missing trust boundary: {boundary}")
+    if check_enabled(config, "resource_catalog"):
+        resources_path = Path(config.get("checks", {}).get("resource_catalog", {}).get("path", ".agent/resources.json"))
+        resources = load_json(resources_path, {})
+        if resources.get("schema") != "agent-resource-catalog-v1":
+            errors.append(f"{resources_path} schema must be agent-resource-catalog-v1")
+        script = config.get("checks", {}).get("resource_catalog", {}).get("script", "scripts/agent_resources.py")
+        if not Path(script).exists():
+            errors.append(f"missing {script}")
+        else:
+            result = subprocess.run([sys.executable, script, "doctor"], text=True, capture_output=True, check=False)
+            if result.returncode != 0:
+                output = (result.stdout + result.stderr).strip()
+                errors.append(f"resource catalog doctor failed: {output}")
     return errors
 
 

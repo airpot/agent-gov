@@ -28,7 +28,7 @@ function printHelp() {
 Usage:
   agent-gov [root] [initializer options]
   agent-gov init [root] [initializer options]
-  agent-gov install-skill [root] [--force] [--dry-run]
+  agent-gov install-skill [root] [--force] [--dry-run] [--global]
   agent-gov doctor [root]
 
 Examples:
@@ -42,10 +42,13 @@ Default behavior:
   agent-gov initializer for <root>. Existing skill files are preserved unless
   --force or --force-skill is provided. The initializer defaults to
   --governance-profile standard.
+  install-skill also defaults to project scope. Use --global only when the user
+  explicitly wants to mutate the user-level Codex skill directory.
 
 Local npm-only options:
   --skip-skill-install   Run the Python initializer without copying the bundled skill.
   --force-skill          Overwrite existing bundled skill files.
+  --global               Install bundled skills into the user-level Codex skill directory.
   --help, -h             Show this help.
   --version, -v          Show the package version.
 
@@ -143,7 +146,8 @@ function copyTree(source, dest, options) {
 }
 
 function installSkills(targetRoot, options = {}) {
-  const skillDest = path.join(targetRoot, ".codex", "skills");
+  const scope = options.global ? "global" : "project";
+  const skillDest = options.global ? globalSkillDir() : path.join(targetRoot, ".codex", "skills");
   let copied = 0;
   let skipped = 0;
   let unchanged = 0;
@@ -158,6 +162,7 @@ function installSkills(targetRoot, options = {}) {
     conflicts += result.conflicts;
   }
   console.log(`skill source: ${SKILLS_SOURCE}`);
+  console.log(`skill scope: ${scope}`);
   console.log(`skill dest: ${skillDest}`);
   console.log(`skill files ${options.dryRun ? "would copy" : "copied"}: ${copied}`);
   console.log(`skill files unchanged: ${unchanged}`);
@@ -165,6 +170,21 @@ function installSkills(targetRoot, options = {}) {
   if (conflicts > 0 && !options.force) {
     console.log("existing different skill files were preserved; rerun with --force-skill or --force only after reviewing the local changes");
   }
+}
+
+function homeDir() {
+  return process.env.HOME || process.env.USERPROFILE || "";
+}
+
+function globalSkillDir() {
+  if (process.env.CODEX_HOME) {
+    return path.resolve(process.env.CODEX_HOME, "skills");
+  }
+  const home = homeDir();
+  if (!home) {
+    throw new Error("cannot resolve global skill directory: HOME, USERPROFILE, or CODEX_HOME is required");
+  }
+  return path.resolve(home, ".codex", "skills");
 }
 
 function firstPositional(args) {
@@ -179,6 +199,7 @@ function parseInstallArgs(args) {
     target: ".",
     force: false,
     dryRun: false,
+    global: false,
   };
   let targetSet = false;
   for (let i = 0; i < args.length; i += 1) {
@@ -187,6 +208,8 @@ function parseInstallArgs(args) {
       result.force = true;
     } else if (arg === "--dry-run") {
       result.dryRun = true;
+    } else if (arg === "--global") {
+      result.global = true;
     } else if (arg === "--target") {
       i += 1;
       if (!args[i]) {
@@ -277,7 +300,9 @@ function init(args) {
 function installSkill(args) {
   const options = parseInstallArgs(args);
   const targetRoot = path.resolve(process.cwd(), options.target);
-  ensureTargetRoot(targetRoot, [], options.dryRun);
+  if (!options.global) {
+    ensureTargetRoot(targetRoot, [], options.dryRun);
+  }
   installSkills(targetRoot, options);
   return 0;
 }

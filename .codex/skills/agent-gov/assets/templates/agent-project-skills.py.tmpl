@@ -21,6 +21,7 @@ WORKSPACE_TOOLS_MANIFEST = Path("workspace-tools.manifest.json")
 CAPABILITIES_CONFIG = Path(".agent/capabilities.json")
 SKIP_DIRS = {".git", "__pycache__", "node_modules", "dist", "build", "target"}
 SKIP_NAMES = {".DS_Store"}
+PROJECT_SKILL_DEFAULT_ROOT = ".codex/skills"
 SENSITIVE_NAMES = {
     ".env",
     ".env.local",
@@ -199,6 +200,17 @@ def discovered_project_skills(hygiene: dict[str, Any]) -> dict[str, dict[str, An
     discovered: dict[str, dict[str, Any]] = {}
     for item in hygiene.get("skills", []):
         if not isinstance(item, dict) or item.get("root_kind") != "project":
+            continue
+        name = str(item.get("name") or Path(str(item.get("path", ""))).parent.name)
+        if name:
+            discovered[name] = item
+    return discovered
+
+
+def discovered_global_skills(hygiene: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    discovered: dict[str, dict[str, Any]] = {}
+    for item in hygiene.get("skills", []):
+        if not isinstance(item, dict) or item.get("root_kind") != "global":
             continue
         name = str(item.get("name") or Path(str(item.get("path", ""))).parent.name)
         if name:
@@ -385,12 +397,47 @@ def infer_path(name: str, registered: dict[str, Any], production: dict[str, Any]
     return f".codex/skills/{name}"
 
 
+def infer_scope(registered: dict[str, Any], discovered: dict[str, Any], global_discovered: dict[str, Any]) -> str:
+    scope = str(registered.get("scope", "")).strip()
+    if scope:
+        return scope
+    if global_discovered and not discovered:
+        return "global"
+    return "project"
+
+
+def normalize_global_install_path(value: Any) -> Path | None:
+    if value in {"", None}:
+        return None
+    path = Path(os.path.expandvars(str(value))).expanduser()
+    if path.name == "SKILL.md":
+        path = path.parent
+    return path
+
+
+def same_global_path(left: Any, right: Any) -> bool:
+    left_path = normalize_global_install_path(left)
+    right_path = normalize_global_install_path(right)
+    if left_path is None or right_path is None:
+        return False
+    try:
+        return left_path.resolve() == right_path.resolve()
+    except OSError:
+        return str(left_path) == str(right_path)
+
+
+def global_install_path_for(discovered: dict[str, Any]) -> str:
+    path = normalize_global_install_path(str(discovered.get("path", "")).strip())
+    return str(path) if path is not None else ""
+
+
 def status_for_skill(
     name: str,
     registered: dict[str, Any] | None,
     production: dict[str, Any] | None,
     workspace: dict[str, Any] | None,
     discovered: dict[str, Any] | None,
+    global_discovered: dict[str, Any] | None,
     policy: dict[str, Any],
     capabilities: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -398,6 +445,8 @@ def status_for_skill(
     production = production or {}
     workspace = workspace or {}
     discovered = discovered or {}
+    global_discovered = global_discovered or {}
+    scope = infer_scope(registered, discovered, global_discovered)
     path = infer_path(name, registered, production, workspace, discovered)
     statuses: list[str] = []
     findings: list[dict[str, str]] = []
@@ -406,10 +455,25 @@ def status_for_skill(
     exists = bool(path_obj and path_obj.exists())
     registered_bool = bool(registered)
     discovered_bool = bool(discovered)
+    global_discovered_bool = bool(global_discovered)
     production_bool = bool(production)
     workspace_bool = bool(workspace)
+    global_install_path = global_install_path_for(global_discovered)
+    if global_install_path:
+        evidence.append(global_install_path)
+    registered_global_path = str(registered.get("global_install_path", "")).strip()
+    global_install_governed = bool(registered_global_path and global_install_path and same_global_path(registered_global_path, global_install_path))
 
-    if registered_bool:
+    if registered_bool and scope == "global":
+        if global_discovered_bool:
+            statuses.append("managed")
+            if registered_global_path and not same_global_path(registered_global_path, global_install_path):
+                statuses.append("global_path_mismatch")
+                findings.append({"severity": "error", "kind": "global_path_mismatch", "summary": f"{name} global install path differs from registry", "path": global_install_path})
+        else:
+            statuses.append("missing")
+            findings.append({"severity": "error", "kind": "missing", "summary": f"{name} registered global skill is missing", "path": registered_global_path or path})
+    elif registered_bool:
         if path_error:
             statuses.append("unsafe_path")
             findings.append({"severity": "error", "kind": "unsafe_path", "summary": f"{name} registered path is unsafe", "path": path})
@@ -418,14 +482,22 @@ def status_for_skill(
         else:
             statuses.append("missing")
             findings.append({"severity": "error", "kind": "missing", "summary": f"{name} registered path is missing", "path": path})
+        if global_discovered_bool and not global_install_governed:
+            statuses.append("global_unmanaged")
+            severity = "error" if policy.get("fail_on_unmanaged_global_skills", True) is True else "warning"
+            findings.append({"severity": severity, "kind": "global_unmanaged", "summary": f"{name} also has a global install that is not registered or explicitly excepted", "path": global_install_path})
     elif discovered_bool:
         statuses.append("unmanaged" if production_bool or workspace_bool else "orphaned")
         kind = "unmanaged" if production_bool or workspace_bool else "orphaned"
         policy_key = "fail_on_unmanaged_project_skills" if kind == "unmanaged" else "fail_on_orphaned_project_skills"
         severity = "error" if policy.get(policy_key, True) is True else "warning"
         findings.append({"severity": severity, "kind": kind, "summary": f"{name} is installed without project skill registry entry", "path": path})
+    elif global_discovered_bool:
+        statuses.append("global_unmanaged")
+        severity = "error" if policy.get("fail_on_unmanaged_global_skills", True) is True else "warning"
+        findings.append({"severity": severity, "kind": "global_unmanaged", "summary": f"{name} is globally installed without project skill registry entry or explicit exception", "path": global_install_path})
 
-    if registered_bool and exists and not path_error:
+    if registered_bool and scope != "global" and exists and not path_error:
         current = content_identity(path)
         recorded = registered.get("content", {}) if isinstance(registered.get("content"), dict) else {}
         for key in ("skill_md_sha256", "tree_sha256"):
@@ -447,7 +519,11 @@ def status_for_skill(
 
         intent = str(registered.get("intent", "")).strip()
         release = registered.get("release", {}) if isinstance(registered.get("release"), dict) else {}
-        if intent == "production" and not path_error:
+        if scope == "global":
+            if intent not in {"global", "workspace-only", "personal"}:
+                statuses.append("manifest_mismatch")
+                findings.append({"severity": "warning", "kind": "manifest_mismatch", "summary": f"{name} global skill should use a global, personal, or workspace-only intent", "path": global_install_path or path})
+        elif intent == "production" and not path_error:
             if not production_bool:
                 statuses.append("manifest_mismatch")
                 findings.append({"severity": "error", "kind": "manifest_mismatch", "summary": f"{name} intent is production but missing from skills.manifest.json", "path": path})
@@ -498,8 +574,12 @@ def status_for_skill(
     return {
         "name": name,
         "path": path,
+        "scope": scope,
+        "root_kind": global_discovered.get("root_kind") or discovered.get("root_kind") or "",
+        "global_install_path": global_install_path,
         "registered": registered_bool,
         "discovered": discovered_bool,
+        "global_discovered": global_discovered_bool,
         "production_manifest": production_bool,
         "workspace_manifest": workspace_bool,
         "statuses": sorted(set(statuses)) or ["unknown"],
@@ -515,9 +595,10 @@ def collect() -> dict[str, Any]:
     production = production_skills()
     workspace = workspace_tools()
     discovered = discovered_project_skills(hygiene)
+    global_discovered = discovered_global_skills(hygiene)
     policy = registry_policy(config)
     capabilities = capability_entries(config)
-    names = sorted(set(registered) | set(production) | set(workspace) | set(discovered))
+    names = sorted(set(registered) | set(production) | set(workspace) | set(discovered) | set(global_discovered))
     records = [
         status_for_skill(
             name,
@@ -525,6 +606,7 @@ def collect() -> dict[str, Any]:
             production.get(name),
             workspace.get(name),
             discovered.get(name),
+            global_discovered.get(name),
             policy,
             capabilities,
         )
@@ -542,6 +624,7 @@ def collect() -> dict[str, Any]:
         "counts": {
             "registered": len(registered),
             "discovered": len(discovered),
+            "global_discovered": len(global_discovered),
             "production_manifest": len(production),
             "workspace_manifest": len(workspace),
             "skills": len(records),
@@ -557,6 +640,9 @@ def collect() -> dict[str, Any]:
             "no_auto_delete": bool(policy.get("no_auto_delete", True)),
             "fail_on_unmanaged_project_skills": bool(policy.get("fail_on_unmanaged_project_skills", True)),
             "fail_on_orphaned_project_skills": bool(policy.get("fail_on_orphaned_project_skills", True)),
+            "fail_on_unmanaged_global_skills": bool(policy.get("fail_on_unmanaged_global_skills", True)),
+            "default_install_scope": str(policy.get("default_install_scope", "project")),
+            "global_install_requires_explicit_request": bool(policy.get("global_install_requires_explicit_request", True)),
             "review_artifact_required": bool(policy.get("review_artifact_required", True)),
         },
     }
@@ -597,10 +683,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         "archive_completed_skill_changes",
         "fail_on_unmanaged_project_skills",
         "fail_on_orphaned_project_skills",
+        "fail_on_unmanaged_global_skills",
+        "global_install_requires_explicit_request",
         "review_artifact_required",
     ):
         if policy.get(key) is not True:
             errors.append(f"{CONFIG_PATH} policy must enable {key}")
+    if policy.get("default_install_scope") != "project":
+        errors.append(f"{CONFIG_PATH} policy default_install_scope must be project")
     if not isinstance(config.get("skills", {}), dict):
         errors.append(f"{CONFIG_PATH} skills must be an object")
     report = collect() if not errors else {}
