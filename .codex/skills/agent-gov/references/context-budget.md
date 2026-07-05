@@ -6,6 +6,8 @@ Use this reference when agent-facing project governance files are becoming large
 
 The useful ideas from `caveman` are context economy, measurable token budgets, safe compression validation, lifecycle hooks, and concise subagent outputs. Do not borrow the comedic style. Governance output should stay professional, precise, and easy to audit.
 
+The useful idea from portable skill projects such as Ponytail is canonical-rule economy: keep the durable rule in one source, keep host-specific projections thin, and validate projection drift with small invariants rather than repeating long guidance in every adapter.
+
 ## Target Files
 
 ```text
@@ -17,6 +19,7 @@ The useful ideas from `caveman` are context economy, measurable token budgets, s
   capabilities.json
   dev-map.json
   skill-hygiene.json
+  skill-runtime.json
   workflow.json
   workflow-profiles.json
   task-board.json
@@ -82,6 +85,7 @@ Remove or shorten:
 - Duplicate examples that prove the same rule.
 - Long prose that can become a pointer to a detailed doc or command.
 - Repeated platform instructions that already live in `AGENTS.md`.
+- Repeated adapter copies when a canonical policy plus invariant check can prove parity.
 
 Do not compress:
 
@@ -89,6 +93,7 @@ Do not compress:
 - JSON/YAML/TOML config files.
 - `.env`, credentials, keys, token files, private host config, or anything under private environment directories.
 - Raw transcripts, secrets, or terminal scrollback.
+- Long diagnostic logs that should be summarized with a pointer to an allowed artifact path.
 
 ## Validation
 
@@ -117,5 +122,9 @@ python3 .agent/tools/agent_context.py validate-pair <original> <compressed>
 - Session compact refreshes `.agent/context/latest.md`.
 - Bootstrap includes the latest context digest.
 - Session rollover should prefer `offload-index.md` plus `offload-recall` commands over copying long histories into bootstrap.
+- Goal contracts should stay compact and current; store the latest decision state, not the full history of every discussion.
+- Knowledge promotion bundles should store source handles, source status, target surface, authority level, review reference, and decision status; keep source bodies and long logs behind referenced artifacts.
 - Review-fix gates check whether governance files exceed budgets or duplicate instructions.
 - Subagent dispatch packets include an output budget so tool results do not flood the parent context.
+- Native adapter and copied instruction updates should preserve a canonical source plus a compact parity check, hash snapshot, or invariant list; do not let every host adapter become a separate long policy document.
+- Portable Skill/plugin architecture updates should keep detailed mode, adapter, command-lane, benchmark, and shortcut/debt policy in `.agent/skill-runtime.json` and `docs/SKILL_RUNTIME.md`, not repeated across host adapters.

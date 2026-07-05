@@ -34,14 +34,14 @@ Usage:
 Examples:
   npx @airpot/agent-gov@latest
   npx @airpot/agent-gov@latest --tech-stack python,typescript --layout service
-  npx @airpot/agent-gov@latest --governance-profile standard
+  npx @airpot/agent-gov@latest --governance-profile full
   npx @airpot/agent-gov@latest init /path/to/repo --remote-kind ssh
 
 Default behavior:
   Installs the bundled agent-gov project skill into <root>/.codex/skills, then runs the
   agent-gov initializer for <root>. Existing skill files are preserved unless
-  --force or --force-skill is provided. The initializer defaults to
-  --governance-profile standard.
+  --force or --force-skill is provided. When --governance-profile is omitted,
+  blank projects default to full and existing projects default to standard.
   install-skill also defaults to project scope. Use --global only when the user
   explicitly wants to mutate the user-level Codex skill directory.
 
@@ -321,7 +321,7 @@ function doctor(args) {
   let failed = false;
   for (const [name, ok, detail] of checks) {
     console.log(`${ok ? "ok" : "missing"} - ${name}: ${detail}`);
-    if (!ok && name !== "target agent-gov skill") {
+    if (!ok) {
       failed = true;
     }
   }

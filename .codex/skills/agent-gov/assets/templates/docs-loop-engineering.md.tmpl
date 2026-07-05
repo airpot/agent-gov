@@ -1,0 +1,46 @@
+# Loop Engineering
+
+Use this document when non-tiny agent work may repeat: implementation attempts, review-fix-review, debugging, eval optimization, or session recovery.
+
+The machine-readable policy lives in `.agent/loop-engineering.json`.
+
+## Rules
+
+- Start each non-tiny loop with a loop contract: loop type, goal, observation signal, iteration budget, stop conditions, owner role, and evidence path.
+- Treat the configured loop budget as a guardrail. Budget exhaustion means stop, summarize evidence, and re-plan instead of trying the same action again.
+- Record evidence for each iteration in feature docs, validation notes, runlog entries, review artifacts, or session files.
+- Change strategy after the same failure repeats. Do not retry the same prompt, patch, or command sequence without a new hypothesis.
+- Escalate repeated failures into `.agent/harness-evolution.json` with `python3 scripts/agent_gc.py classify --category <category> --summary <summary>`.
+- Keep independent review independent: reviewer and verifier roles report findings; fixes go back to the coordinator or worker.
+- Use human interrupt points before high-risk, destructive, production, release, billing, or privileged actions.
+- Do not use self-approval, reassuring language, or subjective confidence as release evidence.
+- Prevalidate inputs before expensive profile, benchmark, optimization, migration, or pipeline work.
+- Failed profile, benchmark, optimization, migration, or pipeline runs must exit non-zero, record evidence paths where available, and cannot be counted as improvements.
+
+## Loop Types
+
+- `work_loop`: plan, act, observe, adjust.
+- `review_fix_loop`: review, fix, revalidate, re-review.
+- `debugging_loop`: reproduce, hypothesize, test, fix, verify.
+- `eval_optimization_loop`: baseline, change, benchmark, accept or revert.
+- `session_recovery_loop`: bootstrap, ground, retrieve, verify, continue.
+
+## Evidence
+
+Use the smallest durable artifact that proves the iteration happened:
+
+- `docs/features/<task-id>/04_DEVELOPMENT.md` for implementation attempts.
+- `docs/features/<task-id>/05_CODE_REVIEW.md` or skill lifecycle review files for review findings.
+- `docs/features/<task-id>/06_TEST_REPORT.md` and `.agent/runlog.jsonl` for validation results.
+- `.agent/sessions/<session-id>/grounding.md` and `validation.md` for recovery and handoff evidence.
+- `.agent/evals/latest.md` and `.agent/baselines/*.json` for score or regression loops.
+
+## Failure Escalation
+
+Classify repeated failures as harness gaps instead of leaving them as session-local lessons:
+
+```bash
+python3 scripts/agent_gc.py classify --category loop_gap --summary "<what repeated and what guardrail was missing>"
+```
+
+Use `workflow_gap` for missing stage transitions, `script_gap` when a rule should become deterministic, `role_contract_gap` for role-boundary failures, and `knowledge_gap` when stable project context was missing.

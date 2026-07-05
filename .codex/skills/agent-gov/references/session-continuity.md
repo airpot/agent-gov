@@ -14,6 +14,8 @@ VS Code UI and Codex extension
 The repository state is authoritative. Native Codex threads, plugin state, open editor tabs, selections, and terminal scrollback are temporary.
 Long-term memory is a retrieval aid layered on top of durable project files. It never replaces embedded specs, `.agent/task-board.json`, `docs/DEV_MAP.md`, feature docs, ADR/RFC/postmortem records, runlog entries, validation notes, or `.agent/sessions/` as sources of truth.
 
+Long-running work also needs a compact goal contract. The goal contract is the current user-approved objective, outcome, non-goals, constraints, success evidence, stop conditions, decision summary, open decisions, task id, and spec id. It should be updated in task-board state, session handoff, feature docs, or decisions when the objective changes; it should not copy the full proposal or chat history into every session file.
+
 ## Required Session Files
 
 ```text
@@ -36,6 +38,7 @@ Long-term memory is a retrieval aid layered on top of durable project files. It 
     offload-index.md
     task-map.mmd
     refs/
+      git-status-short.txt
   bootstrap.md
 .agent/memory/
   events.jsonl
@@ -61,20 +64,24 @@ docs/DEV_MAP.md
 
 1. **start**
    - Create a session directory.
-   - Create `grounding.md`, `offload.jsonl`, `offload-index.md`, `task-map.mmd`, and `refs/.gitkeep`.
+   - Create `grounding.md`, `offload.jsonl`, `offload-index.md`, `task-map.mmd`, `refs/.gitkeep`, and runtime `refs/git-status-short.txt`.
    - Append a `started` event to `.agent/sessions/events.jsonl`.
    - Record goal, remote workspace path, git branch, git commit, embedded spec change, and client surface.
+   - For standard/full or long-running work, initialize or link the goal contract from `.agent/task-board.json` and the active session templates.
    - Record current workflow stage, base branch, and worktree path when isolated work is used.
 
 2. **checkpoint**
    - Update handoff, changed files, decisions, and validation results after a meaningful work block.
    - Checkpoint before compaction, large tool runs, branch switches, or leaving the workstation.
    - Record workflow gate evidence: spec/design approval, plan quality, implementation discipline, baseline validation, TDD/debugging evidence, review sequence, and completion verification.
+   - Refresh the goal contract when objective, non-goals, success evidence, stop conditions, decision summary, or open decisions change.
    - Record task-board id, workflow profile, current stage, feature-doc path, and before/after baseline snapshot names when they apply.
+   - Record knowledge promotion candidates as concise bundles in decisions or feature docs when a session observation, source review, or repeated workflow lesson might become durable project knowledge.
    - If subagents were used, record accepted snapshots, rejected snapshots, integration decisions, and follow-up validation.
    - Capture a concise memory record when the checkpoint changes future behavior or saves rediscovery work; repeated identical session ingests should dedupe by session/reason/content hash.
    - Ensure validation and session lifecycle evidence is present in `.agent/runlog.jsonl`.
    - Append a `checkpoint` event to `.agent/sessions/events.jsonl` with concise summary, changed files, validation, and next-step payload.
+   - Keep long `git status --short` output in `refs/git-status-short.txt`; `changes.md` and `bootstrap.md` may show truncated human-readable snapshots that point to this full file. After commands that write session files, refresh the full snapshot last so it matches the current worktree state.
 
 3. **pre-compact**
    - Summarize task state into files before the session becomes too large.
@@ -97,7 +104,7 @@ docs/DEV_MAP.md
 
 5. **archive**
    - Mark completed sessions archived after the related change is complete.
-   - Keep decisions and validation summaries; do not keep raw logs unless explicitly required.
+   - Keep goal contract, decisions, validation summaries, and evidence handles; do not keep raw logs unless explicitly required in an allowed artifact path.
    - Preserve branch/worktree finish decision and any destructive cleanup confirmation.
 
 ## VS Code Remote Rules
@@ -117,7 +124,7 @@ docs/DEV_MAP.md
 2. Read `.agent/sessions/active.md`.
 3. Read current session `handoff.md`, `context.md`, `changes.md`, and `validation.md`.
 4. Read linked embedded spec artifacts.
-5. Run `git status --short`.
+5. Run `git status --short` and compare it with current session `refs/git-status-short.txt`; treat the `bootstrap.md` status block as a human-readable excerpt when it is truncated.
 6. Continue only after confirming current branch, dirty files, and remaining task.
 7. Read `.agent/workflow.json`, `.agent/workflow-profiles.json`, `.agent/task-board.json`, `.agent/role-contracts.json`, `docs/DEV_MAP.md`, and `.agent/worktrees.json` when the remaining task involves implementation, validation, review, delegation, or branch/worktree finish.
 8. Read any accepted subagent snapshots recorded in `handoff.md`, `changes.md`, or `validation.md`.
@@ -158,7 +165,7 @@ python3 .agent/tools/governance_hook.py --event session-start
 - `rollover` refreshes handoff, grounding, offload index, task map, bootstrap, and resume prompt for a new native session.
 - `compact` refreshes `handoff.md`, `resume-prompt.md`, and `bootstrap.md`.
 - `events` reads the append-only session event stream. It is the session lifecycle event source; markdown files remain the human-readable handoff layer.
-- `doctor` checks the active session files, validation notes, and dirty worktree continuity.
+- `doctor` checks the active session files, validation notes, and dirty worktree continuity through `refs/git-status-short.txt` so long dirty trees do not create false warnings from truncated markdown snapshots.
 - `agent_memory.py` provides cross-session timeline/search/detail over concise summaries, decisions, validations, and handoffs. Search output is bounded by `.agent/memory.json` recall limits; use `detail <id>` for selected full records. Its `doctor` command is read-only by default; use `init`, `ingest-session`, or `doctor --write` when refreshing stores is intended.
 - `agent_context.py` keeps governance docs, bootstraps, memory digests, embedded spec change docs, and subagent outputs within measured budgets. Its `doctor` command is read-only by default; use `scan` or `doctor --write` when refreshing the latest digest is intended.
 - `agent_runlog.py` records and retrieves compact evidence for validations, session lifecycle actions, and high-risk capability use.
@@ -171,6 +178,7 @@ python3 .agent/tools/governance_hook.py --event session-start
 - Do not write secrets, tokens, SSH keys, or private credentials to `.agent/memory/`.
 - Treat memory search results as historical context; confirm current facts from the repository before editing.
 - Keep memory class explicit: use `episodic` for session history, `semantic` for sourced project facts, and `procedural` only for reviewed workflow rules.
+- Promote procedural memory only through reviewed evidence such as a knowledge promotion bundle or review artifact; memory remains advisory even after promotion evidence exists.
 
 ## Context Budget Rules
 

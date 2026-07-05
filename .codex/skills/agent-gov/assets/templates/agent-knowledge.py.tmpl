@@ -5,12 +5,40 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 
 HARNESS_PATH = Path(".agent/harness.json")
+TEXT_SUFFIXES = {".json", ".jsonl", ".md", ".txt", ".toml", ".yaml", ".yml"}
+EVIDENCE_SCAN_PATHS = [
+    Path(".agent/runlog.jsonl"),
+    Path(".agent/memory/events.jsonl"),
+    Path(".agent/memory/latest.md"),
+    Path(".agent/memory/summaries"),
+    Path(".agent/sessions"),
+    Path(".agent/knowledge.json"),
+    Path("docs"),
+]
+RAW_TOOL_OUTPUT_MARKERS = [
+    (re.compile(r"^Chunk ID:\s+", re.MULTILINE), "raw tool output marker: Chunk ID"),
+    (re.compile(r"^Wall time:\s+", re.MULTILINE), "raw tool output marker: Wall time"),
+    (re.compile(r"^Original token count:\s+", re.MULTILINE), "raw tool output marker: Original token count"),
+]
+SECRET_LIKE_MARKERS = [
+    (re.compile(r"-----BEGIN (?:OPENSSH|RSA|DSA|EC) PRIVATE KEY-----"), "private key block"),
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "AWS access key id"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{30,}\b"), "GitHub token"),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"), "GitHub fine-grained token"),
+    (re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9_-]{19,}\b"), "API key-like token"),
+    (
+        re.compile(r"\bBearer\s+eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}\b"),
+        "JWT bearer token",
+    ),
+]
+SPEAKER_MARKER_RE = re.compile(r"^(?:User|Assistant|System|Developer|Human|AI|Tool):\s+\S", re.MULTILINE)
 
 
 def load_harness() -> dict:
@@ -33,6 +61,176 @@ def load_manifest(path: Path) -> dict | None:
 def doc_age_days(path: Path) -> int:
     mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
     return (datetime.now(timezone.utc) - mtime).days
+
+
+def has_value(value: object) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, dict, tuple, set)):
+        return bool(value)
+    return True
+
+
+def allowed_target_surface(surface: str, allowed: list[str]) -> bool:
+    if surface in allowed:
+        return True
+    return any(prefix.endswith("/") and surface.startswith(prefix) for prefix in allowed)
+
+
+def validate_promotion_bundles(manifest: dict, errors: list[str], warnings: list[str]) -> None:
+    policy = manifest.get("promotion_policy")
+    if not isinstance(policy, dict):
+        errors.append("knowledge manifest missing promotion_policy")
+        return
+    bundles = manifest.get("promotion_bundles")
+    if not isinstance(bundles, list):
+        errors.append("knowledge manifest promotion_bundles must be a list")
+        return
+
+    required_fields = policy.get("required_fields", [])
+    if not isinstance(required_fields, list):
+        errors.append("knowledge promotion_policy.required_fields must be a list")
+        required_fields = []
+    candidate_types = set(policy.get("candidate_types", []))
+    target_surfaces = policy.get("target_surfaces", [])
+    authority_levels = set(policy.get("authority_levels", []))
+    source_statuses = set(policy.get("source_statuses", []))
+    review_statuses = set(policy.get("review_statuses", []))
+    if not isinstance(target_surfaces, list):
+        errors.append("knowledge promotion_policy.target_surfaces must be a list")
+        target_surfaces = []
+
+    seen_ids: set[str] = set()
+    for index, bundle in enumerate(bundles):
+        label = f"promotion_bundles[{index}]"
+        if not isinstance(bundle, dict):
+            errors.append(f"{label} must be an object")
+            continue
+        bundle_id = str(bundle.get("id", "")).strip()
+        if bundle_id:
+            label = f"promotion bundle {bundle_id}"
+            if bundle_id in seen_ids:
+                errors.append(f"{label} duplicates another promotion bundle id")
+            seen_ids.add(bundle_id)
+
+        for field in required_fields:
+            if not has_value(bundle.get(field)):
+                errors.append(f"{label} missing required field: {field}")
+
+        candidate_type = str(bundle.get("candidate_type", "")).strip()
+        if candidate_types and candidate_type and candidate_type not in candidate_types:
+            errors.append(f"{label} has invalid candidate_type: {candidate_type}")
+
+        target_surface = str(bundle.get("target_surface", "")).strip()
+        if target_surface and target_surfaces and not allowed_target_surface(target_surface, target_surfaces):
+            errors.append(f"{label} has invalid target_surface: {target_surface}")
+
+        authority_level = str(bundle.get("authority_level", "")).strip()
+        if authority_levels and authority_level and authority_level not in authority_levels:
+            errors.append(f"{label} has invalid authority_level: {authority_level}")
+
+        source_status = str(bundle.get("source_status", "")).strip()
+        if source_statuses and source_status and source_status not in source_statuses:
+            errors.append(f"{label} has invalid source_status: {source_status}")
+
+        review_status = str(bundle.get("review_status", "")).strip()
+        if review_statuses and review_status and review_status not in review_statuses:
+            errors.append(f"{label} has invalid review_status: {review_status}")
+
+        decision = str(bundle.get("decision", "")).strip().lower()
+        procedural = candidate_type in {"procedural", "workflow"} or authority_level in {
+            "reviewed-procedural-rule",
+            "generated-policy",
+        }
+        if policy.get("procedural_requires_review_ref") and procedural and not has_value(bundle.get("review_ref")):
+            errors.append(f"{label} procedural or generated-policy promotion requires review_ref")
+
+        if policy.get("blocked_sources_cannot_be_promoted") and source_status == "blocked":
+            if decision not in {"rejected", "deferred"} or review_status == "reviewed":
+                errors.append(f"{label} has blocked source_status but is not rejected or deferred")
+
+        if policy.get("rejected_or_deferred_requires_reason"):
+            rejected_or_deferred = decision in {"rejected", "deferred"} or review_status in {"rejected", "deferred"}
+            reason = bundle.get("reason") or bundle.get("rejection_reason") or bundle.get("deferral_reason")
+            if rejected_or_deferred and not has_value(reason):
+                errors.append(f"{label} rejected or deferred promotion requires a reason")
+
+        if policy.get("do_not_promote_from_single_unverified_session") and procedural:
+            evidence = bundle.get("source_evidence")
+            evidence_count = len(evidence) if isinstance(evidence, list) else (1 if has_value(evidence) else 0)
+            if source_status != "verified" and decision == "promoted" and evidence_count <= 1:
+                errors.append(f"{label} procedural promotion cannot come from a single unverified source")
+
+    if not bundles:
+        warnings.append("knowledge manifest has no promotion_bundles recorded")
+
+
+def iter_text_files(paths: list[Path]) -> list[Path]:
+    files: list[Path] = []
+    for path in paths:
+        if not path.exists():
+            continue
+        if path.is_file():
+            if path.suffix in TEXT_SUFFIXES:
+                files.append(path)
+            continue
+        for child in path.rglob("*"):
+            if child.is_file() and child.suffix in TEXT_SUFFIXES:
+                files.append(child)
+    return sorted(set(files))
+
+
+def long_fenced_blocks(text: str, max_lines: int = 250) -> list[tuple[int, int]]:
+    blocks: list[tuple[int, int]] = []
+    in_block = False
+    start_line = 0
+    line_count = 0
+    for line_number, line in enumerate(text.splitlines(), start=1):
+        if line.strip().startswith("```"):
+            if in_block:
+                if line_count > max_lines:
+                    blocks.append((start_line, line_count))
+                in_block = False
+                line_count = 0
+            else:
+                in_block = True
+                start_line = line_number
+                line_count = 0
+        elif in_block:
+            line_count += 1
+    if in_block and line_count > max_lines:
+        blocks.append((start_line, line_count))
+    return blocks
+
+
+def validate_evidence_boundaries(manifest: dict, errors: list[str], warnings: list[str]) -> None:
+    policy = manifest.get("evidence_boundary_policy")
+    if not isinstance(policy, dict):
+        errors.append("knowledge manifest missing evidence_boundary_policy")
+        return
+    forbidden = policy.get("forbidden_in_tracked_ledgers", [])
+    if not isinstance(forbidden, list) or not forbidden:
+        errors.append("knowledge evidence_boundary_policy.forbidden_in_tracked_ledgers must be a non-empty list")
+
+    for path in iter_text_files(EVIDENCE_SCAN_PATHS):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            warnings.append(f"skipping non-UTF-8 governance file during evidence boundary scan: {path}")
+            continue
+        for pattern, description in RAW_TOOL_OUTPUT_MARKERS:
+            if pattern.search(text):
+                errors.append(f"{path} appears to contain {description}; store a compact summary and artifact pointer instead")
+        for pattern, description in SECRET_LIKE_MARKERS:
+            if pattern.search(text):
+                errors.append(f"{path} appears to contain {description}; remove secret-looking diagnostic material")
+        speaker_markers = SPEAKER_MARKER_RE.findall(text)
+        if len(speaker_markers) >= 8:
+            errors.append(f"{path} appears to contain a raw multi-turn transcript; store a compact summary instead")
+        for line_number, count in long_fenced_blocks(text):
+            errors.append(f"{path}:{line_number} contains a fenced block with {count} lines; store long logs as artifacts")
 
 
 def main(argv: list[str]) -> int:
@@ -94,6 +292,8 @@ def main(argv: list[str]) -> int:
                     errors.append(f"knowledge manifest source_links must be a list for {path}")
                 if not isinstance(item.get("known_stale_sections", []), list):
                     errors.append(f"knowledge manifest known_stale_sections must be a list for {path}")
+        validate_promotion_bundles(manifest, errors, warnings)
+        validate_evidence_boundaries(manifest, errors, warnings)
 
     for warning in warnings:
         print(f"warning: {warning}")

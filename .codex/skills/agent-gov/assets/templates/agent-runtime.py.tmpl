@@ -1,0 +1,329 @@
+#!/usr/bin/env python3
+"""Inspect and validate Skill-first runtime architecture governance."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+from typing import Any
+
+
+POLICY_PATH = Path(".agent/runtime-policy.json")
+MODELS_PATH = Path(".agent/model-profiles.json")
+RUNTIME_PATH = Path(".agent/agent-runtime.json")
+SECRET_REF_PREFIXES = ("env:", "file-ref:", "vault:", "proxy:", "op:", "keychain:")
+SECRET_KEY_PATTERN = re.compile(r"(api[_-]?key|token|secret|password|credential|private[_-]?key)", re.IGNORECASE)
+RAW_SECRET_PATTERN = re.compile(r"(sk-[A-Za-z0-9_-]{12,}|[A-Za-z0-9_/-]{32,})")
+CAPABILITY_KEYS = ("chat", "tool_calling", "structured_output", "streaming", "reasoning", "embeddings", "multimodal")
+CAPABILITY_MARKERS = {"verify-before-production", "provider-model-specific", "unsupported", "unknown"}
+PROJECT_TARGETS = {"agent", "mcp-server", "hybrid", "library"}
+MCP_CAPABILITY_TYPES = {"tools", "resources", "prompts"}
+MCP_TRANSPORTS = {"stdio", "http", "sse", "streamable-http", "websocket", "custom"}
+SAFE_SECRET_POLICY_VALUES = {"references-only", "outside-repo", "vault-or-proxy"}
+
+
+def load_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        raise ValueError(f"missing {path}")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{path} is invalid JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} must contain a JSON object")
+    return data
+
+
+def is_ref(value: str) -> bool:
+    return value.startswith(SECRET_REF_PREFIXES)
+
+
+def looks_like_raw_secret(value: str) -> bool:
+    if is_ref(value):
+        return False
+    if value.startswith(("http://", "https://")):
+        return "@" in value or "password=" in value.lower() or "token=" in value.lower()
+    return bool(RAW_SECRET_PATTERN.search(value))
+
+
+def scan_secret_values(value: Any, path: str = "") -> list[str]:
+    findings: list[str] = []
+    if isinstance(value, dict):
+        for key, item in value.items():
+            child_path = f"{path}.{key}" if path else str(key)
+            if str(key) == "credential_material" and isinstance(item, str) and item in SAFE_SECRET_POLICY_VALUES:
+                continue
+            if isinstance(item, str) and SECRET_KEY_PATTERN.search(str(key)) and item and not is_ref(item):
+                findings.append(f"{child_path} must use a secret reference prefix")
+            findings.extend(scan_secret_values(item, child_path))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            findings.extend(scan_secret_values(item, f"{path}[{index}]"))
+    elif isinstance(value, str) and looks_like_raw_secret(value):
+        findings.append(f"{path} looks like raw secret material")
+    return findings
+
+
+def profile_map(models: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    profiles = models.get("profiles", [])
+    if not isinstance(profiles, list):
+        return result
+    for item in profiles:
+        if isinstance(item, dict) and isinstance(item.get("id"), str):
+            result[item["id"]] = item
+    return result
+
+
+def validate_capabilities(profile_id: str, profile: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    capabilities = profile.get("capabilities")
+    if not isinstance(capabilities, dict):
+        return [f"model profile {profile_id} missing capabilities object"]
+    for key in CAPABILITY_KEYS:
+        if key not in capabilities:
+            errors.append(f"model profile {profile_id} missing capability: {key}")
+            continue
+        value = capabilities[key]
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, str) and value in CAPABILITY_MARKERS:
+            continue
+        errors.append(f"model profile {profile_id} capability {key} has invalid flag: {value!r}")
+    return errors
+
+
+def validate_all() -> tuple[list[str], list[str], dict[str, Any]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    try:
+        policy = load_json(POLICY_PATH)
+        models = load_json(MODELS_PATH)
+        runtime = load_json(RUNTIME_PATH)
+    except ValueError as exc:
+        return [str(exc)], warnings, {}
+
+    expected_schemas = {
+        str(POLICY_PATH): (policy, "agent-runtime-policy-v1"),
+        str(MODELS_PATH): (models, "agent-model-profiles-v1"),
+        str(RUNTIME_PATH): (runtime, "agent-runtime-selection-v1"),
+    }
+    for label, (data, schema) in expected_schemas.items():
+        if data.get("schema") != schema:
+            errors.append(f"{label} schema must be {schema}")
+
+    errors.extend(scan_secret_values(models))
+    errors.extend(scan_secret_values(runtime))
+
+    project_target = str(runtime.get("project_target", "agent")).strip() or "agent"
+    if project_target not in PROJECT_TARGETS:
+        errors.append(f"unknown project_target: {project_target}")
+
+    architecture_style = str(runtime.get("architecture_style", "")).strip()
+    if project_target == "mcp-server" and architecture_style not in {"skill-first-mcp", "project-defined"}:
+        errors.append("mcp-server target must use skill-first-mcp or project-defined architecture_style")
+    if project_target == "hybrid" and architecture_style not in {"skill-first-hybrid", "project-defined"}:
+        errors.append("hybrid target must use skill-first-hybrid or project-defined architecture_style")
+
+    adapters = set(runtime.get("runtime", {}).get("allowed_adapters", []))
+    selected_adapter = runtime.get("runtime", {}).get("default_adapter")
+    if not adapters:
+        errors.append(".agent/agent-runtime.json runtime.allowed_adapters must not be empty")
+    elif selected_adapter not in adapters:
+        errors.append(f"selected runtime adapter is not allowed: {selected_adapter}")
+
+    if architecture_style in {"skill-first", "skill-first-mcp", "skill-first-hybrid", "skill-first-library"}:
+        skill_registry = runtime.get("skill_registry", {})
+        skill_policy = skill_registry.get("policy", {}) if isinstance(skill_registry, dict) else {}
+        if not isinstance(skill_policy, dict) or skill_policy.get("skill_is_ability_boundary") is not True:
+            errors.append("skill-first runtime must include skill registry policy")
+        policy_boundary = runtime.get("runtime", {}).get("adapter_policy", {})
+        if policy_boundary.get("runtime_dependencies_are_application_owned") is not True:
+            errors.append("runtime dependencies must be application-owned")
+
+    profiles = profile_map(models)
+    if not profiles:
+        errors.append(".agent/model-profiles.json profiles must not be empty")
+    model_config = runtime.get("models", {})
+    if not isinstance(model_config, dict):
+        errors.append(".agent/agent-runtime.json models must be an object")
+        model_config = {}
+    models_required = model_config.get("required")
+    if not isinstance(models_required, bool):
+        models_required = project_target in {"agent", "hybrid"}
+    selected_profiles = model_config.get("selected_profiles", [])
+    if not isinstance(selected_profiles, list):
+        errors.append(".agent/agent-runtime.json models.selected_profiles must be a list")
+        selected_profiles = []
+    elif models_required and not selected_profiles:
+        errors.append(".agent/agent-runtime.json models.selected_profiles must not be empty when models.required is true")
+    for profile_id in selected_profiles:
+        if profile_id not in profiles:
+            errors.append(f"selected model profile is missing: {profile_id}")
+    for profile_id, profile in profiles.items():
+        errors.extend(validate_capabilities(profile_id, profile))
+        access = profile.get("access", {})
+        if not isinstance(access, dict):
+            errors.append(f"model profile {profile_id} missing access object")
+            continue
+        for key in ("api_key_ref", "model_ref"):
+            value = access.get(key, "")
+            if value and not is_ref(str(value)):
+                errors.append(f"model profile {profile_id} {key} must use a secret/reference prefix")
+        base_url_ref = str(access.get("base_url_ref", ""))
+        if base_url_ref and not (is_ref(base_url_ref) or base_url_ref.startswith(("https://", "http://"))):
+            errors.append(f"model profile {profile_id} base_url_ref must be a URL or reference")
+        if profile.get("enabled") is True and profile_id not in selected_profiles:
+            warnings.append(f"model profile {profile_id} is enabled but not selected")
+
+    mcp_server = runtime.get("mcp_server", {})
+    if project_target in {"mcp-server", "hybrid"}:
+        if not isinstance(mcp_server, dict) or mcp_server.get("enabled") is not True:
+            errors.append("mcp-server or hybrid target must enable mcp_server")
+            mcp_server = {}
+        capability_types = mcp_server.get("capability_types", [])
+        if not isinstance(capability_types, list) or not capability_types:
+            errors.append("mcp_server.capability_types must not be empty")
+            capability_types = []
+        for capability_type in capability_types:
+            if capability_type not in MCP_CAPABILITY_TYPES:
+                errors.append(f"unknown mcp_server capability type: {capability_type}")
+        transports = mcp_server.get("transports", [])
+        if not isinstance(transports, list) or not transports:
+            errors.append("mcp_server.transports must not be empty")
+            transports = []
+        for transport in transports:
+            if transport not in MCP_TRANSPORTS:
+                errors.append(f"unknown mcp_server transport: {transport}")
+        mcp_policy = mcp_server.get("policy", {}) if isinstance(mcp_server, dict) else {}
+        if not isinstance(mcp_policy, dict):
+            errors.append("mcp_server.policy must be an object")
+            mcp_policy = {}
+        if mcp_policy.get("raw_credentials_forbidden") is not True:
+            errors.append("mcp_server policy must forbid raw credentials")
+        if mcp_policy.get("credential_material") != "references-only":
+            errors.append("mcp_server credential material must be references-only")
+        if mcp_policy.get("destructive_tools_require_human_approval") is not True:
+            errors.append("mcp_server destructive tools must require human approval")
+        if mcp_policy.get("tool_schemas_required") is not True:
+            errors.append("mcp_server tool schemas must be required")
+    elif isinstance(mcp_server, dict) and mcp_server.get("enabled") is True:
+        warnings.append("mcp_server is enabled for a non-MCP project target")
+
+    if runtime.get("selection_status") == "needs-confirmation":
+        warnings.append("runtime architecture selection needs project confirmation")
+
+    report = {
+        "schema": "agent-runtime-report-v1",
+        "status": "fail" if errors else "pass",
+        "selection_status": runtime.get("selection_status", ""),
+        "project_target": project_target,
+        "architecture_style": architecture_style,
+        "default_adapter": runtime.get("runtime", {}).get("default_adapter", ""),
+        "optional_adapters": runtime.get("runtime", {}).get("optional_adapters", []),
+        "model_profiles_required": models_required,
+        "model_access_strategy": model_config.get("access_strategy", ""),
+        "selected_model_profiles": selected_profiles,
+        "mcp_server": {
+            "enabled": mcp_server.get("enabled", False) if isinstance(mcp_server, dict) else False,
+            "capability_types": mcp_server.get("capability_types", []) if isinstance(mcp_server, dict) else [],
+            "transports": mcp_server.get("transports", []) if isinstance(mcp_server, dict) else [],
+            "contract_manifest": mcp_server.get("contract_manifest", "") if isinstance(mcp_server, dict) else "",
+        },
+        "skill_registry": runtime.get("skill_registry", {}),
+        "warnings": warnings,
+        "errors": errors,
+    }
+    return errors, warnings, report
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    errors, warnings, _report = validate_all()
+    for warning in warnings:
+        print(f"warning: {warning}")
+    for error in errors:
+        print(f"error: {error}")
+    if errors:
+        return 1
+    print("agent runtime doctor passed")
+    return 0
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    _errors, _warnings, report = validate_all()
+    if args.json:
+        print(json.dumps(report, indent=2))
+        return 0
+    print(f"status: {report.get('status')}")
+    print(f"selection_status: {report.get('selection_status')}")
+    print(f"project_target: {report.get('project_target')}")
+    print(f"architecture_style: {report.get('architecture_style')}")
+    print(f"default_adapter: {report.get('default_adapter')}")
+    print(f"model_profiles_required: {report.get('model_profiles_required')}")
+    print(f"model_access_strategy: {report.get('model_access_strategy')}")
+    print(f"selected_model_profiles: {', '.join(report.get('selected_model_profiles', []))}")
+    mcp_server = report.get("mcp_server", {})
+    print(f"mcp_server_enabled: {mcp_server.get('enabled')}")
+    return 0 if report.get("status") == "pass" else 1
+
+
+def cmd_interview(args: argparse.Namespace) -> int:
+    questions = [
+        {
+            "id": "project_target",
+            "question": "Is the deliverable an agent, an MCP server, a hybrid agent-plus-MCP system, or a library?",
+            "recommended": "Use mcp-server when the project exposes tools/resources/prompts to MCP clients instead of orchestrating an agent.",
+        },
+        {
+            "id": "project_purpose",
+            "question": "What product or workflow will this runtime target serve?",
+            "recommended": "Describe the product outcome, not the framework.",
+        },
+        {
+            "id": "skills_are_first_class",
+            "question": "Should every durable capability be packaged as a Skill?",
+            "recommended": "Yes for Skill-first projects.",
+        },
+        {
+            "id": "expected_model_providers",
+            "question": "Which providers must be supported?",
+            "recommended": "qwen, deepseek, and any local/OpenAI-compatible endpoints you expect.",
+        },
+        {
+            "id": "workflow_complexity",
+            "question": "Is the workflow simple, moderate, or graph/long-running?",
+            "recommended": "Start simple/moderate; use LangGraph only for explicit graph state.",
+        },
+        {
+            "id": "structured_output_required",
+            "question": "Do tools require strict structured outputs?",
+            "recommended": "Yes if APIs or databases consume model outputs directly.",
+        },
+    ]
+    print(json.dumps({"schema": "agent-architecture-interview-v1", "questions": questions}, indent=2))
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    doctor = subparsers.add_parser("doctor", help="Validate runtime architecture governance")
+    doctor.set_defaults(func=cmd_doctor)
+    report = subparsers.add_parser("report", help="Print runtime architecture report")
+    report.add_argument("--json", action="store_true")
+    report.set_defaults(func=cmd_report)
+    interview = subparsers.add_parser("interview", help="Print initialization interview questions")
+    interview.set_defaults(func=cmd_interview)
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

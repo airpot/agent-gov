@@ -39,10 +39,12 @@ scripts/
 - Use `python3 scripts/agent_spec.py new-change <name>` for new changes.
 - Use `python3 scripts/agent_spec.py status --change <name> --json` for change status.
 - Use `python3 scripts/agent_spec.py archive <name>` for completed changes.
+- Keep `status`, `validate`, `doctor`, and `archive` on one canonical change-resolution path. If a command accepts a change name or path, it should resolve the same active/archive identity as the other commands, reject ambiguous active/archive matches, and provide an actionable error instead of letting one command report a change as complete while another treats it as missing or draft.
 - Treat artifact status as `missing`, `draft`, or `done`; scaffolded templates are drafts until their required sections and change-specific tasks are filled.
 - Treat change state as `blocked` until all required artifacts are `done`; `ready` means artifacts are complete but implementation tasks remain; `all_done` means all checkbox tasks are complete.
 - Treat an active `all_done` change as unfinished governance work. Archive it before completion, handoff, merge, release, or archive-readiness claims.
 - `python3 scripts/agent_spec.py doctor` must fail when an `all_done` change remains under `openspec/changes/<name>/`; the expected fix is `python3 scripts/agent_spec.py archive <name>`.
+- `archive` must resolve only active changes unless an explicit force path is documented; archived changes may be viewed but should not be re-archived through a silently different code path.
 - Add project context that tells agents this repository uses embedded spec-driven development.
 - Keep spec context short and stable.
 - Use embedded spec changes for non-trivial project changes, not for ordinary checkpoint notes.

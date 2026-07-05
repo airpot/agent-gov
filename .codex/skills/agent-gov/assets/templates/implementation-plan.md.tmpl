@@ -9,12 +9,24 @@
 - Target branch or worktree:
 - Baseline validation:
 
+## Goal Contract
+
+- Objective:
+- User-approved outcome:
+- Non-goals:
+- Constraints and risk boundaries:
+- Success evidence:
+- Stop conditions and escalation triggers:
+- Current decision summary:
+- Open decisions:
+
 ## Plan Quality Gate
 
 - Exact files are listed before tasks.
 - Commands include expected results.
 - Steps are small enough to verify independently.
 - Behavior changes include red/green/refactor evidence.
+- External sources that influence the plan are listed with `verified`, `partial`, or `blocked` status.
 - No placeholders such as TBD, TODO, "implement later", or "fill in details".
 
 ## Task Risk and Autonomy
@@ -28,10 +40,41 @@
 ## Implementation Discipline Gate
 
 - Assumptions and ambiguity:
-- Simplest viable approach:
+- Minimal-sufficient ladder:
+  - Needed now or can skip/defer:
+  - Existing codebase pattern/helper:
+  - Standard library or shell/toolchain:
+  - Native platform/database/framework/runtime:
+  - Existing dependency:
+  - Small direct edit:
+- Safety carve-outs preserved:
+  - Trust-boundary validation:
+  - Data-loss handling:
+  - Security/privacy:
+  - Accessibility:
+  - Explicit requirements:
+  - Required checks:
 - Abstractions, new dependencies, or broad cleanup justified:
+- Known simplification ceiling and upgrade trigger:
 - Files intentionally untouched:
 - Success criteria:
+
+## External Sources
+
+- Verified:
+- Partial:
+- Blocked or excluded:
+
+## Knowledge Promotion Candidates
+
+- Candidate:
+- Candidate type: episodic | semantic | procedural | architecture | validation | workflow | domain-term
+- Source evidence:
+- Source status: verified | partial | blocked
+- Target surface:
+- Authority level: advisory-memory | durable-project-fact | reviewed-procedural-rule | generated-policy
+- Review or validation reference:
+- Decision: promote | reject | defer
 
 ## Diff Boundary
 

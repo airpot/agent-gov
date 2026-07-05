@@ -1,0 +1,143 @@
+# Agent Runtime Architecture
+
+This project uses agent-gov to govern product runtime architecture decisions. The default target is a Skill-first agent, but initialization can also select an MCP server, a hybrid agent-plus-MCP system, or a non-agent library:
+
+```text
+Skill = ability boundary
+Agent = Skill composer
+MCP server = Skill-backed tool/resource/prompt provider for MCP clients
+Runtime adapter = execution host
+Model profile = replaceable LLM access boundary
+Application layer = product-owned API, CLI, Web UI, workers, sessions, memory, traces, and DB
+agent-gov = governance control plane
+```
+
+## Generated Configs
+
+- `.agent/runtime-policy.json`: architecture contract, project-target interview questions, decision rules, and adapter policy.
+- `.agent/model-profiles.json`: Qwen, DeepSeek, OpenAI-compatible, optional LiteLLM, and local model profiles with explicit capability flags.
+- `.agent/agent-runtime.json`: selected project target, architecture, default runtime adapter, model strategy, MCP server boundary, skill registry, and application-state boundary.
+- `scripts/agent_runtime.py`: dependency-free doctor/report/interview CLI.
+
+Run:
+
+```bash
+python3 scripts/agent_runtime.py doctor
+python3 scripts/agent_runtime.py report --json
+```
+
+## Initialization Interview
+
+The initializer cannot read transient chat history. The model running initialization should interview the user, then pass structured JSON through `--architecture-intake <file>`.
+
+Structured intake is not automatically final. Omit `selection_status`, set it to `needs-confirmation`, or set `architecture_confirmed` to `false` until the user has explicitly confirmed the architecture decision; only `selection_status: "confirmed"` or `architecture_confirmed: true` marks the selection as confirmed.
+
+Example intake:
+
+```json
+{
+  "schema": "agent-architecture-intake-v1",
+  "project_target": "agent",
+  "project_purpose": "Skill-first product agent",
+  "skills_are_first_class": true,
+  "expected_model_providers": ["qwen", "deepseek"],
+  "language_preference": ["python"],
+  "workflow_complexity": "moderate",
+  "structured_output_required": true,
+  "tool_calling_required": true,
+  "long_running_workflows": false,
+  "model_access_strategy": "openai-compatible-first",
+  "default_runtime_adapter": "strands",
+  "selection_status": "confirmed"
+}
+```
+
+For an MCP server project, use `project_target: "mcp-server"` and omit model providers unless the MCP server itself calls models:
+
+```json
+{
+  "schema": "agent-architecture-intake-v1",
+  "project_target": "mcp-server",
+  "project_purpose": "Project-owned MCP server exposing governed tools",
+  "mcp_capability_types": ["tools", "resources"],
+  "mcp_transports": ["stdio"],
+  "selection_status": "confirmed"
+}
+```
+
+Use the generated interview prompt when needed:
+
+```bash
+python3 scripts/agent_runtime.py interview
+```
+
+## Runtime Recommendation
+
+The standard is the Skill-first contract plus an explicit project target, not a single framework.
+
+- Default adapter: Strands, because it is closest to Agent Skills / `SKILL.md` style runtime activation.
+- Typed tooling adapter: Pydantic AI, when strict schemas or structured outputs are central.
+- Workflow adapter: LangGraph, only when graph state, resumable workflows, or long-running orchestration are explicit requirements.
+- MCP server target: use application-owned MCP SDK/FastMCP/custom server code only when the deliverable exposes tools, resources, or prompts to MCP clients.
+- Model access: OpenAI-compatible first, with optional LiteLLM gateway for routing Qwen, DeepSeek, OpenAI, local OpenAI-compatible servers, or project proxies.
+
+agent-gov must not import or install runtime frameworks. Runtime dependencies belong to the application.
+
+## MCP Server Target
+
+MCP server projects are not forced to select an agent runtime or model provider. For `project_target: "mcp-server"`, `models.required` is false by default and `mcp_server` records:
+
+- exposed capability types: `tools`, `resources`, and/or `prompts`
+- transports such as `stdio`, `http`, `sse`, `streamable-http`, or project-defined custom transport
+- host/client boundary
+- contract manifest path
+- schema, credential, resource-catalog, and destructive-operation policies
+
+`.agent/mcp-policy.json` still governs external MCP or integration trust boundaries. The `mcp_server` block governs the product MCP server being built by this repository.
+
+## Skill Boundary
+
+`SKILL.md` is not automatically a callable tool. Each product Skill that exposes executable runtime behavior should define a narrow runtime contract, such as:
+
+```text
+skill-runtime.json
+  tool ids
+  input schemas
+  output schemas
+  file permissions
+  network permissions
+  resource ids
+  model capability requirements
+eval commands
+```
+
+For MCP server projects, map Skills to explicit MCP tool/resource/prompt contracts; do not expose broad `SKILL.md` instructions directly as callable tools.
+
+Keep broad domain instructions in `SKILL.md`, detailed knowledge in `references/`, deterministic operations in `scripts/`, and generated or reusable assets in `assets/`.
+
+## Model Profiles
+
+Do not infer behavior from OpenAI-compatible API shape alone. Confirm these per selected model:
+
+- tool calling
+- strict JSON / structured output
+- streaming
+- reasoning behavior
+- context length and caching
+- multimodal behavior
+
+Store credentials only as references such as `env:`, `file-ref:`, `vault:`, `proxy:`, `op:`, or `keychain:`. Do not store API keys, tokens, private base URLs, SSH keys, or raw database URLs in repository files.
+
+## State Boundary
+
+agent-gov session state is development governance state. Product runtime state belongs to the application:
+
+- user conversations
+- product memory
+- traces
+- tool execution logs
+- queues
+- application databases
+- vector stores or object stores
+
+Do not store product runtime state in `.agent/sessions/`, `.agent/memory/`, or `.agent/runlog.jsonl`.

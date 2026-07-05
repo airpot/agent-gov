@@ -54,6 +54,21 @@ def run_git(args: list[str], fallback: str = "unknown") -> str:
     return result.stdout.strip() or fallback
 
 
+def git_status_short() -> str:
+    try:
+        result = subprocess.run(
+            ["git", "status", "--short"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout.rstrip("\n")
+
+
 def read(path: Path, fallback: str = "") -> str:
     if not path.exists():
         return fallback
@@ -134,7 +149,7 @@ def resume_steps(session_id: str, workspace: str, openspec_change: str) -> list[
     steps.append("Review recent append-only session events with `python3 .agent/tools/agent_session.py events --limit 10` when handoff state is unclear.")
     steps.extend(
         [
-            "Run `git status --short`.",
+            f"Run `git status --short` and compare it with `.agent/sessions/{session_id}/refs/git-status-short.txt`.",
             "Confirm current branch, worktree path, dirty files, validation status, workflow gate status, and the next task before editing."
             if profile != "core"
             else "Confirm current branch, dirty files, validation status, and the next task before editing.",
@@ -405,6 +420,7 @@ def active_task_summary() -> list[str]:
 def ensure_session_offload_files(session_id: str) -> None:
     directory = session_dir(session_id)
     write(directory / "refs" / ".gitkeep", "")
+    refresh_git_status_snapshot(session_id)
     if not offload_path(session_id).exists():
         write(offload_path(session_id), "")
     if not grounding_path(session_id).exists():
@@ -412,9 +428,28 @@ def ensure_session_offload_files(session_id: str) -> None:
     refresh_offload_artifacts(session_id)
 
 
+def git_status_snapshot_path(session_id: str) -> Path:
+    return session_dir(session_id) / "refs" / "git-status-short.txt"
+
+
+def refresh_git_status_snapshot(session_id: str, git_status: str | None = None) -> Path:
+    path = git_status_snapshot_path(session_id)
+    text = (git_status_short() if git_status is None else git_status).rstrip("\n")
+    # Writing the snapshot can make the snapshot file itself appear in
+    # `git status --short`; repeat until the recorded status is stable.
+    for _ in range(3):
+        write(path, f"{text}\n" if text else "")
+        current = git_status_short().rstrip("\n")
+        if current == text:
+            return path
+        text = current
+    write(path, f"{text}\n" if text else "")
+    return path
+
+
 def render_grounding(session_id: str, note: str | None = None, checked: list[str] | None = None) -> str:
     artifacts = artifacts_for(session_id)
-    git_status = run_git(["status", "--short"], fallback="")
+    git_status = git_status_short()
     checked_lines = [f"- {item}" for item in checked or []] or ["- Not recorded yet."]
     note_lines = [f"- {note}"] if note else ["- None."]
     return "\n".join(
@@ -566,7 +601,7 @@ def limited_text_block(text: str, limit: int) -> list[str]:
     if len(lines) <= limit:
         return lines
     hidden = len(lines) - limit
-    return lines[:limit] + [f"... {hidden} more line(s); run `git status --short` for the full current state."]
+    return lines[:limit] + [f"... {hidden} more line(s); inspect session `refs/git-status-short.txt` or run `git status --short` for the full current state."]
 
 
 def artifacts_for(session_id: str) -> dict:
@@ -583,12 +618,13 @@ def write_bootstrap(session_id: str) -> Path:
     workspace = artifacts.get("workspace_path", str(Path.cwd()))
     openspec_change = artifacts.get("openspec_change", "none")
     goal = artifacts.get("goal", "unknown")
-    git_status = run_git(["status", "--short"], fallback="")
+    git_status = git_status_short()
+    git_status_snapshot = refresh_git_status_snapshot(session_id, git_status)
     git_status_lines = limited_text_block(git_status, 40)
     start_steps = [
         f"`cd {workspace}`",
         "Read this file fully.",
-        "Run `git status --short` and compare with the snapshot below.",
+        f"Run `git status --short` and compare with `.agent/sessions/{session_id}/refs/git-status-short.txt`; the inline block below may be truncated.",
     ]
     if Path(".agent/workflow.json").exists() and Path(".agent/worktrees.json").exists():
         start_steps.append("Read `.agent/workflow.json` and `.agent/worktrees.json` when continuing implementation, validation, or finish work.")
@@ -620,38 +656,39 @@ def write_bootstrap(session_id: str) -> Path:
         "```text",
         *git_status_lines,
         "```",
+        f"Full status snapshot: `{git_status_snapshot}`.",
         "",
         "## Handoff Summary",
         "",
-        *first_nonempty_lines(directory / "handoff.md", 80),
+        *first_nonempty_lines(directory / "handoff.md", 55),
         "",
         "## Changed Files",
         "",
-        *first_nonempty_lines(directory / "changes.md", 80),
+        *first_nonempty_lines(directory / "changes.md", 35),
         "",
         "## Validation",
         "",
-        *first_nonempty_lines(directory / "validation.md", 80),
+        *first_nonempty_lines(directory / "validation.md", 45),
         "",
         "## Truth-First Grounding",
         "",
-        *first_nonempty_lines(grounding_path(session_id), 80),
+        *first_nonempty_lines(grounding_path(session_id), 45),
         "",
         "## Offload Index",
         "",
-        *first_nonempty_lines(offload_index_path(session_id), 80),
+        *first_nonempty_lines(offload_index_path(session_id), 35),
         "",
         "## Recent Session Events",
         "",
-        *format_recent_events(session_id, 8),
+        *format_recent_events(session_id, 5),
         "",
         "## Memory Digest",
         "",
-        *first_nonempty_lines(Path(".agent/memory/latest.md"), 40),
+        *first_nonempty_lines(Path(".agent/memory/latest.md"), 18),
         "",
         "## Context Budget",
         "",
-        *first_nonempty_lines(Path(".agent/context/latest.md"), 40),
+        *first_nonempty_lines(Path(".agent/context/latest.md"), 18),
         "",
         "## Resume Prompt",
         "",
@@ -664,6 +701,15 @@ def write_bootstrap(session_id: str) -> Path:
     session_bootstrap = directory / "bootstrap.md"
     write(session_bootstrap, bootstrap)
     write(BOOTSTRAP_PATH, bootstrap)
+    final_snapshot = refresh_git_status_snapshot(session_id)
+    final_status = read(final_snapshot).rstrip("\n")
+    if final_status != git_status.rstrip("\n"):
+        old_block = "\n".join(["```text", *git_status_lines, "```"])
+        new_block = "\n".join(["```text", *limited_text_block(final_status, 40), "```"])
+        bootstrap = bootstrap.replace(old_block, new_block, 1)
+        write(session_bootstrap, bootstrap)
+        write(BOOTSTRAP_PATH, bootstrap)
+        refresh_git_status_snapshot(session_id)
     return session_bootstrap
 
 
@@ -686,17 +732,20 @@ def compact_session(
         append(directory / "handoff.md", f"\n## Compaction {timestamp}\n\n{summary}\n")
     if next_step:
         append(directory / "handoff.md", f"\n## Next Step {timestamp}\n\n{next_step}\n")
-    git_status = run_git(["status", "--short"], fallback="")
+    git_status = git_status_short()
+    git_status_snapshot = refresh_git_status_snapshot(session_id, git_status)
     git_status_text = "\n".join(limited_text_block(git_status, 80))
     append(
         directory / "changes.md",
-        f"\n## Git Status Snapshot {timestamp}\n\n```text\n{git_status_text}\n```\n",
+        f"\n## Git Status Snapshot {timestamp}\n\nFull status snapshot: `{git_status_snapshot}`.\n\n```text\n{git_status_text}\n```\n",
     )
     if ingest_reason:
         maybe_ingest_memory(session_id, ingest_reason)
     maybe_scan_context()
     refresh_resume_prompt(session_id)
-    return write_bootstrap(session_id)
+    path = write_bootstrap(session_id)
+    refresh_git_status_snapshot(session_id)
+    return path
 
 
 def create_session_files(
@@ -906,6 +955,7 @@ python3 .agent/tools/agent_session.py bootstrap
         command="agent_session.py start",
         artifacts=[str(session_dir(session_id) / "resume-prompt.md")],
     )
+    write_bootstrap(session_id)
     print(f"started {session_id}")
     print(f"resume: .agent/sessions/{session_id}/resume-prompt.md")
     return 0
@@ -949,6 +999,7 @@ def cmd_checkpoint(args: argparse.Namespace) -> int:
         command="agent_session.py checkpoint",
         artifacts=[str(directory / "handoff.md"), str(directory / "validation.md")],
     )
+    write_bootstrap(session_id)
 
     print(f"checkpointed {session_id}")
     return 0
@@ -970,6 +1021,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 def cmd_resume(args: argparse.Namespace) -> int:
     session_id = args.session_id or require_active()
     refresh_resume_prompt(session_id)
+    refresh_git_status_snapshot(session_id)
     prompt = session_dir(session_id) / "resume-prompt.md"
     if not prompt.exists():
         print(f"error: missing resume prompt: {prompt}", file=sys.stderr)
@@ -1010,6 +1062,7 @@ def cmd_compact(args: argparse.Namespace) -> int:
         command="agent_session.py compact",
         artifacts=[str(path), str(session_dir(session_id) / "resume-prompt.md")],
     )
+    path = write_bootstrap(session_id)
     print(f"compacted {session_id}")
     print(f"bootstrap: {path}")
     print(f"resume: {session_dir(session_id) / 'resume-prompt.md'}")
@@ -1069,6 +1122,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             "offload-index.md",
             "task-map.mmd",
             "refs/.gitkeep",
+            "refs/git-status-short.txt",
         ):
             if not (directory / name).exists():
                 errors.append(f"missing {directory / name}")
@@ -1087,15 +1141,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         if validation.strip() in {f"# Validation: {session_id}", f"# Validation: {session_id}\n"} or not validation_entries:
             warnings.append("validation.md has no recorded validation")
 
-        git_status = run_git(["status", "--short"], fallback="")
-        if git_status and git_status not in read(directory / "changes.md"):
-            warnings.append("worktree has changes not reflected verbatim in changes.md")
-
         refresh_resume_prompt(session_id)
         if not grounding_path(session_id).exists():
             write(grounding_path(session_id), render_grounding(session_id))
         refresh_offload_artifacts(session_id)
         write_bootstrap(session_id)
+        git_status = git_status_short()
+        git_status_snapshot = refresh_git_status_snapshot(session_id, git_status)
+        if git_status and read(git_status_snapshot).rstrip("\n") != git_status.rstrip("\n"):
+            warnings.append(f"worktree has changes not reflected in {git_status_snapshot}")
 
     for warning in warnings:
         print(f"warning: {warning}")
@@ -1314,6 +1368,7 @@ def cmd_offload_recall(args: argparse.Namespace) -> int:
 def cmd_offload_map(args: argparse.Namespace) -> int:
     session_id = args.session_id or require_active()
     refresh_offload_artifacts(session_id)
+    refresh_git_status_snapshot(session_id)
     text = task_map_path(session_id).read_text(encoding="utf-8")
     print(text)
     return 0
@@ -1348,6 +1403,7 @@ def cmd_rollover(args: argparse.Namespace) -> int:
         command="agent_session.py rollover",
         artifacts=[str(bootstrap), str(session_dir(session_id) / "resume-prompt.md")],
     )
+    bootstrap = write_bootstrap(session_id)
     print(bootstrap.read_text(encoding="utf-8"))
     return 0
 

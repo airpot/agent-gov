@@ -19,7 +19,9 @@ Use this template only when the active platform and higher-priority instructions
 - Workflow gate:
   - Classify task risk with `.agent/risk-zones.json`; do not autonomously modify critical-risk scope.
   - For worker tasks: report `DONE`, `DONE_WITH_CONCERNS`, `NEEDS_CONTEXT`, or `BLOCKED`.
-  - For implementation tasks: prefer the simplest direct change, justify new abstractions, and keep changes inside the declared write boundary.
+  - For implementation tasks: prefer the minimal sufficient path, check local reuse/stdlib/native/existing dependency options before new code, justify new abstractions, and keep changes inside the declared write boundary.
+  - For research tasks: label each source `verified`, `partial`, or `blocked`; do not present blocked-source content as fact.
+  - For complexity-audit tasks: report only delete/reuse/stdlib/native/dependency findings and route correctness/security issues to normal review.
   - For review tasks: run `spec_reviewer` before `quality_reviewer`.
   - Do not claim validation unless you ran or inspected the stated command evidence.
 - Output budget:
@@ -46,6 +48,7 @@ Then provide JSON:
   "critical_finding": "short finding",
   "next_dependency": "recommended next task or none",
   "estimated_risk_level": "low | medium | high | critical",
+  "source_status": [],
   "validation": []
 }
 ```

@@ -25,6 +25,7 @@ openspec/config.yaml
   spec.json
   workflow.json
   workflow-profiles.json
+  loop-engineering.json
   task-board.json
   risk-zones.json
   review-policy.json
@@ -36,6 +37,10 @@ openspec/config.yaml
   dev-map.json
   skill-hygiene.json
   project-skills.json
+  skill-runtime.json
+  runtime-policy.json
+  model-profiles.json
+  agent-runtime.json
   memory.json
   context.json
   capabilities.json
@@ -72,6 +77,7 @@ openspec/config.yaml
       offload-index.md
       task-map.mmd
       refs/
+        git-status-short.txt
   templates/
     session.md.tmpl
     handoff.md.tmpl
@@ -123,6 +129,7 @@ scripts/
   agent_resources.py
   agent_skill_hygiene.py
   agent_project_skills.py
+  agent_runtime.py
   agent_runlog.py
   agent_tooling.py
   agent_security.py
@@ -139,7 +146,10 @@ docs/
   SECURITY.md
   TOOLING.md
   QUALITY_SCORE.md
+  LOOP_ENGINEERING.md
   RESOURCES.md
+  AGENT_RUNTIME_ARCHITECTURE.md
+  SKILL_RUNTIME.md
   AI_CODING_GLOSSARY.md
   DOMAIN_GLOSSARY.md
   DEV_MAP.md
@@ -164,6 +174,7 @@ Makefile                   # optional if missing
 - Use `.agent/project-layout.json` as the fixed directory contract for top-level project structure.
 - Use `.agent/spec.json` and `scripts/agent_spec.py` as the embedded specification policy and command surface.
 - Use `.agent/workflow.json` as the lifecycle gate policy for risk classification, design/spec approval, plan quality, implementation discipline, diff traceability, isolated work, TDD, debugging, review order, human review evidence, completion proof, and finish choices.
+- Use `.agent/loop-engineering.json` as the bounded-loop policy for work loops, review-fix loops, debugging loops, eval optimization loops, and session recovery loops.
 - Use `.agent/risk-zones.json` as the task risk and autonomy policy.
 - Use `.agent/review-policy.json` as the diff traceability, automated review boundary, and human review evidence policy.
 - Use `.agent/worktrees.json` as the git worktree isolation and guarded cleanup policy.
@@ -174,31 +185,42 @@ Makefile                   # optional if missing
 - Use `.agent/subagents.json` as the delegated agent role, boundary, and snapshot contract when subagents are allowed.
 - Use `.agent/role-contracts.json` to enforce role inputs, outputs, forbidden actions, and finder-cannot-fix separation.
 - Use `.agent/hooks.json` as the platform-neutral hook policy, with native Codex and Claude hook adapters treated as generated projections.
-- Use `.agent/knowledge.json` as the durable knowledge manifest for ownership, review dates, source links, and known stale sections.
+- Use `.agent/knowledge.json` as the durable knowledge manifest for ownership, review dates, source links, known stale sections, promotion policy, evidence-boundary policy, and recorded knowledge promotion bundles.
 - Use `.agent/dev-map.json` and `docs/DEV_MAP.md` as a concise repository navigation map for entry points, ownership, read-before-edit docs, and common patterns.
 - Use `.agent/skill-hygiene.json` and `scripts/agent_skill_hygiene.py` for read-only skill topology, source/hash, symlink, frontmatter, stale, and risk-signal scans.
 - Use `.agent/project-skills.json` and `scripts/agent_project_skills.py` as the repo-local project skill registry and lifecycle fact surface for managed, unmanaged, orphaned, missing, drifted, pinned, unpinned, unknown-source, unsafe-path, manifest-mismatch, capability-mismatch, and review-pending states.
+- Use `.agent/skill-runtime.json` and `docs/SKILL_RUNTIME.md` as the portable Skill/plugin runtime governance surface for canonical Skill cores, thin host adapters, runtime modes, command lanes, review lanes, benchmark evidence, and deliberate shortcut/debt ledgers.
 - Default skill installation inside a project to project-local `.codex/skills/<skill>`. A global/user-level install requires explicit user intent such as `--global`.
 - Include both project-local and global installed skills in governance reports. Global discoveries are external facts, not repo-editable source paths; unmanaged global installs require registry coverage or an explicit policy exception.
 - Keep `skills.manifest.json` as the production/release registry; keep workspace-only helper skills in `.agent/project-skills.json` plus `workspace-tools.manifest.json` when present, not in the production manifest.
 - Do not let `scripts/agent_project_skills.py` install, update, delete, or overwrite skills. It reports, doctors, checks one skill, and snapshots hashes; agents perform lifecycle changes through embedded specs, validation, review-fix-review, and archive.
-- Use `.agent/memory.json` as the cross-session memory policy for summaries, indexes, privacy redaction, and progressive retrieval.
+- Use `.agent/memory.json` as the cross-session memory policy for summaries, indexes, privacy redaction, progressive retrieval, advisory-only authority, and review references for procedural memories.
 - Use `.agent/sessions/<session-id>/offload.jsonl`, `offload-index.md`, `task-map.mmd`, and `grounding.md` for evidence-backed session offload and truth-first rollover. Offload entries are advisory; they must point to durable evidence and cannot override current repo truth.
+- Use `.agent/sessions/<session-id>/refs/git-status-short.txt` as the runtime full dirty-tree snapshot. It is generated by session commands and should match current `git status --short`; `.agent/templates/refs/.gitkeep` is only the template placeholder.
 - Use `.agent/context.json` as the context budget policy for agent-facing docs, bootstrap packets, memory digests, embedded spec change docs, and subagent output size.
 - Use `.agent/capabilities.json` as the capability, skill/tool/MCP taxonomy, integration, permission, and risk registry for agent-visible skills, tools, resources, adapters, and integrations.
 - Use `.agent/resources.json` as the concrete project resource asset catalog for servers, databases, repositories, deployment targets, compute machines, endpoint references, credential references, usage rules, allowed actions, owners, risk levels, lifecycle state, and health checks.
 - Use `scripts/agent_resources.py match --intent "<intent>" --json` before choosing a resource, then `scripts/agent_resources.py resolve <resource-id> --json` before using it.
 - Keep raw account passwords, tokens, SSH private keys, database URLs with embedded credentials, and private secret material out of `.agent/resources.json`; use `.agent/templates/resource-secrets.local.env.tmpl`, ignored `.agent/local/` files, or external `env:`, `file-ref:`, `vault:`, `proxy:`, `op:`, or `keychain:` references.
 - Treat high-risk, production write, destructive, release, billing, privileged, or cost-bearing resource use as approval-gated work and record high-risk use in `.agent/runlog.jsonl` when available.
-- Use `.agent/runlog.jsonl` as the append-only evidence ledger for validation runs, review-fix gates, and high-risk capability use; use `.agent/sessions/events.jsonl` as the append-only session lifecycle stream.
+- Use `.agent/runtime-policy.json`, `.agent/model-profiles.json`, `.agent/agent-runtime.json`, `scripts/agent_runtime.py`, and `docs/AGENT_RUNTIME_ARCHITECTURE.md` as the Skill-first runtime architecture governance surface for `agent`, `mcp-server`, `hybrid`, and `library` project targets.
+- During initialization, ask or consume a project architecture interview and pass deterministic structured input with `--architecture-intake <json-file>` when available; do not rely on transient chat history as durable architecture state.
+- Treat Skill-first as the architecture contract: Skills define ability boundaries, agents compose Skills, MCP servers expose governed tool/resource/prompt contracts, runtime adapters or protocol SDKs execute them, model profiles define replaceable LLM access when models are required, and application code owns user sessions, product memory, MCP calls, traces, queues, and databases.
+- Treat Strands as the default adapter for Skill-first agent runtime activation, Pydantic AI as an optional typed-tooling adapter, LangGraph as an optional workflow adapter for explicit graph/state-machine needs, and MCP SDK/FastMCP/custom code as application-owned MCP server adapters. agent-gov must not import or install these runtime dependencies.
+- Use `.agent/model-profiles.json` to represent Qwen, DeepSeek, OpenAI-compatible, optional LiteLLM, and local model endpoints through references and explicit capability flags; do not infer tool calling or structured output support from API shape alone.
+- Use `.agent/runlog.jsonl` as the compact append-only evidence ledger for validation runs, review-fix gates, and high-risk capability use; use `.agent/sessions/events.jsonl` as the append-only session lifecycle stream.
+- Keep evidence stores separated: raw or long diagnostic output belongs in ignored local artifacts or declared artifact paths, while tracked runlog, memory, session, and knowledge files hold summaries, evidence handles, and review references.
 - Use `.agent/tooling.json` as the agent-computer-interface policy for bounded, path-first, line-numbered repository inspection.
 - Use `.agent/security.json` as the optional policy-as-code and supply-chain command registry.
 - Use `.agent/evals.json` and `.agent/evals/latest.md` as the local governance health score configuration and dashboard.
-- Use `.agent/mechanical-checks.json`, `.agent/baselines.json`, and `scripts/agent_verify.py` for hard mechanical checks, template rendering checks, test-count baselines, and before/after regression comparison.
-- Use `.agent/harness-evolution.json` as the incident taxonomy and promotion policy for repeated failures; record classifications with `python3 scripts/agent_gc.py classify --category <category> --summary <summary>`.
-- Use `.agent/mcp-policy.json` as the optional MCP trust-boundary and approval policy; it is generated disabled by default before any MCP server is enabled, and raw credentials must remain behind vault/proxy boundaries outside the repo, harness, and sandbox.
+- Use `.agent/mechanical-checks.json`, `.agent/baselines.json`, and `scripts/agent_verify.py` for hard mechanical checks, template rendering checks, test-count baselines, goal contract checks, knowledge governance checks, evidence-boundary lint, and before/after regression comparison.
+- Use `scripts/agent_knowledge.py` to validate promotion bundle shape, blocked-source handling, procedural review references, single-unverified-source protection, and raw transcript/log/secret leakage risk in tracked governance stores.
+- Use `.agent/harness-evolution.json` as the incident taxonomy and promotion policy for repeated failures; record classifications with `python3 scripts/agent_gc.py classify --category <category> --summary <summary>`. Use `loop_gap` when the repeated failure was caused by a missing loop goal, signal, budget, stop condition, evidence path, or escalation rule.
+- Use `.agent/mcp-policy.json` as the optional external MCP/integration trust-boundary and approval policy; it is separate from the product MCP server target recorded in `.agent/agent-runtime.json.mcp_server`, and raw credentials must remain behind vault/proxy boundaries outside the repo, harness, and sandbox.
 - Use `.agent/governance-gc.json` and `scripts/agent_gc.py` for periodic governance gardening.
 - Use `.agent/skill-distribution.json` as the skill distribution policy for project-local `.codex/skills`, optional compatibility sync directories, and explicit global installs.
+- For any governance rule projected into multiple host instruction files, keep one canonical source and add a small parity check, hash snapshot, or invariant list so copied rule text cannot silently drift.
+- For portable Skill/plugin releases, require adapter parity evidence, mapped command lanes, mode persistence/deactivation behavior, separated complexity-only review, and benchmark correctness/safety gates before claiming release readiness or measured impact.
 - Prefer `npx @airpot/agent-gov@latest` as the public one-command installer; it should copy bundled project skills before running the initializer.
 - Use `docs/AI_CODING_GLOSSARY.md` for shared AI coding terminology, `docs/DOMAIN_GLOSSARY.md` for project-domain terminology, and `docs/adr/`, `docs/rfcs/`, and `docs/incidents/` for durable decisions, proposals, and postmortems that should outlive a session.
 - Capture the technology stack during initialization and prefill harness commands when there is a known safe default.
@@ -206,6 +228,7 @@ Makefile                   # optional if missing
 - Require fresh validation evidence before reporting completion, merge readiness, PR readiness, archive readiness, or handoff readiness.
 - Keep durable project knowledge in `docs/`; keep `AGENTS.md` as a short routing document.
 - Add mechanical invariants when architecture or taste constraints can be checked by scripts.
+- Add mechanical invariants for "style as safety" rules only when they are concrete enough to check, such as copied adapter parity, required source-status fields, release-boundary paths, or no new dependency without manifest change.
 - Keep commands idempotent and non-destructive by default.
 - Report skipped existing files instead of overwriting them.
 - Keep generated files ASCII and easy to diff.
@@ -224,6 +247,7 @@ python3 scripts/agent_resources.py doctor
 python3 scripts/agent_skill_hygiene.py doctor
 python3 scripts/agent_project_skills.py doctor
 python3 scripts/agent_project_skills.py report
+python3 scripts/agent_runtime.py doctor
 python3 scripts/agent_runlog.py doctor
 python3 scripts/agent_tooling.py doctor
 python3 scripts/agent_security.py doctor
@@ -395,7 +419,34 @@ The project-neutral sources are `.agent/subagents.json`, `.agent/hooks.json`, an
 
 When an existing native config is skipped, preserve it and report the skipped file. Merge manually instead of overwriting project-specific settings.
 
-Session-start hooks must remain read-only. They may print status, existing bootstrap excerpts, memory timelines, no-write context previews, and enabled capability summaries, but they must not create indexes, append scan history, or refresh session files. Native hook commands must locate `.agent/tools/governance_hook.py` without requiring the target project to be a git repository. Stop hooks may ingest active session memory, refresh context scans, and append compact runlog evidence.
+When a rule must exist across several native hosts, use this order:
+
+1. Update the canonical `.agent/` policy, `AGENTS.md`, or source skill file.
+2. Generate or sync the native projection when the project owns that projection.
+3. Validate parity with a deterministic check: byte-equality for compact copies, stable content hashes for generated files, or invariant phrases/fields for longer host-specific adapters.
+4. Record skipped adapters as manual merge work instead of silently diverging.
+
+Session-start hooks must remain read-only. They may print status, existing bootstrap excerpts, memory timelines, no-write context previews, and enabled capability summaries, but they must not create indexes, append scan history, or refresh session files. Native hook commands must locate `.agent/tools/governance_hook.py` without requiring the target project to be a git repository. Hooks that read stdin must avoid EOF deadlocks, handle stdin read errors, strip a leading UTF-8 BOM before JSON parsing, preserve intentionally empty additional context strings, and emit valid JSON when the host event requires JSON. Invalid mandatory hook output is failure evidence and should exit non-zero instead of silently passing. Stop hooks may ingest active session memory, refresh context scans, and append compact runlog evidence.
+
+Skill and adapter packaging must make hook handling explicit. A release or sync path should record whether hook manifests/files are preserved, stripped, suppressed by an explicit empty hooks object, or skipped for manual merge. Orphaned native hook files or manifest entries are findings, not harmless leftovers.
+
+## External Research And Benchmark Hygiene
+
+When updating governance from external repos, articles, benchmarks, or social posts:
+
+- Record each source as `verified`, `partial`, or `blocked` before adopting a rule.
+- Prefer cloned repos, raw files, archived pages, or first-party docs over search snippets.
+- Treat captcha-gated, deleted, or extraction-failed pages as exclusions unless the user supplies accessible content.
+- Keep source-derived rules traceable in the active spec, task document, review note, or ADR/RFC.
+
+When claiming a skill or governance optimization:
+
+- Compare against a baseline agent/run, not a bare chatty completion unless that is the stated use case.
+- Isolate runs from global plugins, user hooks, caches, session memory, and shared workspaces that could contaminate the baseline.
+- Measure the actual artifact that matters, such as `git diff`, validation result, retrieval score, token/cost/time, or review findings.
+- Include safety/correctness checks with reduction metrics; fewer lines, tokens, or files is not an improvement if it drops validation, security, accessibility, or explicit requirements.
+- Preserve reproduction commands, pinned inputs, and known limitations where release or design claims depend on the benchmark.
+- Validate benchmark, profile, optimization, migration, and pipeline inputs before expensive work. If a run starts and then fails, mark the run failed, keep artifact paths where available, and return a non-zero exit code. Do not report a failed profile or benchmark as a successful optimization with warnings.
 
 ## Memory Surface
 

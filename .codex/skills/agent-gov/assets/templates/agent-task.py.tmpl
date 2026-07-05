@@ -16,6 +16,8 @@ PROFILES_PATH = Path(".agent/workflow-profiles.json")
 TASK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,80}$")
 REVIEW_STATUSES = {"pending", "needs-fix", "pass", "accepted-with-exceptions", "not-required"}
 REQUIREMENT_STATUSES = {"pending", "in-progress", "complete", "blocked", "not-required"}
+DECOMPOSITION_STATUSES = {"pending", "in-progress", "complete", "blocked", "not-required"}
+GOAL_CONFIRMATION_STATUSES = {"confirmed", "agent_assumed", "pending", "blocked"}
 REQUIREMENT_PROTECTED_STAGES = {
     "plan",
     "gate_review",
@@ -37,6 +39,25 @@ STAGE_REVIEW_REQUIRED_STAGES = (
     "verification",
     "handoff",
 )
+GOAL_CONTRACT_REQUIRED_FIELDS = (
+    "raw_user_goal",
+    "refined_goal",
+    "refinement_rationale",
+    "user_confirmation_status",
+    "objective",
+    "user_approved_outcome",
+    "non_goals",
+    "constraints",
+    "success_evidence",
+    "stop_conditions",
+    "current_decision_summary",
+    "open_decisions",
+    "linked_task_id",
+    "linked_spec_change_id",
+)
+GOAL_CONTRACT_LIST_FIELDS = {"non_goals", "constraints", "success_evidence", "stop_conditions", "open_decisions"}
+GOAL_CONTRACT_NONEMPTY_LIST_FIELDS = {"non_goals", "constraints", "success_evidence", "stop_conditions"}
+TASK_DECOMPOSITION_EVIDENCE_FIELDS = ("summary", "next_task", "evidence_path")
 
 
 def utc_now() -> str:
@@ -115,6 +136,38 @@ def default_requirements(profile_name: str) -> dict:
     }
 
 
+def default_goal_contract(task_id: str = "", spec_change: str = "") -> dict:
+    return {
+        "raw_user_goal": "",
+        "refined_goal": "",
+        "refinement_rationale": "",
+        "user_confirmation_status": "pending",
+        "objective": "",
+        "user_approved_outcome": "",
+        "non_goals": [],
+        "constraints": [],
+        "success_evidence": [],
+        "stop_conditions": [],
+        "current_decision_summary": "",
+        "open_decisions": [],
+        "linked_task_id": task_id,
+        "linked_spec_change_id": spec_change,
+    }
+
+
+def default_task_decomposition(profile_name: str) -> dict:
+    return {
+        "required": True,
+        "status": "pending",
+        "summary": "",
+        "next_task": "",
+        "subtasks": [],
+        "dependencies": [],
+        "evidence_path": "",
+        "no_task_board_tiny_evidence": "" if profile_name == "tiny" else "not-applicable",
+    }
+
+
 def normalized_requirements(item: dict) -> dict:
     profile_name = str(item.get("profile", "standard"))
     requirements = item.get("requirements")
@@ -127,6 +180,37 @@ def normalized_requirements(item: dict) -> dict:
         merged["status"] = "pending" if merged["required"] else "not-required"
     if not isinstance(merged.get("open_questions"), list):
         merged["open_questions"] = [str(merged.get("open_questions"))]
+    return merged
+
+
+def normalized_goal_contract(item: dict) -> dict:
+    contract = item.get("goal_contract")
+    if not isinstance(contract, dict):
+        contract = {}
+    merged = default_goal_contract(str(item.get("id", "")), str(item.get("spec_change", "")))
+    merged.update(contract)
+    for field in GOAL_CONTRACT_LIST_FIELDS:
+        value = merged.get(field)
+        if value is None or value == "":
+            merged[field] = []
+        elif not isinstance(value, list):
+            merged[field] = [str(value)]
+    return merged
+
+
+def normalized_task_decomposition(item: dict) -> dict:
+    profile_name = str(item.get("profile", "standard"))
+    decomposition = item.get("task_decomposition")
+    if not isinstance(decomposition, dict):
+        decomposition = {}
+    merged = default_task_decomposition(profile_name)
+    merged.update(decomposition)
+    merged["required"] = bool(merged.get("required") is not False)
+    if merged.get("status") not in DECOMPOSITION_STATUSES:
+        merged["status"] = "pending" if merged["required"] else "not-required"
+    for field in ("subtasks", "dependencies"):
+        if not isinstance(merged.get(field), list):
+            merged[field] = [str(merged.get(field))]
     return merged
 
 
@@ -206,6 +290,60 @@ def stage_review_errors(task_id: str, item: dict, profile: dict, policy: dict) -
     return errors
 
 
+def goal_contract_required(item: dict, policy: dict) -> bool:
+    required_profiles = set(policy.get("goal_contract_required_for_profiles", ["standard", "full"]))
+    required_states = set(policy.get("goal_contract_required_states", ["active", "review", "done"]))
+    required_stages = set(policy.get("goal_contract_required_before_stages", []))
+    return str(item.get("profile", "")) in required_profiles and (
+        str(item.get("state", "")) in required_states or str(item.get("current_stage", "")) in required_stages
+    )
+
+
+def goal_contract_errors(task_id: str, item: dict, policy: dict) -> list[str]:
+    errors: list[str] = []
+    if not goal_contract_required(item, policy):
+        return errors
+    contract = normalized_goal_contract(item)
+    required_fields = policy.get("goal_contract_required_fields") or list(GOAL_CONTRACT_REQUIRED_FIELDS)
+    for field in required_fields:
+        value = contract.get(field)
+        if field in GOAL_CONTRACT_LIST_FIELDS:
+            present = isinstance(value, list) and (
+                field not in GOAL_CONTRACT_NONEMPTY_LIST_FIELDS or any(str(entry).strip() for entry in value)
+            )
+            if not present:
+                errors.append(f"{task_id} goal_contract missing {field}")
+        elif not str(value or "").strip():
+            errors.append(f"{task_id} goal_contract missing {field}")
+    if contract.get("linked_task_id") and contract.get("linked_task_id") != task_id:
+        errors.append(f"{task_id} goal_contract linked_task_id must match task id")
+    if contract.get("user_confirmation_status") not in GOAL_CONFIRMATION_STATUSES:
+        errors.append(f"{task_id} goal_contract user_confirmation_status is invalid")
+    return errors
+
+
+def task_decomposition_errors(task_id: str, item: dict, profile: dict, policy: dict) -> list[str]:
+    errors: list[str] = []
+    decomposition = normalized_task_decomposition(item)
+    if decomposition.get("status") not in DECOMPOSITION_STATUSES:
+        errors.append(f"{task_id} task_decomposition has invalid status: {decomposition.get('status')}")
+    if not decomposition.get("required"):
+        return errors
+    complete_before_done = policy.get("task_decomposition_complete_before_done") is True
+    protected = set(policy.get("task_decomposition_required_before_stages", []))
+    current_stage = str(item.get("current_stage", ""))
+    must_be_complete = (item.get("state") == "done" and complete_before_done) or current_stage in protected
+    if not must_be_complete:
+        return errors
+    if decomposition.get("status") != "complete":
+        errors.append(f"{task_id} task_decomposition must be complete before {current_stage or item.get('state')}")
+    has_evidence = any(str(decomposition.get(field, "")).strip() for field in TASK_DECOMPOSITION_EVIDENCE_FIELDS)
+    has_subtasks = any(str(entry).strip() for entry in decomposition.get("subtasks", []))
+    if not has_evidence and not has_subtasks:
+        errors.append(f"{task_id} task_decomposition missing summary, next_task, evidence_path, or subtasks")
+    return errors
+
+
 def requirements_errors(task_id: str, item: dict, profile: dict, policy: dict) -> list[str]:
     errors: list[str] = []
     requirements = normalized_requirements(item)
@@ -258,11 +396,19 @@ def validate_board(board: dict, profiles: dict) -> list[str]:
     states = set(board.get("states", []))
     required_fields = set(board.get("required_fields", []))
     policy = board.get("policy", {})
-    for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path", "requirements", "review_gate", "stage_reviews"):
+    for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path", "requirements", "task_decomposition", "review_gate", "stage_reviews"):
         if field not in required_fields:
             errors.append(f"missing required field declaration: {field}")
-    if set(policy.get("done_requires_review_gate_pass_for_profiles", [])) != {"standard", "full"}:
-        errors.append("task board must require review_gate pass for standard and full done tasks")
+    if set(policy.get("done_requires_review_gate_pass_for_profiles", [])) != {"tiny", "bugfix", "standard", "full"}:
+        errors.append("task board must require review_gate pass for all task profiles")
+    if set(policy.get("goal_contract_required_for_profiles", [])) != {"bugfix", "standard", "full"}:
+        errors.append("task board must require refined goal contracts for bugfix, standard, and full profiles")
+    if set(policy.get("goal_contract_required_states", [])) != {"active", "review", "done"}:
+        errors.append("task board must require refined goal contracts for active, review, and done states")
+    if not {"plan", "implementation", "verification", "handoff"}.issubset(set(policy.get("goal_contract_required_before_stages", []))):
+        errors.append("task board must require refined goal contracts before protected implementation stages")
+    if set(policy.get("goal_contract_required_fields", [])) != set(GOAL_CONTRACT_REQUIRED_FIELDS):
+        errors.append("task board goal_contract required fields must match generated policy")
     if policy.get("review_fix_loop_required_at_stage_exit") is not True:
         errors.append("task board must require review-fix loops at stage exit")
     if set(policy.get("stage_review_loop_required_for_profiles", [])) != {"standard", "full"}:
@@ -294,8 +440,10 @@ def validate_board(board: dict, profiles: dict) -> list[str]:
             if not str(item.get("delivery_conclusion", "")).strip():
                 errors.append(f"{task_id} is done without delivery_conclusion")
         errors.extend(requirements_errors(task_id, item, profile, policy))
+        errors.extend(task_decomposition_errors(task_id, item, profile, policy))
         errors.extend(review_gate_errors(task_id, item, profile, policy))
         errors.extend(stage_review_errors(task_id, item, profile, policy))
+        errors.extend(goal_contract_errors(task_id, item, policy))
         if profile.get("feature_doc_templates") and (not docs_path or not Path(docs_path).exists()):
             errors.append(f"{task_id} docs_path missing or absent: {docs_path}")
     return errors
@@ -386,6 +534,8 @@ def cmd_new(args: argparse.Namespace) -> int:
         "current_stage": "intake",
         "docs_path": docs_path,
         "requirements": default_requirements(args.profile),
+        "goal_contract": default_goal_contract(args.task_id, ""),
+        "task_decomposition": default_task_decomposition(args.profile),
         "created_at": now,
         "updated_at": now,
         "delivery_conclusion": "",
@@ -442,6 +592,59 @@ def cmd_update(args: argparse.Namespace) -> int:
         requirements.setdefault("open_questions", [])
         requirements["open_questions"].extend(args.open_question)
     item["requirements"] = requirements
+    goal_contract = normalized_goal_contract(item)
+    if args.goal_objective is not None:
+        goal_contract["objective"] = args.goal_objective
+    if args.goal_raw is not None:
+        goal_contract["raw_user_goal"] = args.goal_raw
+    if args.goal_refined is not None:
+        goal_contract["refined_goal"] = args.goal_refined
+    if args.goal_refinement_rationale is not None:
+        goal_contract["refinement_rationale"] = args.goal_refinement_rationale
+    if args.goal_confirmation_status is not None:
+        goal_contract["user_confirmation_status"] = args.goal_confirmation_status
+    if args.goal_outcome is not None:
+        goal_contract["user_approved_outcome"] = args.goal_outcome
+    if args.goal_decision_summary is not None:
+        goal_contract["current_decision_summary"] = args.goal_decision_summary
+    if args.goal_spec_change is not None:
+        goal_contract["linked_spec_change_id"] = args.goal_spec_change
+    for attr, field in (
+        ("goal_non_goal", "non_goals"),
+        ("goal_constraint", "constraints"),
+        ("goal_success_evidence", "success_evidence"),
+        ("goal_stop_condition", "stop_conditions"),
+        ("goal_open_decision", "open_decisions"),
+    ):
+        values = getattr(args, attr)
+        if values:
+            goal_contract.setdefault(field, [])
+            goal_contract[field].extend(values)
+    if args.clear_goal_open_decisions:
+        goal_contract["open_decisions"] = []
+    item["goal_contract"] = goal_contract
+    decomposition = normalized_task_decomposition(item)
+    if args.decomposition_status:
+        decomposition["status"] = args.decomposition_status
+    if args.decomposition_summary is not None:
+        decomposition["summary"] = args.decomposition_summary
+    if args.decomposition_next_task is not None:
+        decomposition["next_task"] = args.decomposition_next_task
+    if args.decomposition_evidence_path is not None:
+        decomposition["evidence_path"] = args.decomposition_evidence_path
+    if args.clear_decomposition_subtasks:
+        decomposition["subtasks"] = []
+    if args.decomposition_subtask:
+        decomposition.setdefault("subtasks", [])
+        decomposition["subtasks"].extend(args.decomposition_subtask)
+    if args.clear_decomposition_dependencies:
+        decomposition["dependencies"] = []
+    if args.decomposition_dependency:
+        decomposition.setdefault("dependencies", [])
+        decomposition["dependencies"].extend(args.decomposition_dependency)
+    if args.no_task_board_tiny_evidence is not None:
+        decomposition["no_task_board_tiny_evidence"] = args.no_task_board_tiny_evidence
+    item["task_decomposition"] = decomposition
     gate = normalized_review_gate(item, profile, board.get("policy", {}))
     if args.review_status:
         gate["status"] = args.review_status
@@ -537,6 +740,29 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--no-code-docs-cross-check", action="store_true")
     update.add_argument("--open-question", action="append", default=[])
     update.add_argument("--clear-open-questions", action="store_true")
+    update.add_argument("--goal-objective")
+    update.add_argument("--goal-raw")
+    update.add_argument("--goal-refined")
+    update.add_argument("--goal-refinement-rationale")
+    update.add_argument("--goal-confirmation-status", choices=sorted(GOAL_CONFIRMATION_STATUSES))
+    update.add_argument("--goal-outcome")
+    update.add_argument("--goal-non-goal", action="append", default=[])
+    update.add_argument("--goal-constraint", action="append", default=[])
+    update.add_argument("--goal-success-evidence", action="append", default=[])
+    update.add_argument("--goal-stop-condition", action="append", default=[])
+    update.add_argument("--goal-decision-summary")
+    update.add_argument("--goal-open-decision", action="append", default=[])
+    update.add_argument("--clear-goal-open-decisions", action="store_true")
+    update.add_argument("--goal-spec-change")
+    update.add_argument("--decomposition-status", choices=sorted(DECOMPOSITION_STATUSES))
+    update.add_argument("--decomposition-summary")
+    update.add_argument("--decomposition-next-task")
+    update.add_argument("--decomposition-evidence-path")
+    update.add_argument("--decomposition-subtask", action="append", default=[])
+    update.add_argument("--clear-decomposition-subtasks", action="store_true")
+    update.add_argument("--decomposition-dependency", action="append", default=[])
+    update.add_argument("--clear-decomposition-dependencies", action="store_true")
+    update.add_argument("--no-task-board-tiny-evidence")
     update.add_argument("--review-status", choices=sorted(REVIEW_STATUSES))
     update.add_argument("--review-path")
     update.add_argument("--fix-path")

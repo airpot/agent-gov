@@ -36,17 +36,18 @@
 初始化时可以用 `--governance-profile core|standard|full` 控制生成规模。
 
 - `core`：最小治理面，包含内嵌规格、harness、项目目录契约、会话接续、runlog、基础评分和迁移检查。
-- `standard`：默认档，推荐给多数已有项目，增加 workflow profiles、requirements interview gate、task-board、feature 阶段文档、domain glossary、memory、context budget、session event stream、dev map、mechanical checks、baseline、skill hygiene、禁用态 MCP policy、governance-gc 和 harness evolution。
-- `full`：完整框架，额外增加 subagent 编排、Codex/Claude 原生适配、hooks、tooling/security 配置和 skill distribution。
+- `standard`：已有项目默认档，推荐给多数已有项目，增加 workflow profiles、requirements interview gate、task-board、feature 阶段文档、domain glossary、memory、context budget、session event stream、dev map、mechanical checks、baseline、skill hygiene、禁用态 MCP policy、governance-gc 和 harness evolution。
+- `full`：空白项目默认档，完整框架，额外增加 subagent 编排、Codex/Claude 原生适配、hooks、tooling/security 配置和 skill distribution。
 
-默认是 `standard`。只需要最小接续能力时用 `core`，明确需要 subagent / Codex Claude 原生适配 / tooling security / skill distribution 或真实外部集成编排时再用 `full`。
+未显式传 `--governance-profile` 时，空白项目默认 `full`，已有项目默认 `standard`。空白项目判定会忽略 `.git`、常见编辑器目录和空目录。只需要最小接续能力时用 `core`，已有项目需要完整接管时显式传 `full`。
 
 | 场景 | 推荐 profile | 原因 |
 | --- | --- | --- |
 | 只想让长会话可接续，项目还很小 | `core` | 保留 spec、harness、session、runlog 和评分，治理面最小。 |
+| 空白项目从 0 建立 agent-ready 生产流水线 | `full` | 一次性启用 subagent、native adapter、tooling/security 和 skill distribution。 |
 | 已有项目想纳入 agent 开发治理 | `standard` | 覆盖 task-board、requirements gate、memory/context、dev map、baseline、mechanical checks 和治理 GC。 |
 | 跨模块重构、发布、迁移或多 agent 协作 | `full` | 额外启用 subagent、native adapter、tooling/security 和 skill distribution。 |
-| 不确定选哪个 | `standard` | 默认档，避免 `full` 的额外配置面，也比 `core` 更适合真实项目持续开发。 |
+| 不确定选哪个 | 省略参数 | 让初始化器按空白/已有项目自动选择。 |
 
 1. 项目治理初始化
    - 生成 `AGENTS.md`，可选生成 `CLAUDE.md`。
@@ -83,12 +84,15 @@
 7. 工作流和实现纪律
    - 生成 `.agent/workflow.json`、`.agent/workflow-profiles.json`、`.agent/task-board.json`、`.agent/risk-zones.json`、`.agent/review-policy.json`、`.agent/worktrees.json`、implementation plan、debugging record、`docs/DOMAIN_GLOSSARY.md` 和 feature stage 模板。
    - 支持 `tiny`、`bugfix`、`standard`、`full` 四种 workflow profile，让流程重量匹配任务风险和规模。
-   - 生成 `scripts/agent_task.py` 和 `docs/features/`，把非 tiny 任务的状态、阶段文档和交付结论固化到仓库。
+   - 生成 `scripts/agent_task.py` 和 `docs/features/`，把任务状态、raw/refined goal、任务拆解、阶段文档和交付结论固化到仓库。
+   - 非问答请求默认先进入 intake：分类任务类型和风险，保留原始用户目标，写出 refined goal、非目标、约束、成功证据和确认/假设状态。
    - 非 tiny 任务进入 design / plan / implementation / review / done 前，需要先完成 requirements interview：共享理解、未决问题、代码/文档交叉核对和领域术语更新都要落到 task-board。
+   - `tiny` 使用轻量 checklist，`bugfix` 使用 reproduction/root-cause/fix/regression 链，`standard/full` 使用可审阅 task graph；任务进入实现、验证、交付或 done 前必须完成相应拆解证据。
    - 覆盖风险分级、自治边界、规格审批、计划质量、实现纪律、diff 可追踪、TDD/调试证据、审阅顺序、人审证据、完成证明。
    - 实现纪律吸收了 `andrej-karpathy-skills` 的核心思想：先澄清假设，优先简单直接实现，避免无根据抽象，保持 diff 精准，定义可验证成功标准。
 
 8. 审阅-修正闭环
+   - `tiny`、`bugfix`、`standard`、`full` 的完成态都要求 review-fix-review；tiny 无 task-board 时证据写入 active session、runlog 或 `.agent/intake/`。
    - 高风险和 critical 风险工作要求记录 human review evidence。
    - 每个改动文件需要归类为 requested、necessary-support、incidental 或 risky。
    - 自动审阅和模型总结只能作为 precheck，不能替代测试、构建或必需的人审。
@@ -232,7 +236,7 @@ npx @airpot/agent-gov@latest [root] [options]
 
 - `--tech-stack python,typescript`：记录技术栈，并预填常见验证命令。
 - `--layout existing|minimal|python-app|node-app|web-app|service|library`：选择固定目录结构；`existing` 不附加默认目录，适合老项目配合 `--dir` 使用。
-- `--governance-profile core|standard|full`：选择初始化体量；默认 `standard`。
+- `--governance-profile core|standard|full`：选择初始化体量；省略时空白项目默认 `full`，已有项目默认 `standard`。
 - `--dir path`：追加需要创建和治理的目录，可重复使用。
 - `--remote-kind ssh|devcontainer|wsl|local|unknown`：记录远程开发环境类型。
 - `--no-claude`：不生成 Claude 相关适配文件。

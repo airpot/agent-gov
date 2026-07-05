@@ -1,6 +1,6 @@
 ---
 name: agent-gov
-description: Govern Codex/Claude-ready repositories with embedded OpenSpec-style specification management, harness engineering, technology stack and directory layout contracts, durable docs and knowledge metadata, repo-local long-term memory, session offload and truth-first grounding, context budget management, workflow and worktree governance, implementation discipline, capability and integration governance, project resource catalog management, runlog evidence tracing, ACI-friendly bounded tooling, optional policy-as-code and supply-chain checks, ADR/RFC/postmortem records, governance health scoring/evals, VS Code Remote-friendly session continuity, native hook adapters, subagent orchestration, skill distribution, handoff/resume automation, validation commands, and review-fix gates. Use when the user asks to initialize, retrofit, audit, or maintain an agent-governed project; make a repo agent-ready; add or repair embedded spec/harness/session/offload/grounding/memory/context/workflow/worktree/implementation-discipline/capabilities/resources/runlog/tooling/security/evals/ADR/RFC/subagent/hooks/skills management; or recover long-running Codex work across sessions.
+description: Initialize, retrofit, audit, and maintain Codex/Claude-ready repositories with repo-local governance. Use when making a project agent-ready or managing embedded specs, harness checks, sessions, memory, context budgets, workflow/task boards, worktrees, loop engineering, review-fix gates, knowledge promotion bundles, goal contracts, evidence boundaries, capability/resource/runtime policy, project skills, release evidence, archival, or long-running session recovery.
 ---
 
 # Agent Gov
@@ -18,15 +18,16 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
 2. **Choose initialization scope**
    - Ask for or infer the technology stack before initialization. If unknown, ask whether to continue with `unspecified`.
    - Ask for the fixed project directory layout. Use a built-in layout (`minimal`, `python-app`, `node-app`, `web-app`, `service`, `library`) or explicit extra directories.
-   - Choose the initialization profile that matches the repository maturity: `core` for minimal spec/harness/session continuity, `standard` for durable workflow/task/memory/context governance plus disabled-by-default MCP policy, or `full` for native Codex/Claude adapters, subagent orchestration, security/tooling, and skill distribution. Default to `standard`; use `full` only when the user asks for the complete framework.
+   - Choose the initialization profile that matches the repository maturity: `core` for minimal spec/harness/session continuity, `standard` for durable workflow/task/memory/context governance plus disabled-by-default MCP policy, or `full` for native Codex/Claude adapters, subagent orchestration, security/tooling, and skill distribution. When no profile is specified, blank projects default to `full` and existing projects default to `standard`; use an explicit `--governance-profile` when the user wants a smaller or larger governance footprint.
    - Use `references/spec-management.md` for embedded OpenSpec-style project specification setup, status checks, and mandatory archival of completed changes.
-   - Use `references/workflow-governance.md` for workflow profiles, lifecycle gates, task-board continuity, feature-stage documents, task risk/autonomy, plan quality, TDD/debugging evidence, diff traceability, worktree isolation, review order, human review evidence, and completion proof.
-   - Use `references/implementation-discipline.md` for assumption clarification, simplicity-first implementation, surgical diffs, and verifiable goals.
-   - Use `references/harness-management.md` for command, validation, capability governance, project resource catalog governance, runlog evidence, ACI tooling, security/supply-chain suites, governance scoring/evals, dev map, harness evolution, MCP policy, governance-gc, ADR/RFC/postmortem records, native adapters, context budget, project skill governance, skill distribution, and repo-harness setup.
-   - Use `references/session-continuity.md` for `.agent/sessions/`, `.agent/memory/`, rollover, checkpoint, memory retrieval, and resume behavior.
-   - Use `references/context-budget.md` for compression-safe governance docs, token budget scans, and subagent output limits.
+   - Use `references/workflow-governance.md` for workflow profiles, lifecycle gates, task-board continuity, feature-stage documents, loop engineering, task risk/autonomy, plan quality, TDD/debugging evidence, diff traceability, worktree isolation, review order, human review evidence, goal contracts, knowledge promotion review, and completion proof.
+   - Use `references/implementation-discipline.md` for assumption clarification, simplicity-first implementation, surgical diffs, verifiable goals, and evidence-bounded source adoption.
+   - Use `references/harness-management.md` for command, validation, capability governance, project resource catalog governance, Skill-first runtime architecture governance, Skill Runtime Governance, model profile governance, runlog evidence, knowledge promotion bundle checks, evidence-store boundaries, ACI tooling, security/supply-chain suites, governance scoring/evals, dev map, harness evolution, MCP policy, governance-gc, ADR/RFC/postmortem records, native adapters, context budget, project skill governance, skill distribution, and repo-harness setup.
+   - Use `references/skill-runtime-governance.md` when governing portable Skill/plugin products, canonical Skill cores, thin host adapters, runtime modes, command lanes, impact benchmarks, shortcut/debt ledgers, or adapter parity.
+   - Use `references/session-continuity.md` for `.agent/sessions/`, `.agent/memory/`, rollover, checkpoint, memory retrieval, resume behavior, compact goal contracts, and current decision summaries.
+   - Use `references/context-budget.md` for compression-safe governance docs, token budget scans, subagent output limits, and keeping goal contracts and knowledge bundles compact.
    - Use `references/subagent-orchestration.md` when the project needs delegated agent roles, snapshot contracts, or multi-agent handoff rules.
-   - Use `references/review-fix-loop.md` when release readiness or review gates are part of the request.
+   - Use `references/review-fix-loop.md` when release readiness, loop engineering, or review gates are part of the request.
 
 3. **Run deterministic initialization**
    - Prefer `scripts/init_agent_project.py <repo-root>`.
@@ -63,10 +64,16 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
 7. **Create or verify workflow and worktree governance**
    - Ensure `.agent/workflow.json`, `.agent/workflow-profiles.json`, `.agent/task-board.json`, `.agent/risk-zones.json`, `.agent/review-policy.json`, `.agent/worktrees.json`, `.agent/templates/implementation-plan.md.tmpl`, `.agent/templates/debugging-record.md.tmpl`, and `.agent/templates/features/*.md.tmpl` exist.
    - Choose the lightest workflow profile that covers the task risk: `tiny`, `bugfix`, `standard`, or `full`.
+   - For every non-Q&A request, proactively classify request kind, risk, required gates, and whether task/spec records are needed before editing.
+   - Preserve the raw user goal and write a refined goal before setting a durable task or session goal. Record rationale, non-goals, constraints, success evidence, confirmation status, and open questions.
    - Use `scripts/agent_task.py` to keep non-tiny task state in `.agent/task-board.json` and feature-stage documents under `docs/features/<task-id>/`.
    - For non-tiny tasks, complete the requirements interview gate before design or implementation: ask one unresolved question at a time, give a recommended answer with rationale, cross-check user claims against current code/docs, and update `docs/DOMAIN_GLOSSARY.md` for stable terms.
-   - For `standard` and `full` tasks, run review -> fix -> re-review at protected stage exits, especially after spec, plan, implementation, spec review, quality review, verification, and handoff.
-   - For `standard` and `full` tasks, require `review_gate.status=pass`, an existing latest review document, and no open blocker/major/minor findings before task state can become `done`.
+   - Complete technology-stack and runtime intake before initialization and before non-tiny design when stack, runtime, or layout choices affect the solution; convert the interview into structured `--architecture-intake` input when possible.
+   - Decompose work before implementation: tiny work gets a minimal checklist, bugfix work gets a reproduction/root-cause/fix/regression chain, and standard/full work gets subtasks or a task graph with dependencies, file scope, validation, and next task.
+   - Run review -> fix -> re-review for every task profile. Tiny work uses lightweight review evidence in the active session, runlog, or `.agent/intake/` when no task-board record exists; bugfix work reviews reproduction/root-cause/regression; standard/full work uses protected stage reviews.
+   - For non-tiny iterative work, require a loop contract from `.agent/loop-engineering.json`: loop type, goal, observation signal, iteration budget, stop conditions, evidence path, owner role, and escalation rule.
+   - Stop repeating when the same failure recurs; change strategy, classify a harness gap, or ask for human input instead of retrying the same action without new evidence.
+   - For every task-board-backed task, require `review_gate.status=pass`, an existing latest review document, no open blocker/major/minor findings, and completed task decomposition before task state can become `done`.
    - Use workflow gates for task risk/autonomy, design/spec approval, plan quality, implementation discipline, diff traceability, isolated execution, TDD evidence, systematic debugging, spec review, quality review, human review evidence, completion verification, handoff, and finish choices.
    - Require high and critical risk work to record approval/review evidence; critical work is not autonomous modification work.
    - Prefer ignored git worktrees for feature work, implementation-plan execution, and risky refactors; record baseline validation before edits.
@@ -76,20 +83,26 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
 
 8. **Create or verify capability governance and runlog evidence**
    - Ensure core scoring and evidence files exist in every profile: `.agent/manifest.json`, `.agent/runlog.jsonl`, `.agent/evals.json`, `.agent/evals/latest.md`, `scripts/agent_runlog.py`, `scripts/agent_score.py`, and `scripts/agent_migrate.py`.
-   - For `standard` and `full`, ensure `.agent/capabilities.json`, `.agent/dev-map.json`, `.agent/skill-hygiene.json`, `.agent/harness-evolution.json`, `.agent/mcp-policy.json`, `.agent/governance-gc.json`, `scripts/agent_capabilities.py`, `scripts/agent_skill_hygiene.py`, `scripts/agent_verify.py`, and `scripts/agent_gc.py` exist.
+   - For `standard` and `full`, ensure `.agent/capabilities.json`, `.agent/dev-map.json`, `.agent/skill-hygiene.json`, `.agent/loop-engineering.json`, `.agent/harness-evolution.json`, `.agent/mcp-policy.json`, `.agent/governance-gc.json`, `scripts/agent_capabilities.py`, `scripts/agent_skill_hygiene.py`, `scripts/agent_verify.py`, and `scripts/agent_gc.py` exist.
    - For `full`, ensure `.agent/tooling.json`, `.agent/security.json`, `scripts/agent_tooling.py`, and `scripts/agent_security.py` exist.
    - Treat `.agent/manifest.json` as the generated governance manifest for required paths, JSON schemas, JSONL stores, and score dimensions; update it when the governance surface changes.
    - Use `.agent/capabilities.json` to record enabled skills, tools, MCP/integration entries, resource-catalog capability, native adapters, owner, risk, capability class, permission shape, and validation commands.
    - Use `.agent/resources.json`, `scripts/agent_resources.py`, `.agent/templates/resource-secrets.local.env.tmpl`, and `docs/RESOURCES.md` to govern project resource assets such as servers, databases, repositories, deployment targets, compute machines, endpoint references, credential references, usage rules, allowed actions, and health checks.
    - Before using a remote server, database, repository, deployment target, or compute machine, run `python3 scripts/agent_resources.py match --intent "<intent>" --json`, then `python3 scripts/agent_resources.py resolve <resource-id> --json`; do not rely on chat memory, shell history, or trial-and-error discovery.
    - Keep raw account passwords, tokens, SSH private keys, database URLs with embedded credentials, and private secret material out of `.agent/resources.json`; store only refs such as `env:`, `file-ref:`, `vault:`, `proxy:`, `op:`, or `keychain:`.
+   - Use `.agent/runtime-policy.json`, `.agent/model-profiles.json`, `.agent/agent-runtime.json`, `scripts/agent_runtime.py`, and `docs/AGENT_RUNTIME_ARCHITECTURE.md` to govern product-level Skill-first runtime architecture, project target selection (`agent`, `mcp-server`, `hybrid`, or `library`), initialization architecture interview output, runtime adapter choice, MCP server exposure boundaries, model provider profiles, and application-state boundaries.
+   - Use `.agent/skill-runtime.json` and `docs/SKILL_RUNTIME.md` to govern portable Skill/plugin product architecture: canonical skill core, thin host adapters, runtime modes, command lanes, separated review lanes, benchmark evidence, and deliberate shortcut/debt ledgers.
+   - During initialization, convert the user's architecture conversation into structured `--architecture-intake <json-file>` input when possible; the initializer does not read transient chat history directly.
+   - Treat Strands as the default Skill-first agent runtime adapter, not as the architecture standard; keep Pydantic AI, LangGraph, MCP SDKs, and FastMCP-style servers as optional application-owned adapters and keep runtime dependencies in application code, not agent-gov.
+   - For MCP server projects, do not force model profiles or agent orchestration; require explicit MCP tool/resource/prompt, transport, host/client, credential, and destructive-operation boundaries.
    - Use `.agent/runlog.jsonl` for compact evidence of validation runs, session lifecycle events, accepted review exceptions, and high-risk capability use.
    - Use `.agent/tooling.json` and `scripts/agent_tooling.py` for bounded, path-first, line-numbered repository inspection.
    - Use `.agent/security.json` and `scripts/agent_security.py` for optional policy-as-code, secret scan, dependency audit, SBOM, and license scan command slots.
    - Use `.agent/evals.json` and `scripts/agent_score.py` for local governance health scoring and `.agent/evals/latest.md` dashboard refresh.
    - Ensure `docs/AI_CODING_GLOSSARY.md`, `docs/DOMAIN_GLOSSARY.md`, `docs/adr/`, `docs/rfcs/`, `docs/incidents/`, and their templates exist for shared terminology, durable decisions, proposals, and postmortems.
    - Ensure `docs/DEV_MAP.md` exists as a concise repository navigation map, not a full file inventory.
-   - Use `.agent/harness-evolution.json` and `python3 scripts/agent_gc.py classify ...` to classify repeated failures and promote fixes into rules, skills, scripts, workflow gates, role contracts, tool/MCP policy, or docs.
+   - Use `.agent/loop-engineering.json` and `docs/LOOP_ENGINEERING.md` to govern bounded work loops, review-fix loops, debugging loops, eval optimization loops, and session recovery loops.
+   - Use `.agent/harness-evolution.json` and `python3 scripts/agent_gc.py classify ...` to classify repeated failures and promote fixes into rules, skills, scripts, workflow gates, loop contracts, role contracts, tool/MCP policy, or docs.
    - Use `.agent/skill-hygiene.json` and `scripts/agent_skill_hygiene.py` as a read-only skill topology/source/hash/frontmatter/symlink/risk-signal scan; cleanup and canary injection require explicit human confirmation.
    - For `standard` and `full`, ensure `.agent/project-skills.json` and `scripts/agent_project_skills.py` exist.
    - Use `.agent/project-skills.json` as the canonical repo-local registry for intentionally governed project skills; keep `skills.manifest.json` as the production/release boundary and `workspace-tools.manifest.json` as workspace-only helper awareness when present.
@@ -116,6 +129,7 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
    - Ensure Codex adapters exist: `.codex/config.toml`, `.codex/hooks.json`, and `.codex/agents/governance-*.toml`.
    - Ensure Claude adapters exist when Claude support is enabled: `.claude/settings.json` and `.claude/agents/governance-*.md`.
    - Preserve existing native config files by default; report skipped files for manual merge.
+   - Keep native hooks EOF-safe, UTF-8-BOM tolerant, valid-JSON when the host requires JSON, empty-context preserving, and explicit about whether hook files/manifests are preserved, stripped, suppressed, or skipped during packaging.
 
 11. **Validate**
    - Run the generated project check when available: `python3 scripts/agent_check.py`.
@@ -152,6 +166,7 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
 - `assets/templates/agent-context.py.tmpl`: Source for generated target-project `.agent/tools/agent_context.py`.
 - `assets/templates/agent-capabilities.py.tmpl`: Source for generated target-project `scripts/agent_capabilities.py`.
 - `assets/templates/agent-resources.py.tmpl`: Source for generated target-project `scripts/agent_resources.py`.
+- `assets/templates/agent-runtime.py.tmpl`: Source for generated target-project `scripts/agent_runtime.py`.
 - `assets/templates/agent-skill-hygiene.py.tmpl`: Source for generated target-project `scripts/agent_skill_hygiene.py`.
 - `assets/templates/agent-project-skills.py.tmpl`: Source for generated target-project `scripts/agent_project_skills.py`.
 - `assets/templates/agent-runlog.py.tmpl`: Source for generated target-project `scripts/agent_runlog.py`.
@@ -163,7 +178,7 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
 - `assets/templates/agent-verify.py.tmpl`: Source for generated target-project `scripts/agent_verify.py`.
 - `assets/templates/agent-gc.py.tmpl`: Source for generated target-project `scripts/agent_gc.py`.
 - `assets/templates/agent-spec.py.tmpl`: Source for generated target-project `scripts/agent_spec.py`.
-- `references/workflow-governance.md`: Workflow gates, worktree isolation, TDD/debugging evidence, review sequencing, and completion proof.
+- `references/workflow-governance.md`: Workflow gates, loop engineering, worktree isolation, TDD/debugging evidence, review sequencing, and completion proof.
 - `references/implementation-discipline.md`: Assumption clarification, simplicity-first implementation, surgical change boundaries, and goal-driven verification.
 - `references/spec-management.md`: Embedded OpenSpec-style specification rules.
 - `references/harness-management.md`: Harness files, native adapters, commands, validation, and safety rules.
@@ -178,6 +193,8 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
 - Do not treat Codex thread history, VS Code tabs, terminal scrollback, or unsaved buffers as durable state.
 - Do not store secrets, SSH keys, tokens, host credentials, or private environment values in `.agent/`.
 - Do not store raw resource credentials or private secret material in `.agent/resources.json`; use generated local templates or external vault/proxy/keychain references.
+- Do not store model API keys, provider tokens, private base URLs with credentials, or other raw model secrets in `.agent/model-profiles.json`; use `env:`, `file-ref:`, `vault:`, `proxy:`, `op:`, or `keychain:` references.
+- Do not confuse agent-gov development session state with product runtime state; user conversations, product memory, MCP calls, traces, queues, and databases belong to the application layer.
 - Do not store raw transcripts, terminal scrollback, secrets, or private host data in `.agent/runlog.jsonl`.
 - Preserve existing project files by default; create missing files and report conflicts instead of silently rewriting.
 - Prefer simple, direct implementations and justify new abstractions, speculative flexibility, or broad cleanup with recorded evidence.

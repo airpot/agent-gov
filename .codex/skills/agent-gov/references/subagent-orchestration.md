@@ -79,6 +79,8 @@ Roles are descriptive, not a license to bypass platform limits. Use the role nam
 10. Keep supporting notes within `.agent/context.json` budget, default 700 estimated tokens after the required JSON snapshot.
 11. Record accepted worker, verifier, or reviewer snapshots in `.agent/runlog.jsonl` when they materially affect validation, risk, or handoff.
 12. Run post-integration validation locally; do not trust a subagent completion report as final evidence.
+13. For external-source research, require searchers to label each source `verified`, `partial`, or `blocked`, and to separate direct facts from inference.
+14. For complexity audits, use a reviewer or quality reviewer pass that only reports delete/reuse/stdlib/native/dependency findings; route correctness, security, and spec findings to the normal review roles.
 
 ## Snapshot Contract
 
@@ -99,11 +101,22 @@ Follow it with JSON:
   "critical_finding": "short finding",
   "next_dependency": "recommended next task or none",
   "estimated_risk_level": "low | medium | high | critical",
+  "source_status": [],
   "validation": []
 }
 ```
 
 After the JSON, the subagent may add concise notes. It must separate confirmed facts from inference when reporting risks. Critical-risk work is not autonomous modification work; return `BLOCKED` or `DONE_WITH_CONCERNS` with the reason if the assignment crosses that boundary.
+
+Use `source_status` for research or ecosystem checks:
+
+```json
+[
+  {"url_or_path": "https://example.test/source", "status": "verified | partial | blocked", "evidence": "short handle"}
+]
+```
+
+Blocked or captcha-gated sources can be recorded as exclusions, but their unverified content must not drive implementation or governance rules.
 
 Handle statuses this way:
 
@@ -131,6 +144,7 @@ For reviews, one line per finding is preferred unless security or architecture r
 - Reconcile conflicts through a reviewer role or local review.
 - For implementation, run `spec_reviewer` and resolve findings before `quality_reviewer`.
 - Enforce finder-cannot-fix: verifier, spec reviewer, quality reviewer, and risk reviewer roles report findings and route fixes back to a coordinator or worker. They do not modify implementation files to resolve their own findings.
+- Keep complexity-only audit snapshots separate from correctness/security review snapshots so line-count or dependency reduction does not mask safety regressions.
 - Run relevant harness commands after integrating worker changes.
 - Add a checkpoint that records the accepted snapshots, rejected snapshots, validation, and remaining risks.
 - Add runlog evidence for accepted high-risk snapshots and any skipped post-integration validation.

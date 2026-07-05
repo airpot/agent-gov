@@ -1,0 +1,106 @@
+# Skill Runtime Governance
+
+This project uses `.agent/skill-runtime.json` to govern portable Skill and plugin-style runtime architecture.
+
+Use this document when building, adapting, reviewing, or releasing a project Skill, native host adapter, slash command, hook, or benchmark claim.
+
+## Core Model
+
+Portable Skills should use one canonical core plus thin host adapters:
+
+```text
+canonical core:  SKILL.md, AGENTS.md, references/, scripts/, assets/
+host adapters:   .codex/, .claude/, .cursor/, .github/, MCP contracts, or project-defined projections
+```
+
+Durable behavior belongs in the canonical core. Host adapters load, project, or activate that behavior; they should not become independent behavior forks.
+
+When a rule is copied into more than one host adapter, keep parity evidence:
+
+- generated projection
+- content hash
+- invariant phrase set
+- manual merge note
+
+Release claims need adapter parity evidence or an explicit skipped-adapter note.
+
+Hook packaging must also be explicit. A release or adapter sync should state whether hook files and hook manifests are preserved, stripped, suppressed by an empty hooks object, or skipped for manual merge. Orphaned hook files or manifest entries are findings.
+
+## Runtime Modes
+
+Runtime modes are governed, not improvised. `.agent/skill-runtime.json` records:
+
+- allowed modes
+- default mode
+- deactivation mode
+- persistence policy
+- switch command pattern
+- activation events
+- fallback behavior
+- hook output and write boundaries
+
+Mode state belongs in host-owned state or ignored local files. Do not commit mode state or secrets into the repo.
+
+Native hooks must avoid stdin deadlocks, tolerate empty stdin, strip a leading UTF-8 BOM before JSON parsing, preserve intentional empty `additionalContext` strings, emit valid JSON when the host requires JSON, and exit non-zero when mandatory output is invalid.
+
+## Command Lanes
+
+Map every native command, slash command, or Skill command to a declared lane:
+
+- `mode_switch`: changes mode or state
+- `complexity_review`: reviews a diff for avoidable complexity only
+- `repository_audit`: scans the repo for avoidable complexity only
+- `debt_harvest`: reads deliberate simplification markers
+- `impact_scoreboard`: reports measured benchmark impact
+- `help_status`: reports active modes and command help
+
+Commands that change state must state where they persist data and how to deactivate.
+
+## Review Lanes
+
+Keep review lanes separate:
+
+- `spec_compliance`: requested behavior and spec scope
+- `quality_security`: maintainability, tests, security, privacy, data loss, accessibility, performance
+- `complexity_only`: deletion, reuse, stdlib/native replacement, existing dependency replacement, shrink, defer
+- `debt_ledger`: simplification markers, ceilings, upgrade triggers
+- `impact_benchmark`: benchmark isolation, contamination, gates, artifacts, limitations
+
+A complexity-only review must not replace correctness or safety review.
+
+## Impact Benchmarks
+
+Skill-impact claims need evidence before they influence release or architecture decisions:
+
+- baseline arm
+- skill-enabled arm
+- isolated workspaces or plugin dirs
+- pinned tasks or repos
+- contamination self-test
+- correctness or safety gate
+- preserved outputs
+- limitation notes
+
+Do not claim per-repo savings without a real baseline. Reductions that drop requirements, validation, data-loss handling, security, privacy, or accessibility do not count as improvement.
+
+## Shortcut Debt
+
+Deliberate simplifications with known ceilings should be marked with the project-neutral marker:
+
+```text
+agent-gov-debt: <what was simplified>; ceiling: <limit>; upgrade_trigger: <when to revisit>
+```
+
+Harvesting markers is read-only by default. Persist ledgers only when requested, usually in `docs/tech-debt.md` or a feature document.
+
+## Local Checks
+
+Run:
+
+```bash
+python3 scripts/agent_verify.py doctor
+python3 scripts/agent_score.py doctor
+python3 scripts/agent_score.py score --write
+```
+
+Generated local doctors must remain dependency-free: Python standard library, JSON inspection, no network, no package install, no global plugin state, and no external MCP server required.

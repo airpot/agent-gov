@@ -110,6 +110,88 @@ def spec_delta_errors(base: Path, metadata: dict[str, Any]) -> list[str]:
     return errors
 
 
+def iter_change_metadata(*, include_archived: bool = False) -> list[tuple[Path, dict[str, Any], str]]:
+    rows: list[tuple[Path, dict[str, Any], str]] = []
+    for metadata_path in sorted(CHANGES_ROOT.glob("*/.agent-spec.json")):
+        rows.append((metadata_path.parent, read_json(metadata_path), "active"))
+    if include_archived:
+        for metadata_path in sorted(ARCHIVE_ROOT.glob("*/.agent-spec.json")):
+            rows.append((metadata_path.parent, read_json(metadata_path), "archived"))
+    return rows
+
+
+def _safe_resolved(path: Path) -> Path | None:
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return None
+    try:
+        resolved.relative_to(ROOT)
+    except ValueError:
+        return None
+    return resolved
+
+
+def _candidate_from_path(raw: str) -> tuple[Path, dict[str, Any], str] | None:
+    path = Path(raw)
+    candidates = [path]
+    if not path.is_absolute():
+        candidates.append(ROOT / path)
+    for candidate in candidates:
+        resolved = _safe_resolved(candidate)
+        if resolved is None:
+            continue
+        if resolved.name == ".agent-spec.json":
+            base = resolved.parent
+        else:
+            base = resolved
+        metadata_path = base / ".agent-spec.json"
+        if not metadata_path.exists():
+            continue
+        try:
+            base.relative_to(ARCHIVE_ROOT)
+            state = "archived"
+        except ValueError:
+            state = "active"
+        return base, read_json(metadata_path), state
+    return None
+
+
+def resolve_change(raw: str, *, include_archived: bool = False, require_active: bool = False) -> tuple[Path, dict[str, Any], str]:
+    token = raw.strip()
+    if not token:
+        raise SystemExit("error: change name cannot be empty")
+
+    path_candidate = _candidate_from_path(token)
+    if path_candidate is not None:
+        base, metadata, state = path_candidate
+        if require_active and state != "active":
+            raise SystemExit(f"error: change is archived, not active: {base.relative_to(ROOT)}")
+        return base, metadata, state
+
+    normalized = normalize_name(token)
+    matches: list[tuple[Path, dict[str, Any], str]] = []
+    for base, metadata, state in iter_change_metadata(include_archived=include_archived):
+        names = {
+            normalize_name(str(metadata.get("name", ""))),
+            normalize_name(base.name),
+        }
+        if state == "archived" and base.name.endswith(f"-{normalized}"):
+            names.add(normalized)
+        if normalized in names:
+            matches.append((base, metadata, state))
+
+    if require_active:
+        matches = [match for match in matches if match[2] == "active"]
+    if not matches:
+        suffix = " active or archived" if include_archived and not require_active else " active"
+        raise SystemExit(f"error: change not found:{suffix} {token}")
+    if len(matches) > 1:
+        paths = ", ".join(match[0].relative_to(ROOT).as_posix() for match in matches)
+        raise SystemExit(f"error: ambiguous change reference {token!r}: {paths}")
+    return matches[0]
+
+
 def metadata_errors(metadata_path: Path, metadata: dict[str, Any], task_ids: set[str] | None) -> list[str]:
     errors: list[str] = []
     name = str(metadata.get("name") or metadata_path.parent.name)
@@ -143,18 +225,14 @@ def task_counts(path: Path) -> dict[str, int]:
     return {"complete": complete, "incomplete": incomplete, "total": complete + incomplete}
 
 
-def load_change(name: str) -> tuple[Path, dict[str, Any]]:
-    base = change_dir(name)
-    if not base.exists():
-        raise SystemExit(f"error: change not found: {name}")
-    metadata = read_json(base / ".agent-spec.json")
+def load_change(name: str, *, include_archived: bool = False, require_active: bool = False) -> tuple[Path, dict[str, Any]]:
+    base, metadata, _state = resolve_change(name, include_archived=include_archived, require_active=require_active)
     if not metadata:
-        metadata = {"name": name, "status": "active", "summary": ""}
+        metadata = {"name": base.name, "status": "active", "summary": ""}
     return base, metadata
 
 
-def status_payload(name: str) -> dict[str, Any]:
-    base, metadata = load_change(name)
+def status_payload_from_base(base: Path, metadata: dict[str, Any]) -> dict[str, Any]:
     artifacts: list[dict[str, str]] = []
     missing_or_draft: list[str] = []
     for artifact in ARTIFACTS:
@@ -193,6 +271,11 @@ def status_payload(name: str) -> dict[str, Any]:
         "tasks": counts,
         "state": state,
     }
+
+
+def status_payload(name: str) -> dict[str, Any]:
+    base, metadata = load_change(name, include_archived=True)
+    return status_payload_from_base(base, metadata)
 
 
 def command_new_change(args: argparse.Namespace) -> int:
@@ -279,7 +362,7 @@ def command_validate(args: argparse.Namespace) -> int:
         name = metadata.get("name", metadata_path.parent.name)
         errors.extend(metadata_errors(metadata_path, metadata, task_ids))
         errors.extend(f"change {name} {error}" for error in spec_delta_errors(metadata_path.parent, metadata))
-        status = status_payload(name)
+        status = status_payload_from_base(metadata_path.parent, metadata)
         if status["state"] == "all_done":
             errors.append(
                 f"change {name} is complete but still active; run `python3 scripts/agent_spec.py archive {name}`"
@@ -305,8 +388,9 @@ def command_validate(args: argparse.Namespace) -> int:
 
 
 def command_archive(args: argparse.Namespace) -> int:
-    name = normalize_name(args.change)
-    payload = status_payload(name)
+    base, metadata, _state = resolve_change(args.change, require_active=True)
+    name = str(metadata.get("name") or base.name)
+    payload = status_payload_from_base(base, metadata)
     if payload["state"] != "all_done" and not args.force:
         print(f"error: change is not complete ({payload['state']}); use --force to archive anyway", file=sys.stderr)
         return 1
@@ -319,9 +403,8 @@ def command_archive(args: argparse.Namespace) -> int:
         print(f"error: change has {tasks['incomplete']} incomplete task(s); use --force to archive anyway", file=sys.stderr)
         return 1
 
-    base, metadata = load_change(name)
     archive_date = args.date or datetime.now(timezone.utc).date().isoformat()
-    target = ARCHIVE_ROOT / f"{archive_date}-{name}"
+    target = ARCHIVE_ROOT / f"{archive_date}-{normalize_name(name)}"
     if target.exists():
         print(f"error: archive target already exists: {target.relative_to(ROOT)}", file=sys.stderr)
         return 1

@@ -55,5 +55,8 @@ Use this glossary to keep agent, reviewer, and maintainer language precise. Pref
 - Snapshot: A structured subagent result, usually marked with `===SNAPSHOT===`, that can be accepted into session state.
 - Spec review: Review that checks whether the implementation matches the requested behavior and scope.
 - Quality review: Review that checks maintainability, tests, safety, project conventions, and residual risk after spec review.
+- Loop engineering: The practice of designing iterative agent work as bounded loops with a goal, observation signal, iteration budget, stop conditions, evidence, and escalation path.
+- Loop contract: The durable record that names a loop type, owner role, goal, observation signal, iteration budget, stop conditions, evidence path, and escalation rule before repeated attempts.
 - Review-fix loop: The cycle of independent review, targeted fix, revalidation, and re-review until the release gate passes or an exception is recorded.
+- Iteration budget: The maximum number of loop attempts before the agent must stop, summarize evidence, and re-plan or ask for help.
 - Vibe coding: Informal coding driven by conversational momentum. In this project, convert it into specs, plans, evidence, and handoffs before relying on it.

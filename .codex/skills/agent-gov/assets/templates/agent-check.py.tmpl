@@ -24,6 +24,7 @@ BASE_REQUIRED = [
     ".agent/project-layout.json",
     ".agent/workflow.json",
     ".agent/workflow-profiles.json",
+    ".agent/loop-engineering.json",
     ".agent/risk-zones.json",
     ".agent/review-policy.json",
     ".agent/worktrees.json",
@@ -35,6 +36,10 @@ BASE_REQUIRED = [
     ".agent/dev-map.json",
     ".agent/skill-hygiene.json",
     ".agent/project-skills.json",
+    ".agent/skill-runtime.json",
+    ".agent/runtime-policy.json",
+    ".agent/model-profiles.json",
+    ".agent/agent-runtime.json",
     ".agent/memory.json",
     ".agent/context.json",
     ".agent/capabilities.json",
@@ -54,6 +59,7 @@ BASE_REQUIRED = [
     ".agent/memory/summaries/.gitkeep",
     ".agent/context/stats.jsonl",
     ".agent/context/latest.md",
+    ".agent/intake/.gitkeep",
     ".agent/skill-distribution.json",
     ".agent/sessions/index.json",
     ".agent/sessions/events.jsonl",
@@ -66,6 +72,7 @@ BASE_REQUIRED = [
     ".agent/templates/refs/.gitkeep",
     ".agent/templates/project-review.md.tmpl",
     ".agent/templates/project-fix-log.md.tmpl",
+    ".agent/templates/intake-packet.md.tmpl",
     ".agent/templates/implementation-plan.md.tmpl",
     ".agent/templates/debugging-record.md.tmpl",
     ".agent/templates/subagent-task.md.tmpl",
@@ -105,6 +112,7 @@ BASE_REQUIRED = [
     "scripts/agent_capabilities.py",
     "scripts/agent_skill_hygiene.py",
     "scripts/agent_project_skills.py",
+    "scripts/agent_runtime.py",
     "scripts/agent_runlog.py",
     "scripts/agent_tooling.py",
     "scripts/agent_security.py",
@@ -124,6 +132,9 @@ BASE_REQUIRED = [
     "docs/AI_CODING_GLOSSARY.md",
     "docs/DOMAIN_GLOSSARY.md",
     "docs/DEV_MAP.md",
+    "docs/LOOP_ENGINEERING.md",
+    "docs/AGENT_RUNTIME_ARCHITECTURE.md",
+    "docs/SKILL_RUNTIME.md",
     "docs/features/INDEX.md",
     "docs/features/.gitkeep",
     "docs/tech-debt.md",
@@ -160,6 +171,7 @@ LEGACY_CONFIG_PATH_KEYS = {
     "spec_root",
     "workflow_config",
     "workflow_profiles",
+    "loop_engineering",
     "worktree_policy",
     "risk_zones",
     "review_policy",
@@ -171,6 +183,10 @@ LEGACY_CONFIG_PATH_KEYS = {
     "dev_map",
     "skill_hygiene",
     "project_skills",
+    "skill_runtime",
+    "runtime_policy",
+    "model_profiles",
+    "agent_runtime",
     "memory_config",
     "context_config",
     "capabilities_config",
@@ -192,6 +208,27 @@ LEGACY_CONFIG_PATH_KEYS = {
 }
 REVIEW_STATUSES = {"pending", "needs-fix", "pass", "accepted-with-exceptions", "not-required"}
 REQUIREMENT_STATUSES = {"pending", "in-progress", "complete", "blocked", "not-required"}
+DECOMPOSITION_STATUSES = {"pending", "in-progress", "complete", "blocked", "not-required"}
+GOAL_CONFIRMATION_STATUSES = {"confirmed", "agent_assumed", "pending", "blocked"}
+TASK_DECOMPOSITION_EVIDENCE_FIELDS = ("summary", "next_task", "evidence_path")
+GOAL_CONTRACT_REQUIRED_FIELDS = (
+    "raw_user_goal",
+    "refined_goal",
+    "refinement_rationale",
+    "user_confirmation_status",
+    "objective",
+    "user_approved_outcome",
+    "non_goals",
+    "constraints",
+    "success_evidence",
+    "stop_conditions",
+    "current_decision_summary",
+    "open_decisions",
+    "linked_task_id",
+    "linked_spec_change_id",
+)
+GOAL_CONTRACT_LIST_FIELDS = {"non_goals", "constraints", "success_evidence", "stop_conditions", "open_decisions"}
+GOAL_CONTRACT_NONEMPTY_LIST_FIELDS = {"non_goals", "constraints", "success_evidence", "stop_conditions"}
 REQUIREMENT_PROTECTED_STAGES = {
     "plan",
     "gate_review",
@@ -323,6 +360,121 @@ def context_tracked_files(root: Path, context: dict) -> list[str]:
     return result
 
 
+def validate_skill_runtime(root: Path, path: Path) -> list[str]:
+    errors: list[str] = []
+    runtime = load_json(path, str(path.relative_to(root) if path.is_absolute() else path))
+    if runtime.get("schema") != "agent-skill-runtime-v1":
+        return [".agent/skill-runtime.json schema must be agent-skill-runtime-v1"]
+    required_sections = [
+        "source_evidence",
+        "canonical_core",
+        "host_adapters",
+        "runtime_modes",
+        "command_lanes",
+        "review_lanes",
+        "impact_benchmarks",
+        "shortcut_debt",
+        "dependency_policy",
+    ]
+    for section in required_sections:
+        if section not in runtime:
+            errors.append(f".agent/skill-runtime.json missing section: {section}")
+    evidence = runtime.get("source_evidence", [])
+    if not isinstance(evidence, list) or not evidence:
+        errors.append(".agent/skill-runtime.json source_evidence must be a non-empty list")
+    else:
+        for item in evidence:
+            if item.get("status") not in {"verified", "partial", "blocked"}:
+                errors.append(".agent/skill-runtime.json source_evidence status must be verified, partial, or blocked")
+    core = runtime.get("canonical_core", {})
+    patterns = set(core.get("path_patterns", []))
+    for pattern in ("SKILL.md", "AGENTS.md", "references/", "scripts/", "assets/"):
+        if pattern not in patterns:
+            errors.append(f".agent/skill-runtime.json canonical_core missing path pattern: {pattern}")
+    for key in ("core_files_are_authoritative", "adapters_must_be_thin", "do_not_duplicate_behavior_in_host_adapters"):
+        if core.get(key) is not True:
+            errors.append(f".agent/skill-runtime.json canonical_core must enable {key}")
+    adapter_policy = runtime.get("host_adapters", {}).get("parity_policy", {})
+    for key in (
+        "canonical_source_required",
+        "adapter_drift_must_be_detected",
+        "release_claim_requires_parity_evidence",
+        "hook_projection_boundary_required",
+        "orphaned_hook_files_are_findings",
+        "empty_hooks_object_may_suppress_autodiscovery",
+    ):
+        if adapter_policy.get(key) is not True:
+            errors.append(f".agent/skill-runtime.json adapter parity policy must enable {key}")
+    adapters = runtime.get("host_adapters", {}).get("adapter_targets", [])
+    if not isinstance(adapters, list) or not adapters:
+        errors.append(".agent/skill-runtime.json host_adapters.adapter_targets must be non-empty")
+    else:
+        for adapter in adapters:
+            for key in ("host", "path_patterns", "capability_tier", "projection_type", "parity_check"):
+                if key not in adapter:
+                    errors.append(f".agent/skill-runtime.json adapter target missing {key}")
+    modes = runtime.get("runtime_modes", {})
+    allowed_modes = modes.get("allowed_modes", [])
+    for mode in ("off", "advisory", "standard", "strict", "audit-only"):
+        if mode not in allowed_modes:
+            errors.append(f".agent/skill-runtime.json runtime_modes missing mode: {mode}")
+    if modes.get("deactivation_mode") not in allowed_modes:
+        errors.append(".agent/skill-runtime.json deactivation_mode must be an allowed mode")
+    hook_boundaries = modes.get("hook_boundaries", {})
+    for key in (
+        "read_only_by_default",
+        "stdin_must_not_deadlock",
+        "stdin_errors_degrade_safely",
+        "strip_utf8_bom_before_json_parse",
+        "valid_json_required_when_host_requires_json",
+        "preserve_empty_additional_context",
+        "invalid_mandatory_output_exits_nonzero",
+        "failure_degrades_safely",
+        "hook_must_not_store_secrets",
+    ):
+        if hook_boundaries.get(key) is not True:
+            errors.append(f".agent/skill-runtime.json hook_boundaries must enable {key}")
+    lanes = runtime.get("command_lanes", {})
+    for lane in ("mode_switch", "complexity_review", "repository_audit", "debt_harvest", "impact_scoreboard", "help_status"):
+        if lane not in lanes:
+            errors.append(f".agent/skill-runtime.json missing command lane: {lane}")
+    review_lanes = runtime.get("review_lanes", {})
+    for lane in ("spec_compliance", "quality_security", "complexity_only", "debt_ledger", "impact_benchmark"):
+        if lane not in review_lanes:
+            errors.append(f".agent/skill-runtime.json missing review lane: {lane}")
+    complexity = review_lanes.get("complexity_only", {})
+    forbidden = set(complexity.get("forbidden_findings", []))
+    for finding in ("correctness", "security", "privacy", "data-loss", "accessibility"):
+        if finding not in forbidden:
+            errors.append(f".agent/skill-runtime.json complexity_only must route {finding} out of complexity audit")
+    benchmark_policy = runtime.get("impact_benchmarks", {}).get("policy", {})
+    for key in (
+        "baseline_arm_required",
+        "skill_enabled_arm_required",
+        "isolated_workspaces_or_plugin_dirs_required",
+        "contamination_selftest_required",
+        "correctness_or_safety_gate_required",
+        "preserve_outputs",
+        "record_limitations",
+        "reduction_claims_must_not_drop_safety_or_requirements",
+    ):
+        if benchmark_policy.get(key) is not True:
+            errors.append(f".agent/skill-runtime.json impact benchmark policy must enable {key}")
+    debt = runtime.get("shortcut_debt", {})
+    if debt.get("marker") != "agent-gov-debt:":
+        errors.append(".agent/skill-runtime.json shortcut_debt marker must be agent-gov-debt:")
+    for field in ("ceiling", "upgrade_trigger"):
+        if field not in debt.get("required_fields", []):
+            errors.append(f".agent/skill-runtime.json shortcut_debt required_fields missing {field}")
+    dependency_policy = runtime.get("dependency_policy", {})
+    for key in ("local_doctors_dependency_free", "python_standard_library_only_for_generated_checks", "no_network_required_for_doctor", "no_global_plugin_state_required_for_doctor"):
+        if dependency_policy.get(key) is not True:
+            errors.append(f".agent/skill-runtime.json dependency policy must enable {key}")
+    if not (root / "docs/SKILL_RUNTIME.md").exists():
+        errors.append("missing docs/SKILL_RUNTIME.md")
+    return errors
+
+
 def check_session_offload(root: Path) -> list[str]:
     errors: list[str] = []
     index_path = root / ".agent/sessions/index.json"
@@ -336,10 +488,15 @@ def check_session_offload(root: Path) -> list[str]:
     if not active_session:
         return errors
     session_dir = root / ".agent/sessions" / str(active_session)
-    required = ["grounding.md", "offload.jsonl", "offload-index.md", "task-map.mmd", "refs/.gitkeep"]
+    required = ["grounding.md", "offload.jsonl", "offload-index.md", "task-map.mmd", "refs/.gitkeep", "refs/git-status-short.txt"]
     for name in required:
         if not (session_dir / name).exists():
             errors.append(f"active session missing {session_dir / name}")
+    snapshot_path = session_dir / "refs/git-status-short.txt"
+    if snapshot_path.exists():
+        result = subprocess.run(["git", "status", "--short"], cwd=root, text=True, capture_output=True, check=False)
+        if result.returncode == 0 and snapshot_path.read_text(encoding="utf-8").rstrip("\n") != result.stdout.rstrip("\n"):
+            errors.append(f"{snapshot_path} must match current git status --short")
     grounding_text = (session_dir / "grounding.md").read_text(encoding="utf-8", errors="ignore") if (session_dir / "grounding.md").exists() else ""
     if "Repository Truth" not in grounding_text or "override memory summaries" not in grounding_text:
         errors.append(f"{session_dir / 'grounding.md'} must record truth-first repository grounding")
@@ -422,6 +579,113 @@ def normalized_requirements(item: dict) -> dict:
     if not isinstance(merged.get("open_questions"), list):
         merged["open_questions"] = [str(merged.get("open_questions"))]
     return merged
+
+
+def normalized_goal_contract(item: dict) -> dict:
+    contract = item.get("goal_contract")
+    if not isinstance(contract, dict):
+        contract = {}
+    merged = {
+        "raw_user_goal": "",
+        "refined_goal": "",
+        "refinement_rationale": "",
+        "user_confirmation_status": "pending",
+        "objective": "",
+        "user_approved_outcome": "",
+        "non_goals": [],
+        "constraints": [],
+        "success_evidence": [],
+        "stop_conditions": [],
+        "current_decision_summary": "",
+        "open_decisions": [],
+        "linked_task_id": str(item.get("id", "")),
+        "linked_spec_change_id": str(item.get("spec_change", "")),
+    }
+    merged.update(contract)
+    for field in GOAL_CONTRACT_LIST_FIELDS:
+        value = merged.get(field)
+        if value is None or value == "":
+            merged[field] = []
+        elif not isinstance(value, list):
+            merged[field] = [str(value)]
+    return merged
+
+
+def goal_contract_required(item: dict, policy: dict) -> bool:
+    required_profiles = set(policy.get("goal_contract_required_for_profiles", ["standard", "full"]))
+    required_states = set(policy.get("goal_contract_required_states", ["active", "review", "done"]))
+    required_stages = set(policy.get("goal_contract_required_before_stages", []))
+    return str(item.get("profile", "")) in required_profiles and (
+        str(item.get("state", "")) in required_states or str(item.get("current_stage", "")) in required_stages
+    )
+
+
+def validate_goal_contract(task_id: str, item: dict, policy: dict) -> str | None:
+    if not goal_contract_required(item, policy):
+        return None
+    contract = normalized_goal_contract(item)
+    required_fields = policy.get("goal_contract_required_fields") or list(GOAL_CONTRACT_REQUIRED_FIELDS)
+    for field in required_fields:
+        value = contract.get(field)
+        if field in GOAL_CONTRACT_LIST_FIELDS:
+            present = isinstance(value, list) and (
+                field not in GOAL_CONTRACT_NONEMPTY_LIST_FIELDS or any(str(entry).strip() for entry in value)
+            )
+            if not present:
+                return f"task {task_id} goal_contract missing {field}"
+        elif not str(value or "").strip():
+            return f"task {task_id} goal_contract missing {field}"
+    if contract.get("linked_task_id") and contract.get("linked_task_id") != task_id:
+        return f"task {task_id} goal_contract linked_task_id must match task id"
+    if contract.get("user_confirmation_status") not in GOAL_CONFIRMATION_STATUSES:
+        return f"task {task_id} goal_contract user_confirmation_status is invalid"
+    return None
+
+
+def normalized_task_decomposition(item: dict) -> dict:
+    profile_name = str(item.get("profile", "standard"))
+    decomposition = item.get("task_decomposition")
+    if not isinstance(decomposition, dict):
+        decomposition = {}
+    merged = {
+        "required": True,
+        "status": "pending",
+        "summary": "",
+        "next_task": "",
+        "subtasks": [],
+        "dependencies": [],
+        "evidence_path": "",
+        "no_task_board_tiny_evidence": "" if profile_name == "tiny" else "not-applicable",
+    }
+    merged.update(decomposition)
+    merged["required"] = bool(merged.get("required") is not False)
+    if merged.get("status") not in DECOMPOSITION_STATUSES:
+        merged["status"] = "pending" if merged["required"] else "not-required"
+    for field in ("subtasks", "dependencies"):
+        if not isinstance(merged.get(field), list):
+            merged[field] = [str(merged.get(field))]
+    return merged
+
+
+def validate_task_decomposition(task_id: str, item: dict, policy: dict) -> str | None:
+    decomposition = normalized_task_decomposition(item)
+    if decomposition.get("status") not in DECOMPOSITION_STATUSES:
+        return f"task {task_id} task_decomposition has invalid status: {decomposition.get('status')}"
+    if not decomposition.get("required"):
+        return None
+    complete_before_done = policy.get("task_decomposition_complete_before_done") is True
+    protected = set(policy.get("task_decomposition_required_before_stages", []))
+    current_stage = str(item.get("current_stage", ""))
+    must_be_complete = (item.get("state") == "done" and complete_before_done) or current_stage in protected
+    if not must_be_complete:
+        return None
+    if decomposition.get("status") != "complete":
+        return f"task {task_id} task_decomposition must be complete before {current_stage or item.get('state')}"
+    has_evidence = any(str(decomposition.get(field, "")).strip() for field in TASK_DECOMPOSITION_EVIDENCE_FIELDS)
+    has_subtasks = any(str(entry).strip() for entry in decomposition.get("subtasks", []))
+    if not has_evidence and not has_subtasks:
+        return f"task {task_id} task_decomposition missing summary, next_task, evidence_path, or subtasks"
+    return None
 
 
 def validate_requirements(task_id: str, item: dict, profile: dict, policy: dict, root: Path) -> str | None:
@@ -526,6 +790,87 @@ def validate_stage_reviews(task_id: str, item: dict, profile: dict, policy: dict
             errors.append(f"task {task_id} stage review {stage} missing latest_review")
         elif policy.get("review_gate_latest_review_must_exist") is True and not (root / latest_review).exists():
             errors.append(f"task {task_id} stage review {stage} latest_review path is missing: {latest_review}")
+    return errors
+
+
+def validate_loop_engineering(loop_config: dict, workflow: dict, harness_evolution: dict | None = None) -> list[str]:
+    errors: list[str] = []
+    if loop_config.get("schema") != "agent-loop-engineering-v1":
+        return ["error: .agent/loop-engineering.json schema must be agent-loop-engineering-v1"]
+    policy = loop_config.get("policy", {})
+    for key in (
+        "loop_contract_required_for_non_tiny_work",
+        "bounded_iterations_required",
+        "observation_signal_required",
+        "stop_conditions_required",
+        "evidence_per_iteration_required",
+        "same_failure_requires_strategy_change",
+        "budget_exhaustion_blocks_completion_claim",
+        "human_interrupt_for_high_risk_or_destructive",
+        "self_approval_is_not_release_evidence",
+        "finder_cannot_fix_applies_to_review_loops",
+        "prevalidate_inputs_before_expensive_work",
+        "failed_runs_exit_nonzero",
+        "failed_runs_record_evidence_paths",
+        "failed_optimization_cannot_be_improvement",
+    ):
+        if policy.get(key) is not True:
+            errors.append(f"error: .agent/loop-engineering.json policy missing {key}")
+    threshold = policy.get("repeat_failure_threshold")
+    if not isinstance(threshold, int) or threshold < 2:
+        errors.append("error: .agent/loop-engineering.json repeat_failure_threshold must be an integer >= 2")
+    loop_types = loop_config.get("loop_types", {})
+    required_types = {"work_loop", "review_fix_loop", "debugging_loop", "eval_optimization_loop", "session_recovery_loop"}
+    for loop_type in required_types:
+        spec = loop_types.get(loop_type)
+        if not isinstance(spec, dict):
+            errors.append(f"error: .agent/loop-engineering.json missing loop type: {loop_type}")
+            continue
+        if not isinstance(spec.get("sequence"), list) or not spec.get("sequence"):
+            errors.append(f"error: loop type {loop_type} missing sequence")
+        if loop_type == "eval_optimization_loop":
+            if "prevalidate" not in spec.get("sequence", []):
+                errors.append("error: .agent/loop-engineering.json eval_optimization_loop must prevalidate inputs")
+            if "failed_run" not in spec.get("stop_conditions", []):
+                errors.append("error: .agent/loop-engineering.json eval_optimization_loop must stop on failed_run")
+        budget = spec.get("default_iteration_budget")
+        if not isinstance(budget, int) or budget < 1:
+            errors.append(f"error: loop type {loop_type} default_iteration_budget must be a positive integer")
+        for key in ("observation_signals", "stop_conditions", "evidence"):
+            if not isinstance(spec.get(key), list) or not spec.get(key):
+                errors.append(f"error: loop type {loop_type} missing {key}")
+    escalation = loop_config.get("escalation", {})
+    for key in ("on_same_failure_repeated", "after_repeat_failure_threshold", "classification_command", "preferred_categories"):
+        if not escalation.get(key):
+            errors.append(f"error: .agent/loop-engineering.json escalation missing {key}")
+    if "loop_gap" not in escalation.get("preferred_categories", []):
+        errors.append("error: .agent/loop-engineering.json escalation preferred_categories must include loop_gap")
+    gates = workflow.get("gates", {}) if isinstance(workflow, dict) else {}
+    loop_gate = gates.get("loop_engineering", {})
+    for key in (
+        "loop_contract_required",
+        "iteration_budget_required",
+        "observation_signal_required",
+        "stop_conditions_required",
+        "evidence_per_iteration_required",
+        "same_failure_requires_strategy_change",
+        "repeat_failures_promote_to_harness_evolution",
+        "human_interrupt_for_high_risk_or_destructive",
+        "self_approval_forbidden",
+    ):
+        if loop_gate.get(key) is not True:
+            errors.append(f"error: .agent/workflow.json loop_engineering gate missing {key}")
+    if set(loop_gate.get("required_for_profiles", [])) != {"standard", "full"}:
+        errors.append("error: .agent/workflow.json loop_engineering gate must apply to standard and full profiles")
+    if loop_gate.get("policy") != ".agent/loop-engineering.json":
+        errors.append("error: .agent/workflow.json loop_engineering gate must point to .agent/loop-engineering.json")
+    if harness_evolution:
+        categories = harness_evolution.get("incident_categories", {})
+        targets = harness_evolution.get("promotion_targets", {})
+        if "loop_gap" not in categories:
+            errors.append("error: .agent/harness-evolution.json missing loop_gap incident category")
+        if ".agent/loop-engineering.json" not in targets.get("loop_gap", []):
+            errors.append("error: .agent/harness-evolution.json loop_gap targets must include .agent/loop-engineering.json")
     return errors
 
 
@@ -708,7 +1053,7 @@ def main() -> int:
                 return 1
         workflow_stages = set(workflow.get("stages", []))
         stage_definitions = workflow.get("stage_definitions", {})
-        for stage in ("intake", "requirement_interview", "risk_classification", "implementation", "spec_review", "quality_review", "verification", "handoff"):
+        for stage in ("intake", "goal_refinement", "requirement_interview", "risk_classification", "task_decomposition", "implementation", "spec_review", "quality_review", "verification", "handoff"):
             definition = stage_definitions.get(stage, {})
             if not definition:
                 print(f"error: .agent/workflow.json missing stage definition: {stage}")
@@ -723,10 +1068,14 @@ def main() -> int:
                 return 1
         gates = workflow.get("gates", {})
         for gate in (
+            "goal_refinement",
             "risk_classification",
             "requirements_interview",
+            "technology_stack_intake",
+            "task_decomposition",
             "design_approval",
             "plan_quality",
+            "loop_engineering",
             "implementation_discipline",
             "diff_traceability",
             "tdd",
@@ -740,6 +1089,25 @@ def main() -> int:
             if gate not in gates:
                 print(f"error: .agent/workflow.json missing gate: {gate}")
                 return 1
+        goal_refinement = gates.get("goal_refinement", {})
+        if goal_refinement.get("preserve_raw_user_goal") is not True:
+            print("error: .agent/workflow.json goal_refinement must preserve raw_user_goal")
+            return 1
+        if goal_refinement.get("write_refined_goal_before_durable_goal") is not True:
+            print("error: .agent/workflow.json goal_refinement must write refined goal before durable goal")
+            return 1
+        if set(goal_refinement.get("required_for_profiles", [])) != {"bugfix", "standard", "full"}:
+            print("error: .agent/workflow.json goal_refinement must apply to bugfix, standard, and full profiles")
+            return 1
+        technology_stack = gates.get("technology_stack_intake", {})
+        for key in ("ask_one_question_at_a_time", "provide_recommended_answer_and_reason", "do_not_rely_on_transient_chat"):
+            if technology_stack.get(key) is not True:
+                print(f"error: .agent/workflow.json technology_stack_intake missing policy: {key}")
+                return 1
+        task_decomposition = gates.get("task_decomposition", {})
+        if set(task_decomposition.get("required_for_profiles", [])) != {"tiny", "bugfix", "standard", "full"}:
+            print("error: .agent/workflow.json task_decomposition must apply to all profiles")
+            return 1
         discipline = gates.get("implementation_discipline", {})
         for key in (
             "state_assumptions_when_ambiguous",
@@ -790,8 +1158,8 @@ def main() -> int:
             print("error: .agent/workflow.json review_fix_gate must require a next review after fixes")
             return 1
         completion = gates.get("completion_verification", {})
-        if "standard" not in completion.get("review_fix_gate_required_for_profiles", []) or "full" not in completion.get("review_fix_gate_required_for_profiles", []):
-            print("error: .agent/workflow.json completion gate must require review_fix_gate for standard and full profiles")
+        if set(completion.get("review_fix_gate_required_for_profiles", [])) != {"tiny", "bugfix", "standard", "full"}:
+            print("error: .agent/workflow.json completion gate must require review_fix_gate for all profiles")
             return 1
         if completion.get("completed_spec_changes_must_be_archived") is not True:
             print("error: .agent/workflow.json completion gate must require completed spec changes to be archived")
@@ -810,6 +1178,16 @@ def main() -> int:
         if not gates.get("human_review_evidence", {}).get("requires_diff_or_file_review"):
             print("error: .agent/workflow.json human review evidence must require diff or file review")
             return 1
+        loop_path = root / ".agent/loop-engineering.json"
+        if loop_path.exists():
+            harness_evolution = {}
+            evolution_path = root / ".agent/harness-evolution.json"
+            if evolution_path.exists():
+                harness_evolution = load_json(evolution_path, ".agent/harness-evolution.json")
+            loop_errors = validate_loop_engineering(load_json(loop_path, ".agent/loop-engineering.json"), workflow, harness_evolution)
+            if loop_errors:
+                print(loop_errors[0])
+                return 1
 
     profiles_path = root / ".agent/workflow-profiles.json"
     if profiles_path.exists():
@@ -827,9 +1205,13 @@ def main() -> int:
                 if key not in spec:
                     print(f"error: workflow profile {profile} missing {key}")
                     return 1
-            if profile in {"standard", "full"} and spec.get("review_gate_required") is not True:
+            if spec.get("review_gate_required") is not True:
                 print(f"error: workflow profile {profile} must require review gate")
                 return 1
+            for required_stage in ("goal_refinement", "task_decomposition"):
+                if required_stage not in spec.get("stages", []):
+                    print(f"error: workflow profile {profile} missing {required_stage}")
+                    return 1
             for stage in spec.get("stages", []):
                 if workflow_stages and stage not in workflow_stages:
                     print(f"error: workflow profile {profile} references unknown stage: {stage}")
@@ -844,7 +1226,7 @@ def main() -> int:
         if task_board.get("schema") != "agent-task-board-v1":
             print("error: .agent/task-board.json schema must be agent-task-board-v1")
             return 1
-        for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path", "requirements", "delivery_conclusion", "review_gate", "stage_reviews", "related_tasks"):
+        for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path", "requirements", "task_decomposition", "delivery_conclusion", "review_gate", "stage_reviews", "related_tasks"):
             if field not in task_board.get("required_fields", []):
                 print(f"error: .agent/task-board.json missing required field declaration: {field}")
                 return 1
@@ -852,8 +1234,26 @@ def main() -> int:
             print("error: .agent/task-board.json must require new sessions to read the task board")
             return 1
         task_policy = task_board.get("policy", {})
-        if set(task_policy.get("done_requires_review_gate_pass_for_profiles", [])) != {"standard", "full"}:
-            print("error: .agent/task-board.json must require review_gate pass for standard and full done tasks")
+        if set(task_policy.get("done_requires_review_gate_pass_for_profiles", [])) != {"tiny", "bugfix", "standard", "full"}:
+            print("error: .agent/task-board.json must require review_gate pass for all task profiles")
+            return 1
+        if set(task_policy.get("goal_contract_required_for_profiles", [])) != {"bugfix", "standard", "full"}:
+            print("error: .agent/task-board.json must require goal_contract for bugfix, standard, and full profiles")
+            return 1
+        if set(task_policy.get("goal_contract_required_states", [])) != {"active", "review", "done"}:
+            print("error: .agent/task-board.json must require goal_contract for active, review, and done states")
+            return 1
+        if not {"plan", "implementation", "verification", "handoff"}.issubset(set(task_policy.get("goal_contract_required_before_stages", []))):
+            print("error: .agent/task-board.json must require goal_contract before protected implementation stages")
+            return 1
+        if set(task_policy.get("goal_contract_required_fields", [])) != set(GOAL_CONTRACT_REQUIRED_FIELDS):
+            print("error: .agent/task-board.json goal_contract required fields must match generated policy")
+            return 1
+        if set(task_policy.get("task_decomposition_required_for_profiles", [])) != {"tiny", "bugfix", "standard", "full"}:
+            print("error: .agent/task-board.json must require task_decomposition for all task profiles")
+            return 1
+        if task_policy.get("task_decomposition_complete_before_done") is not True:
+            print("error: .agent/task-board.json must require task_decomposition before done")
             return 1
         if task_policy.get("review_fix_loop_required_at_stage_exit") is not True:
             print("error: .agent/task-board.json must require review-fix loops at stage exit")
@@ -896,6 +1296,14 @@ def main() -> int:
             requirements_error = validate_requirements(task_id, item, profile, task_policy, root)
             if requirements_error:
                 print(f"error: {requirements_error}")
+                return 1
+            decomposition_error = validate_task_decomposition(task_id, item, task_policy)
+            if decomposition_error:
+                print(f"error: {decomposition_error}")
+                return 1
+            goal_error = validate_goal_contract(task_id, item, task_policy)
+            if goal_error:
+                print(f"error: {goal_error}")
                 return 1
             gate_error = validate_review_gate(task_id, item, profile, task_policy, root)
             if gate_error:
@@ -1123,6 +1531,12 @@ def main() -> int:
             print("error: missing scripts/agent_project_skills.py")
             return 1
 
+    skill_runtime_path = root / ".agent/skill-runtime.json"
+    if skill_runtime_path.exists():
+        for error in validate_skill_runtime(root, skill_runtime_path):
+            print(f"error: {error}")
+            return 1
+
     memory_path = root / ".agent/memory.json"
     if memory_path.exists():
         memory = load_json(memory_path, ".agent/memory.json")
@@ -1237,6 +1651,26 @@ def main() -> int:
             print(f"error: resource catalog doctor failed: {output}")
             return 1
 
+    runtime_paths = [
+        (".agent/runtime-policy.json", "agent-runtime-policy-v1"),
+        (".agent/model-profiles.json", "agent-model-profiles-v1"),
+        (".agent/agent-runtime.json", "agent-runtime-selection-v1"),
+    ]
+    if any((root / path).exists() for path, _schema in runtime_paths):
+        for path, schema in runtime_paths:
+            runtime_config = load_json(root / path, path)
+            if runtime_config.get("schema") != schema:
+                print(f"error: {path} schema must be {schema}")
+                return 1
+        if not (root / "scripts/agent_runtime.py").exists():
+            print("error: missing scripts/agent_runtime.py")
+            return 1
+        result = subprocess.run([sys.executable, "scripts/agent_runtime.py", "doctor"], text=True, capture_output=True, check=False)
+        if result.returncode != 0:
+            output = (result.stdout + result.stderr).strip()
+            print(f"error: agent runtime doctor failed: {output}")
+            return 1
+
     tooling_path = root / ".agent/tooling.json"
     if tooling_path.exists():
         tooling = load_json(tooling_path, ".agent/tooling.json")
@@ -1287,12 +1721,14 @@ def main() -> int:
             "dev_map",
             "skill_hygiene",
             "project_skills",
+            "skill_runtime",
             "harness_evolution",
             "governance_gc",
             "template_rendering",
             "test_baseline",
             "markdown_links",
             "resource_catalog",
+            "agent_runtime_architecture",
         ]
         if (root / ".agent/mcp-policy.json").exists():
             required_mechanical_checks.append("mcp_policy")

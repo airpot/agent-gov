@@ -110,6 +110,80 @@ def assert_install_skill_scope(temp_root: Path) -> None:
         raise SystemExit(1)
 
 
+def assert_doctor_requires_target_skill(temp_root: Path) -> None:
+    project = temp_root / "doctor-target-skill"
+    project.mkdir(parents=True, exist_ok=True)
+
+    missing = run(["node", str(NPM_BIN), "doctor", str(project)], cwd=PACKAGE_ROOT, expect_ok=False)
+    missing_output = missing.stdout + missing.stderr
+    if "missing - target agent-gov skill" not in missing_output:
+        print("doctor did not report the missing target agent-gov skill", file=sys.stderr)
+        print(missing_output, file=sys.stderr)
+        raise SystemExit(1)
+
+    run(["node", str(NPM_BIN), "install-skill", str(project)], cwd=PACKAGE_ROOT)
+    installed = run(["node", str(NPM_BIN), "doctor", str(project)], cwd=PACKAGE_ROOT)
+    installed_output = installed.stdout + installed.stderr
+    if "ok - target agent-gov skill" not in installed_output:
+        print("doctor did not report the installed target agent-gov skill", file=sys.stderr)
+        print(installed_output, file=sys.stderr)
+        raise SystemExit(1)
+
+
+def assert_blank_project_default_profile(temp_root: Path) -> None:
+    blank = temp_root / "blank-default-full"
+    blank.mkdir(parents=True, exist_ok=True)
+    run(["node", str(NPM_BIN), "init", str(blank), "--layout", "minimal", "--remote-kind", "local"], cwd=PACKAGE_ROOT)
+    blank_config = json.loads((blank / ".agent" / "config.json").read_text(encoding="utf-8"))
+    if blank_config.get("governance_profile") != "full":
+        print("blank project did not default to full governance profile", file=sys.stderr)
+        print(json.dumps(blank_config, indent=2), file=sys.stderr)
+        raise SystemExit(1)
+    for relative in (".agent/subagents.json", ".agent/hooks.json", ".agent/tooling.json", ".codex/config.toml", "scripts/agent_tooling.py"):
+        if not (blank / relative).exists():
+            print(f"blank project full default did not create full-profile artifact: {relative}", file=sys.stderr)
+            raise SystemExit(1)
+
+    existing = temp_root / "existing-default-standard"
+    existing.mkdir(parents=True, exist_ok=True)
+    (existing / "README.md").write_text("# Existing Project\n", encoding="utf-8")
+    run(["node", str(NPM_BIN), "init", str(existing), "--layout", "minimal", "--remote-kind", "local"], cwd=PACKAGE_ROOT)
+    existing_config = json.loads((existing / ".agent" / "config.json").read_text(encoding="utf-8"))
+    if existing_config.get("governance_profile") != "standard":
+        print("existing project did not default to standard governance profile", file=sys.stderr)
+        print(json.dumps(existing_config, indent=2), file=sys.stderr)
+        raise SystemExit(1)
+    if (existing / ".agent" / "subagents.json").exists():
+        print("existing project standard default unexpectedly created full-profile subagent config", file=sys.stderr)
+        raise SystemExit(1)
+
+    explicit = temp_root / "blank-explicit-standard"
+    explicit.mkdir(parents=True, exist_ok=True)
+    run(
+        [
+            "node",
+            str(NPM_BIN),
+            "init",
+            str(explicit),
+            "--layout",
+            "minimal",
+            "--remote-kind",
+            "local",
+            "--governance-profile",
+            "standard",
+        ],
+        cwd=PACKAGE_ROOT,
+    )
+    explicit_config = json.loads((explicit / ".agent" / "config.json").read_text(encoding="utf-8"))
+    if explicit_config.get("governance_profile") != "standard":
+        print("explicit standard profile was not respected for a blank project", file=sys.stderr)
+        print(json.dumps(explicit_config, indent=2), file=sys.stderr)
+        raise SystemExit(1)
+    if (explicit / ".agent" / "subagents.json").exists():
+        print("explicit standard profile unexpectedly created full-profile subagent config", file=sys.stderr)
+        raise SystemExit(1)
+
+
 def assert_workflow_stage_closure(target: Path) -> None:
     workflow_path = target / ".agent" / "workflow.json"
     profiles_path = target / ".agent" / "workflow-profiles.json"
@@ -117,11 +191,34 @@ def assert_workflow_stage_closure(target: Path) -> None:
         return
     workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
     profiles = json.loads(profiles_path.read_text(encoding="utf-8"))
+    config_path = target / ".agent" / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8")) if config_path.exists() else {}
+    governance_profile = config.get("governance_profile", "standard")
     workflow_stages = set(workflow.get("stages", []))
     gates = workflow.get("gates", {})
+    goal_refinement = gates.get("goal_refinement", {})
+    technology_stack = gates.get("technology_stack_intake", {})
+    task_decomposition = gates.get("task_decomposition", {})
     stage_loop = gates.get("stage_review_loop", {})
     review_fix = gates.get("review_fix_gate", {})
     completion = gates.get("completion_verification", {})
+    for stage in ("goal_refinement", "task_decomposition"):
+        if stage not in workflow_stages or stage not in workflow.get("stage_definitions", {}):
+            print(f"workflow is missing autonomous stage: {stage}", file=sys.stderr)
+            raise SystemExit(1)
+    if goal_refinement.get("preserve_raw_user_goal") is not True or goal_refinement.get("write_refined_goal_before_durable_goal") is not True:
+        print("goal_refinement gate does not preserve and refine user goals", file=sys.stderr)
+        raise SystemExit(1)
+    if set(goal_refinement.get("required_for_profiles", [])) != {"bugfix", "standard", "full"}:
+        print("goal_refinement gate does not apply to bugfix/standard/full profiles", file=sys.stderr)
+        raise SystemExit(1)
+    for key in ("ask_one_question_at_a_time", "provide_recommended_answer_and_reason", "do_not_rely_on_transient_chat"):
+        if technology_stack.get(key) is not True:
+            print(f"technology_stack_intake does not enforce {key}", file=sys.stderr)
+            raise SystemExit(1)
+    if set(task_decomposition.get("required_for_profiles", [])) != {"tiny", "bugfix", "standard", "full"}:
+        print("task_decomposition gate does not apply to all profiles", file=sys.stderr)
+        raise SystemExit(1)
     if set(stage_loop.get("required_for_profiles", [])) != {"standard", "full"}:
         print("stage_review_loop does not apply to standard/full profiles", file=sys.stderr)
         raise SystemExit(1)
@@ -134,7 +231,41 @@ def assert_workflow_stage_closure(target: Path) -> None:
     if completion.get("completed_spec_changes_must_be_archived") is not True:
         print("completion gate does not require completed spec changes to be archived", file=sys.stderr)
         raise SystemExit(1)
+    if set(completion.get("review_fix_gate_required_for_profiles", [])) != {"tiny", "bugfix", "standard", "full"}:
+        print("completion gate does not require review-fix for all profiles", file=sys.stderr)
+        raise SystemExit(1)
+    task_board_path = target / ".agent" / "task-board.json"
+    if task_board_path.exists():
+        task_board = json.loads(task_board_path.read_text(encoding="utf-8"))
+        policy = task_board.get("policy", {})
+        if set(policy.get("done_requires_review_gate_pass_for_profiles", [])) != {"tiny", "bugfix", "standard", "full"}:
+            print("task board does not require done review gates for all profiles", file=sys.stderr)
+            raise SystemExit(1)
+        if set(policy.get("goal_contract_required_for_profiles", [])) != {"bugfix", "standard", "full"}:
+            print("task board does not require goal contracts for bugfix/standard/full", file=sys.stderr)
+            raise SystemExit(1)
+        if set(policy.get("goal_contract_required_states", [])) != {"active", "review", "done"}:
+            print("task board does not require goal contracts through done", file=sys.stderr)
+            raise SystemExit(1)
+        if not {"plan", "implementation", "verification", "handoff"}.issubset(set(policy.get("goal_contract_required_before_stages", []))):
+            print("task board does not require goal contracts before protected implementation stages", file=sys.stderr)
+            raise SystemExit(1)
+        if set(policy.get("task_decomposition_required_for_profiles", [])) != {"tiny", "bugfix", "standard", "full"}:
+            print("task board does not require task decomposition for all profiles", file=sys.stderr)
+            raise SystemExit(1)
+    if governance_profile in {"standard", "full"}:
+        for relative in (".agent/intake/.gitkeep", ".agent/templates/intake-packet.md.tmpl"):
+            if not (target / relative).exists():
+                print(f"autonomous intake path was not generated: {relative}", file=sys.stderr)
+                raise SystemExit(1)
     for name, profile in profiles.get("profiles", {}).items():
+        if profile.get("review_gate_required") is not True:
+            print(f"workflow profile {name} does not require a review gate", file=sys.stderr)
+            raise SystemExit(1)
+        for stage in ("goal_refinement", "task_decomposition"):
+            if stage not in profile.get("stages", []):
+                print(f"workflow profile {name} does not include {stage}", file=sys.stderr)
+                raise SystemExit(1)
         for stage in profile.get("stages", []):
             if stage not in workflow_stages:
                 print(f"workflow profile {name} references unknown stage: {stage}", file=sys.stderr)
@@ -325,6 +456,30 @@ Verify completed active changes cannot pass doctor.
     if not list((target / "openspec" / "changes" / "archive").glob("*-archive-gate")):
         print("archive-gate was not moved into openspec/changes/archive", file=sys.stderr)
         raise SystemExit(1)
+    archived_status = json.loads(run([python, "scripts/agent_spec.py", "status", "--change", "archive-gate", "--json"], cwd=target).stdout)
+    if archived_status.get("change", {}).get("status") != "archived":
+        print("agent_spec.py status did not resolve the archived change", file=sys.stderr)
+        print(json.dumps(archived_status, indent=2), file=sys.stderr)
+        raise SystemExit(1)
+    run(
+        [
+            python,
+            "scripts/agent_spec.py",
+            "new-change",
+            "archive-gate",
+            "--summary",
+            "Ambiguous archive fixture.",
+            "--profile",
+            "tiny",
+        ],
+        cwd=target,
+    )
+    ambiguous = run([python, "scripts/agent_spec.py", "status", "--change", "archive-gate", "--json"], cwd=target, expect_ok=False)
+    if "ambiguous change reference" not in (ambiguous.stdout + ambiguous.stderr):
+        print("agent_spec.py status did not reject active/archive ambiguity", file=sys.stderr)
+        print(ambiguous.stdout + ambiguous.stderr, file=sys.stderr)
+        raise SystemExit(1)
+    shutil.rmtree(change)
     run([python, "scripts/agent_spec.py", "doctor"], cwd=target)
 
 
@@ -390,6 +545,172 @@ def assert_core_session_resume_is_profile_aware(target: Path, python: str) -> No
             raise SystemExit(1)
 
 
+def assert_session_doctor_handles_long_git_status(temp_root: Path, python: str) -> None:
+    target = temp_root / "long-git-status-session"
+    target.mkdir(parents=True, exist_ok=True)
+    run(
+        [
+            python,
+            str(INIT_SCRIPT),
+            str(target),
+            "--layout",
+            "minimal",
+            "--remote-kind",
+            "local",
+            "--governance-profile",
+            "core",
+        ],
+        cwd=PACKAGE_ROOT,
+    )
+    run(["git", "init"], cwd=target)
+    for index in range(95):
+        (target / f"dirty-status-{index:03d}.txt").write_text(f"dirty {index}\n", encoding="utf-8")
+    run(
+        [
+            python,
+            ".agent/tools/agent_session.py",
+            "start",
+            "long-status",
+            "--goal",
+            "Long git status smoke",
+        ],
+        cwd=target,
+    )
+    doctor = run([python, ".agent/tools/agent_session.py", "doctor"], cwd=target)
+    doctor_text = doctor.stdout + doctor.stderr
+    if "worktree has changes not reflected" in doctor_text:
+        print("session doctor produced a false dirty-tree warning for a long git status", file=sys.stderr)
+        print(doctor_text, file=sys.stderr)
+        raise SystemExit(1)
+    index_data = json.loads((target / ".agent" / "sessions" / "index.json").read_text(encoding="utf-8"))
+    session_id = index_data.get("active_session")
+    if not session_id:
+        print("long git status smoke did not create an active session", file=sys.stderr)
+        raise SystemExit(1)
+    snapshot_path = target / ".agent" / "sessions" / session_id / "refs" / "git-status-short.txt"
+    snapshot_text = snapshot_path.read_text(encoding="utf-8")
+    current_status = run(["git", "status", "--short"], cwd=target).stdout
+    if snapshot_text.rstrip("\n") != current_status.rstrip("\n"):
+        print("session git status snapshot does not match current git status", file=sys.stderr)
+        print(snapshot_path, file=sys.stderr)
+        raise SystemExit(1)
+    bootstrap_text = (target / ".agent" / "sessions" / session_id / "bootstrap.md").read_text(encoding="utf-8")
+    if "refs/git-status-short.txt" not in bootstrap_text:
+        print("bootstrap.md does not point to the full git status snapshot", file=sys.stderr)
+        raise SystemExit(1)
+    run([python, ".agent/tools/agent_session.py", "compact", "--summary", "Long status compact"], cwd=target)
+    changes_text = (target / ".agent" / "sessions" / session_id / "changes.md").read_text(encoding="utf-8")
+    if "refs/git-status-short.txt" not in changes_text:
+        print("changes.md does not point to the full git status snapshot", file=sys.stderr)
+        raise SystemExit(1)
+
+    tracked = temp_root / "tracked-session-status"
+    tracked.mkdir(parents=True, exist_ok=True)
+    run(
+        [
+            python,
+            str(INIT_SCRIPT),
+            str(tracked),
+            "--layout",
+            "minimal",
+            "--remote-kind",
+            "local",
+            "--governance-profile",
+            "core",
+        ],
+        cwd=PACKAGE_ROOT,
+    )
+    run(["git", "init"], cwd=tracked)
+    run(["git", "config", "user.email", "review@example.com"], cwd=tracked)
+    run(["git", "config", "user.name", "Review"], cwd=tracked)
+    run(["git", "add", "."], cwd=tracked)
+    run(["git", "commit", "-m", "init"], cwd=tracked)
+    run(
+        [
+            python,
+            ".agent/tools/agent_session.py",
+            "start",
+            "tracked-status",
+            "--goal",
+            "Tracked status smoke",
+        ],
+        cwd=tracked,
+    )
+    run(["git", "add", "."], cwd=tracked)
+    run(["git", "commit", "-m", "session"], cwd=tracked)
+    run([python, ".agent/tools/agent_session.py", "doctor"], cwd=tracked)
+    tracked_index = json.loads((tracked / ".agent" / "sessions" / "index.json").read_text(encoding="utf-8"))
+    tracked_session_id = tracked_index.get("active_session")
+    tracked_snapshot = tracked / ".agent" / "sessions" / tracked_session_id / "refs" / "git-status-short.txt"
+    tracked_status = run(["git", "status", "--short"], cwd=tracked).stdout
+    if tracked_snapshot.read_text(encoding="utf-8").rstrip("\n") != tracked_status.rstrip("\n"):
+        print("tracked session git status snapshot became stale after doctor/bootstrap writes", file=sys.stderr)
+        print(tracked_snapshot, file=sys.stderr)
+        raise SystemExit(1)
+
+
+def assert_native_hook_json_contract(target: Path, python: str) -> None:
+    hook_path = target / ".agent" / "tools" / "governance_hook.py"
+    if not hook_path.exists():
+        print("governance hook script was not generated", file=sys.stderr)
+        raise SystemExit(1)
+
+    codex_hooks_path = target / ".codex" / "hooks.json"
+    hooks = json.loads(codex_hooks_path.read_text(encoding="utf-8"))
+    session_hooks = hooks.get("hooks", {}).get("SessionStart", [])
+    commands = [
+        item.get("command", "")
+        for block in session_hooks
+        for item in block.get("hooks", [])
+        if isinstance(item, dict)
+    ]
+    if not commands or not all("--json-output" in command for command in commands):
+        print("generated Codex hooks do not request JSON hook output", file=sys.stderr)
+        print(json.dumps(hooks, indent=2), file=sys.stderr)
+        raise SystemExit(1)
+
+    stop = subprocess.run(
+        [python, str(hook_path), "--event", "stop", "--json-output", "--strict-json-input"],
+        cwd=target,
+        text=True,
+        input="\ufeff{\"additionalContext\":\"\"}",
+        capture_output=True,
+        check=False,
+    )
+    if stop.returncode != 0:
+        print("JSON hook stop command failed with BOM stdin", file=sys.stderr)
+        print(stop.stdout, file=sys.stderr)
+        print(stop.stderr, file=sys.stderr)
+        raise SystemExit(stop.returncode)
+    stop_payload = json.loads(stop.stdout)
+    if stop_payload.get("additionalContext") != "":
+        print("JSON hook did not preserve empty additionalContext", file=sys.stderr)
+        print(stop.stdout, file=sys.stderr)
+        raise SystemExit(1)
+    if stop_payload.get("hookSpecificOutput", {}).get("additionalContext") != "":
+        print("JSON hook hookSpecificOutput did not preserve empty additionalContext", file=sys.stderr)
+        print(stop.stdout, file=sys.stderr)
+        raise SystemExit(1)
+
+    invalid = subprocess.run(
+        [python, str(hook_path), "--event", "stop", "--json-output", "--strict-json-input"],
+        cwd=target,
+        text=True,
+        input="{invalid",
+        capture_output=True,
+        check=False,
+    )
+    if invalid.returncode == 0:
+        print("strict JSON hook input unexpectedly passed", file=sys.stderr)
+        print(invalid.stdout, file=sys.stderr)
+        raise SystemExit(1)
+    invalid_payload = json.loads(invalid.stdout)
+    if invalid_payload.get("status") != "error":
+        print("strict JSON hook failure did not emit JSON error status", file=sys.stderr)
+        print(invalid.stdout, file=sys.stderr)
+        raise SystemExit(1)
+
+
 def assert_existing_project_adoption(init_script: Path, temp_root: Path, python: str) -> None:
     conflicted = temp_root / "adoption-conflict"
     conflicted.mkdir(parents=True, exist_ok=True)
@@ -453,6 +774,46 @@ def assert_existing_project_adoption(init_script: Path, temp_root: Path, python:
 
 
 def assert_task_board_guards(init_script: Path, temp_root: Path, python: str) -> None:
+    goal_args = [
+        "--goal-raw",
+        "User asked to guard task-board completion.",
+        "--goal-refined",
+        "Verify task-board completion gates reject missing review evidence after goal and decomposition evidence are present.",
+        "--goal-refinement-rationale",
+        "Regression fixture rewrites the raw request into a verifiable completion-gate goal.",
+        "--goal-confirmation-status",
+        "agent_assumed",
+        "--goal-objective",
+        "Verify task-board completion gates.",
+        "--goal-outcome",
+        "Task-board guards reject incomplete completion evidence.",
+        "--goal-decision-summary",
+        "Use deterministic local fixtures to verify task-board completion gates.",
+        "--goal-spec-change",
+        "regression-fixture",
+        "--goal-non-goal",
+        "Do not change application behavior.",
+        "--goal-constraint",
+        "Keep the regression fixture local and deterministic.",
+        "--goal-success-evidence",
+        "agent_task.py, agent_check.py, agent_verify.py, and agent_score.py all detect invalid completion states.",
+        "--goal-stop-condition",
+        "Stop when completion gates fail to reject an invalid fixture.",
+    ]
+    decomposition_args = [
+        "--decomposition-status",
+        "complete",
+        "--decomposition-summary",
+        "Create a task, satisfy requirements, then verify completion gates.",
+        "--decomposition-next-task",
+        "Run generated doctors and hard checks.",
+        "--decomposition-evidence-path",
+        "docs/features/guard-task/04_DEVELOPMENT.md",
+        "--decomposition-subtask",
+        "Create guard task",
+        "--decomposition-subtask",
+        "Verify completion gate rejection",
+    ]
     guarded = temp_root / "task-board-guards"
     guarded.mkdir(parents=True, exist_ok=True)
     run(
@@ -515,6 +876,8 @@ def assert_task_board_guards(init_script: Path, temp_root: Path, python: str) ->
             "done",
             "--conclusion",
             "Implemented and validated.",
+            *goal_args,
+            *decomposition_args,
         ],
         cwd=guarded,
         expect_ok=False,
@@ -561,6 +924,8 @@ def assert_task_board_guards(init_script: Path, temp_root: Path, python: str) ->
             "Guard task scope is understood.",
             "--domain-glossary-updated",
             "--code-docs-cross-checked",
+            *goal_args,
+            *decomposition_args,
         ],
         cwd=guarded,
     )
@@ -688,6 +1053,96 @@ def assert_task_board_guards(init_script: Path, temp_root: Path, python: str) ->
         print("done task with a failing review gate was not reported by hard checks", file=sys.stderr)
         print(review_gate_text, file=sys.stderr)
         raise SystemExit(1)
+
+    for profile in ("tiny", "bugfix"):
+        profile_guard = temp_root / f"task-board-{profile}-review-guard"
+        profile_guard.mkdir(parents=True, exist_ok=True)
+        run(
+            [
+                python,
+                str(init_script),
+                str(profile_guard),
+                "--layout",
+                "minimal",
+                "--governance-profile",
+                "standard",
+            ],
+            cwd=PACKAGE_ROOT,
+        )
+        task_id = f"{profile}-review-task"
+        run(
+            [
+                python,
+                "scripts/agent_task.py",
+                "new",
+                task_id,
+                "--title",
+                f"{profile} review task",
+                "--profile",
+                profile,
+            ],
+            cwd=profile_guard,
+        )
+        command = [
+            python,
+            "scripts/agent_task.py",
+            "update",
+            task_id,
+            "--state",
+            "done",
+            "--conclusion",
+            "Implemented and validated.",
+            "--decomposition-status",
+            "complete",
+            "--decomposition-summary",
+            f"Complete the {profile} review-gate regression fixture.",
+            "--decomposition-next-task",
+            "Verify missing review gate rejection.",
+            "--decomposition-evidence-path",
+            f"docs/features/{task_id}/04_DEVELOPMENT.md",
+            "--decomposition-subtask",
+            "Attempt done without review gate",
+        ]
+        if profile == "bugfix":
+            command.extend(
+                [
+                    "--requirements-status",
+                    "complete",
+                    "--shared-understanding",
+                    "Bugfix review-gate fixture scope is understood.",
+                    "--domain-glossary-updated",
+                    "--code-docs-cross-checked",
+                    "--goal-raw",
+                    "User asked to guard bugfix review completion.",
+                    "--goal-refined",
+                    "Verify bugfix tasks cannot complete without a passing review gate.",
+                    "--goal-refinement-rationale",
+                    "Regression fixture narrows the request to one completion-gate behavior.",
+                    "--goal-confirmation-status",
+                    "agent_assumed",
+                    "--goal-objective",
+                    "Verify bugfix review gate.",
+                    "--goal-outcome",
+                    "Bugfix task completion is blocked without review.",
+                    "--goal-decision-summary",
+                    "Use a deterministic bugfix fixture to verify universal review gates.",
+                    "--goal-spec-change",
+                    "regression-fixture",
+                    "--goal-non-goal",
+                    "Do not test standard stage-review behavior here.",
+                    "--goal-constraint",
+                    "Keep the fixture deterministic.",
+                    "--goal-success-evidence",
+                    "agent_task.py rejects done without review_gate.",
+                    "--goal-stop-condition",
+                    "Stop if bugfix done can bypass review_gate.",
+                ]
+            )
+        profile_result = run(command, cwd=profile_guard, expect_ok=False)
+        if "review_gate" not in (profile_result.stdout + profile_result.stderr):
+            print(f"{profile} done task without review gate was not rejected by review_gate", file=sys.stderr)
+            print(profile_result.stdout + profile_result.stderr, file=sys.stderr)
+            raise SystemExit(1)
 
 
 def assert_resource_catalog_guards(target: Path, python: str) -> None:
@@ -818,7 +1273,7 @@ def assert_session_offload_protocol(target: Path, python: str) -> None:
         print("session offload smoke did not create an active session", file=sys.stderr)
         raise SystemExit(1)
     session_dir = target / ".agent" / "sessions" / session_id
-    for relative in ("grounding.md", "offload.jsonl", "offload-index.md", "task-map.mmd", "refs/.gitkeep"):
+    for relative in ("grounding.md", "offload.jsonl", "offload-index.md", "task-map.mmd", "refs/.gitkeep", "refs/git-status-short.txt"):
         if not (session_dir / relative).exists():
             print(f"session offload artifact missing: {relative}", file=sys.stderr)
             raise SystemExit(1)
@@ -933,6 +1388,9 @@ def main() -> int:
     temp_root = Path(tempfile.mkdtemp(prefix="agent-gov-regression-"))
     try:
         assert_install_skill_scope(temp_root)
+        assert_doctor_requires_target_skill(temp_root)
+        assert_blank_project_default_profile(temp_root)
+        assert_session_doctor_handles_long_git_status(temp_root, python)
         if sys.platform.startswith("win"):
             target = temp_root / "agent-gov"
         else:
@@ -955,6 +1413,8 @@ def main() -> int:
             ],
             cwd=PACKAGE_ROOT,
         )
+
+        assert_native_hook_json_contract(target, python)
 
         config_path = target / ".agent" / "config.json"
         config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -1079,6 +1539,42 @@ def main() -> int:
                 "Regression task scope is understood.",
                 "--domain-glossary-updated",
                 "--code-docs-cross-checked",
+                "--decomposition-status",
+                "complete",
+                "--decomposition-summary",
+                "Create the regression task, satisfy requirements, and enter plan with explicit next steps.",
+                "--decomposition-next-task",
+                "Move the task to plan after spec-stage review evidence is recorded.",
+                "--decomposition-evidence-path",
+                "docs/features/regression-task/04_DEVELOPMENT.md",
+                "--decomposition-subtask",
+                "Create regression task",
+                "--decomposition-subtask",
+                "Validate plan gate behavior",
+                "--goal-raw",
+                "User asked to exercise the regression task plan gate.",
+                "--goal-refined",
+                "Verify a standard regression task can enter plan only after requirements, goal contract, decomposition, and spec review evidence are present.",
+                "--goal-refinement-rationale",
+                "The fixture converts the broad regression task into a specific protected-stage gate check.",
+                "--goal-confirmation-status",
+                "agent_assumed",
+                "--goal-objective",
+                "Verify protected-stage gates for a standard task.",
+                "--goal-outcome",
+                "The task enters plan only after required evidence is complete.",
+                "--goal-decision-summary",
+                "Use a local regression task to exercise requirements, goal, decomposition, and stage-review gates.",
+                "--goal-spec-change",
+                "regression-fixture",
+                "--goal-non-goal",
+                "Do not test release publishing in this fixture.",
+                "--goal-constraint",
+                "Keep the fixture deterministic.",
+                "--goal-success-evidence",
+                "agent_task.py accepts the plan transition after required evidence is present.",
+                "--goal-stop-condition",
+                "Stop if plan can be entered without required evidence.",
             ],
             cwd=target,
         )

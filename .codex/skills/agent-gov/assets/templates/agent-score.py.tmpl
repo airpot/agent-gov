@@ -48,6 +48,7 @@ SCHEMA_JSON_FILES = {
     ".agent/project-layout.json": "agent-project-layout-v1",
     ".agent/workflow.json": "agent-workflow-v1",
     ".agent/workflow-profiles.json": "agent-workflow-profiles-v1",
+    ".agent/loop-engineering.json": "agent-loop-engineering-v1",
     ".agent/risk-zones.json": "agent-risk-zones-v1",
     ".agent/review-policy.json": "agent-review-policy-v1",
     ".agent/worktrees.json": "agent-worktree-policy-v1",
@@ -63,6 +64,10 @@ SCHEMA_JSON_FILES = {
     ".agent/context.json": "agent-context-budget-v1",
     ".agent/capabilities.json": "agent-capabilities-v1",
     ".agent/resources.json": "agent-resource-catalog-v1",
+    ".agent/runtime-policy.json": "agent-runtime-policy-v1",
+    ".agent/model-profiles.json": "agent-model-profiles-v1",
+    ".agent/agent-runtime.json": "agent-runtime-selection-v1",
+    ".agent/skill-runtime.json": "agent-skill-runtime-v1",
     ".agent/tooling.json": "agent-tooling-v1",
     ".agent/security.json": "agent-security-v1",
     ".agent/evals.json": "agent-evals-v1",
@@ -97,6 +102,11 @@ CRITICAL_JSON_FILES = {
     ".agent/skill-hygiene.json",
     ".agent/project-skills.json",
     ".agent/resources.json",
+    ".agent/runtime-policy.json",
+    ".agent/model-profiles.json",
+    ".agent/agent-runtime.json",
+    ".agent/skill-runtime.json",
+    ".agent/loop-engineering.json",
     ".agent/harness-evolution.json",
     ".agent/mcp-policy.json",
     ".agent/governance-gc.json",
@@ -109,6 +119,7 @@ DEFAULT_DIMENSION_WEIGHTS = {
     "required_paths": 16,
     "validation": 10,
     "workflow_profiles": 8,
+    "loop_engineering": 6,
     "task_board": 8,
     "role_contracts": 8,
     "mechanical_verification": 10,
@@ -116,6 +127,8 @@ DEFAULT_DIMENSION_WEIGHTS = {
     "skill_hygiene": 6,
     "project_skills": 6,
     "resource_catalog": 8,
+    "agent_runtime_architecture": 8,
+    "skill_runtime": 8,
     "harness_evolution": 6,
     "mcp_policy": 4,
     "governance_gc": 6,
@@ -134,6 +147,8 @@ DEFAULT_DIMENSION_WEIGHTS = {
 HARD_FAIL_DIMENSIONS = {"project_integrity", "required_paths", "workflow_profiles", "task_board", "mechanical_verification", "session_offload", "governance_gc"}
 REVIEW_STATUSES = {"pending", "needs-fix", "pass", "accepted-with-exceptions", "not-required"}
 REQUIREMENT_STATUSES = {"pending", "in-progress", "complete", "blocked", "not-required"}
+DECOMPOSITION_STATUSES = {"pending", "in-progress", "complete", "blocked", "not-required"}
+GOAL_CONFIRMATION_STATUSES = {"confirmed", "agent_assumed", "pending", "blocked"}
 REQUIREMENT_PROTECTED_STAGES = {
     "plan",
     "gate_review",
@@ -155,6 +170,25 @@ STAGE_REVIEW_REQUIRED_STAGES = (
     "verification",
     "handoff",
 )
+GOAL_CONTRACT_REQUIRED_FIELDS = (
+    "raw_user_goal",
+    "refined_goal",
+    "refinement_rationale",
+    "user_confirmation_status",
+    "objective",
+    "user_approved_outcome",
+    "non_goals",
+    "constraints",
+    "success_evidence",
+    "stop_conditions",
+    "current_decision_summary",
+    "open_decisions",
+    "linked_task_id",
+    "linked_spec_change_id",
+)
+GOAL_CONTRACT_LIST_FIELDS = {"non_goals", "constraints", "success_evidence", "stop_conditions", "open_decisions"}
+GOAL_CONTRACT_NONEMPTY_LIST_FIELDS = {"non_goals", "constraints", "success_evidence", "stop_conditions"}
+TASK_DECOMPOSITION_EVIDENCE_FIELDS = ("summary", "next_task", "evidence_path")
 
 
 def utc_now() -> str:
@@ -487,6 +521,9 @@ def score_workflow_profiles() -> dict:
         for stage in spec.get("stages", []):
             if workflow_stages and stage not in workflow_stages:
                 findings.append(f"profile {name} references unknown stage: {stage}")
+        for stage in ("goal_refinement", "task_decomposition"):
+            if stage not in spec.get("stages", []):
+                findings.append(f"profile {name} missing {stage}")
     policy = profiles.get("policy", {})
     if policy.get("choose_lightest_profile_that_covers_risk") is not True:
         findings.append("profiles must choose the lightest profile that covers risk")
@@ -502,14 +539,32 @@ def score_workflow_profiles() -> dict:
     for key in ("ask_one_question_at_a_time", "provide_recommended_answer_and_reason", "cross_check_user_claims_against_code_and_docs", "update_domain_glossary_for_new_or_ambiguous_terms"):
         if gate.get(key) is not True:
             findings.append(f"requirements_interview gate missing {key}")
-    if configured.get("standard", {}).get("review_gate_required") is not True:
-        findings.append("standard profile must require review gate")
-    if configured.get("full", {}).get("review_gate_required") is not True:
-        findings.append("full profile must require review gate")
+    for profile_name in ("tiny", "bugfix", "standard", "full"):
+        if configured.get(profile_name, {}).get("review_gate_required") is not True:
+            findings.append(f"{profile_name} profile must require review gate")
     gates = workflow.get("gates", {})
+    goal_refinement = gates.get("goal_refinement", {})
+    technology_stack = gates.get("technology_stack_intake", {})
+    task_decomposition = gates.get("task_decomposition", {})
     stage_loop = gates.get("stage_review_loop", {})
     review_fix = gates.get("review_fix_gate", {})
     completion = gates.get("completion_verification", {})
+    for stage in ("goal_refinement", "task_decomposition"):
+        if stage not in workflow_stages:
+            findings.append(f"workflow missing lifecycle stage {stage}")
+        if stage not in workflow.get("stage_definitions", {}):
+            findings.append(f"workflow missing stage definition {stage}")
+    if goal_refinement.get("preserve_raw_user_goal") is not True:
+        findings.append("goal_refinement must preserve raw_user_goal")
+    if goal_refinement.get("write_refined_goal_before_durable_goal") is not True:
+        findings.append("goal_refinement must write refined goal before durable goal")
+    if set(goal_refinement.get("required_for_profiles", [])) != {"bugfix", "standard", "full"}:
+        findings.append("goal_refinement must apply to bugfix, standard, and full profiles")
+    for key in ("ask_one_question_at_a_time", "provide_recommended_answer_and_reason", "do_not_rely_on_transient_chat"):
+        if technology_stack.get(key) is not True:
+            findings.append(f"technology_stack_intake missing {key}")
+    if set(task_decomposition.get("required_for_profiles", [])) != {"tiny", "bugfix", "standard", "full"}:
+        findings.append("task_decomposition must apply to all profiles")
     if set(stage_loop.get("required_for_profiles", [])) != {"standard", "full"}:
         findings.append("stage_review_loop must apply to standard and full profiles")
     if stage_loop.get("loop") != ["review", "fix", "re_review"]:
@@ -519,11 +574,83 @@ def score_workflow_profiles() -> dict:
             findings.append(f"stage_review_loop missing {key}")
     if review_fix.get("applies_to_stage_review_loop") is not True:
         findings.append("review_fix_gate must apply to stage review loops")
+    if set(completion.get("review_fix_gate_required_for_profiles", [])) != {"tiny", "bugfix", "standard", "full"}:
+        findings.append("completion gate must require review_fix_gate for all profiles")
     if completion.get("completed_spec_changes_must_be_archived") is not True:
         findings.append("completion gate must require completed spec changes to be archived")
     score = 100 - min(90, len(findings) * 15)
     evidence = [f"{len(configured)} profiles", f"default={profiles.get('default_profile') or 'none'}"]
     return dimension("workflow_profiles", score, findings, evidence)
+
+
+def score_loop_engineering() -> dict:
+    config = load_json(Path(".agent/loop-engineering.json"))
+    workflow = load_json(Path(".agent/workflow.json"))
+    evolution = load_json(Path(".agent/harness-evolution.json"))
+    findings: list[str] = []
+    if config.get("schema") != "agent-loop-engineering-v1":
+        findings.append("invalid loop-engineering schema")
+    policy = config.get("policy", {})
+    for key in (
+        "loop_contract_required_for_non_tiny_work",
+        "bounded_iterations_required",
+        "observation_signal_required",
+        "stop_conditions_required",
+        "evidence_per_iteration_required",
+        "same_failure_requires_strategy_change",
+        "budget_exhaustion_blocks_completion_claim",
+        "human_interrupt_for_high_risk_or_destructive",
+        "self_approval_is_not_release_evidence",
+        "prevalidate_inputs_before_expensive_work",
+        "failed_runs_exit_nonzero",
+        "failed_runs_record_evidence_paths",
+        "failed_optimization_cannot_be_improvement",
+    ):
+        if policy.get(key) is not True:
+            findings.append(f"loop policy missing {key}")
+    if not isinstance(policy.get("repeat_failure_threshold"), int) or policy.get("repeat_failure_threshold") < 2:
+        findings.append("repeat_failure_threshold must be >= 2")
+    loop_types = config.get("loop_types", {})
+    required_types = ("work_loop", "review_fix_loop", "debugging_loop", "eval_optimization_loop", "session_recovery_loop")
+    for loop_type in required_types:
+        spec = loop_types.get(loop_type, {})
+        if not spec:
+            findings.append(f"missing loop type {loop_type}")
+            continue
+        if not isinstance(spec.get("default_iteration_budget"), int) or spec.get("default_iteration_budget") < 1:
+            findings.append(f"{loop_type} budget must be positive")
+        for key in ("sequence", "observation_signals", "stop_conditions", "evidence"):
+            if not isinstance(spec.get(key), list) or not spec.get(key):
+                findings.append(f"{loop_type} missing {key}")
+        if loop_type == "eval_optimization_loop":
+            if "prevalidate" not in spec.get("sequence", []):
+                findings.append("eval optimization loop must prevalidate inputs")
+            if "failed_run" not in spec.get("stop_conditions", []):
+                findings.append("eval optimization loop must stop on failed runs")
+    gate = workflow.get("gates", {}).get("loop_engineering", {})
+    if set(gate.get("required_for_profiles", [])) != {"standard", "full"}:
+        findings.append("workflow loop_engineering gate must apply to standard and full profiles")
+    if gate.get("policy") != ".agent/loop-engineering.json":
+        findings.append("workflow loop_engineering gate must point to .agent/loop-engineering.json")
+    for key in (
+        "loop_contract_required",
+        "iteration_budget_required",
+        "observation_signal_required",
+        "stop_conditions_required",
+        "evidence_per_iteration_required",
+        "same_failure_requires_strategy_change",
+        "repeat_failures_promote_to_harness_evolution",
+        "human_interrupt_for_high_risk_or_destructive",
+        "self_approval_forbidden",
+    ):
+        if gate.get(key) is not True:
+            findings.append(f"workflow loop_engineering gate missing {key}")
+    if "loop_gap" not in evolution.get("incident_categories", {}):
+        findings.append("harness evolution missing loop_gap category")
+    if ".agent/loop-engineering.json" not in evolution.get("promotion_targets", {}).get("loop_gap", []):
+        findings.append("loop_gap promotion targets must include .agent/loop-engineering.json")
+    score = 100 - min(90, len(findings) * 15)
+    return dimension("loop_engineering", score, findings, [f"{len(loop_types)} loop type(s)"])
 
 
 def profile_requires_review_gate(profile_name: str, profile: dict, policy: dict) -> bool:
@@ -652,6 +779,123 @@ def normalized_requirements(item: dict) -> dict:
     return merged
 
 
+def default_goal_contract(task_id: str = "", spec_change: str = "") -> dict:
+    return {
+        "raw_user_goal": "",
+        "refined_goal": "",
+        "refinement_rationale": "",
+        "user_confirmation_status": "pending",
+        "objective": "",
+        "user_approved_outcome": "",
+        "non_goals": [],
+        "constraints": [],
+        "success_evidence": [],
+        "stop_conditions": [],
+        "current_decision_summary": "",
+        "open_decisions": [],
+        "linked_task_id": task_id,
+        "linked_spec_change_id": spec_change,
+    }
+
+
+def normalized_goal_contract(item: dict) -> dict:
+    contract = item.get("goal_contract")
+    if not isinstance(contract, dict):
+        contract = {}
+    merged = default_goal_contract(str(item.get("id", "")), str(item.get("spec_change", "")))
+    merged.update(contract)
+    for field in GOAL_CONTRACT_LIST_FIELDS:
+        value = merged.get(field)
+        if value is None or value == "":
+            merged[field] = []
+        elif not isinstance(value, list):
+            merged[field] = [str(value)]
+    return merged
+
+
+def default_task_decomposition(profile_name: str) -> dict:
+    return {
+        "required": True,
+        "status": "pending",
+        "summary": "",
+        "next_task": "",
+        "subtasks": [],
+        "dependencies": [],
+        "evidence_path": "",
+        "no_task_board_tiny_evidence": "" if profile_name == "tiny" else "not-applicable",
+    }
+
+
+def normalized_task_decomposition(item: dict) -> dict:
+    profile_name = str(item.get("profile", "standard"))
+    decomposition = item.get("task_decomposition")
+    if not isinstance(decomposition, dict):
+        decomposition = {}
+    merged = default_task_decomposition(profile_name)
+    merged.update(decomposition)
+    merged["required"] = bool(merged.get("required") is not False)
+    if merged.get("status") not in DECOMPOSITION_STATUSES:
+        merged["status"] = "pending" if merged["required"] else "not-required"
+    for field in ("subtasks", "dependencies"):
+        if not isinstance(merged.get(field), list):
+            merged[field] = [str(merged.get(field))]
+    return merged
+
+
+def goal_contract_required(item: dict, policy: dict) -> bool:
+    required_profiles = set(policy.get("goal_contract_required_for_profiles", ["standard", "full"]))
+    required_states = set(policy.get("goal_contract_required_states", ["active", "review", "done"]))
+    required_stages = set(policy.get("goal_contract_required_before_stages", []))
+    return str(item.get("profile", "")) in required_profiles and (
+        str(item.get("state", "")) in required_states or str(item.get("current_stage", "")) in required_stages
+    )
+
+
+def goal_contract_findings(task_id: str, item: dict, policy: dict) -> list[str]:
+    findings: list[str] = []
+    if not goal_contract_required(item, policy):
+        return findings
+    contract = normalized_goal_contract(item)
+    required_fields = policy.get("goal_contract_required_fields") or list(GOAL_CONTRACT_REQUIRED_FIELDS)
+    for field in required_fields:
+        value = contract.get(field)
+        if field in GOAL_CONTRACT_LIST_FIELDS:
+            present = isinstance(value, list) and (
+                field not in GOAL_CONTRACT_NONEMPTY_LIST_FIELDS or any(str(entry).strip() for entry in value)
+            )
+            if not present:
+                findings.append(f"{task_id} goal_contract missing {field}")
+        elif not str(value or "").strip():
+            findings.append(f"{task_id} goal_contract missing {field}")
+    if contract.get("linked_task_id") and contract.get("linked_task_id") != task_id:
+        findings.append(f"{task_id} goal_contract linked_task_id must match task id")
+    if contract.get("user_confirmation_status") not in GOAL_CONFIRMATION_STATUSES:
+        findings.append(f"{task_id} goal_contract user_confirmation_status is invalid")
+    return findings
+
+
+def task_decomposition_findings(task_id: str, item: dict, policy: dict) -> list[str]:
+    findings: list[str] = []
+    decomposition = normalized_task_decomposition(item)
+    if decomposition.get("status") not in DECOMPOSITION_STATUSES:
+        findings.append(f"{task_id} task_decomposition invalid status: {decomposition.get('status')}")
+    if not decomposition.get("required"):
+        return findings
+    complete_before_done = policy.get("task_decomposition_complete_before_done") is True
+    protected = set(policy.get("task_decomposition_required_before_stages", []))
+    current_stage = str(item.get("current_stage", ""))
+    must_be_complete = (item.get("state") == "done" and complete_before_done) or current_stage in protected
+    if not must_be_complete:
+        return findings
+    if decomposition.get("status") != "complete":
+        findings.append(f"{task_id} task_decomposition must be complete before {current_stage or item.get('state')}")
+    has_evidence = any(str(decomposition.get(field, "")).strip() for field in TASK_DECOMPOSITION_EVIDENCE_FIELDS)
+    has_subtasks = any(str(entry).strip() for entry in decomposition.get("subtasks", []))
+    if not has_evidence and not has_subtasks:
+        findings.append(f"{task_id} task_decomposition missing summary, next_task, evidence_path, or subtasks")
+    return findings
+
+
 def requirement_findings(task_id: str, item: dict, profile: dict, policy: dict) -> list[str]:
     findings: list[str] = []
     requirements = normalized_requirements(item)
@@ -684,7 +928,7 @@ def score_task_board() -> dict:
     findings: list[str] = []
     if board.get("schema") != "agent-task-board-v1":
         findings.append("invalid task-board schema")
-    for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path", "requirements", "delivery_conclusion", "review_gate", "stage_reviews", "related_tasks"):
+    for field in ("id", "title", "state", "risk", "profile", "current_stage", "docs_path", "requirements", "task_decomposition", "delivery_conclusion", "review_gate", "stage_reviews", "related_tasks"):
         if field not in board.get("required_fields", []):
             findings.append(f"task board missing required field declaration: {field}")
     policy = board.get("policy", {})
@@ -692,8 +936,20 @@ def score_task_board() -> dict:
         findings.append("task board must require records for non-tiny work")
     if policy.get("new_session_reads_board_before_edits") is not True:
         findings.append("new sessions must read task board before edits")
-    if set(policy.get("done_requires_review_gate_pass_for_profiles", [])) != {"standard", "full"}:
-        findings.append("task board must require review_gate pass for standard and full done tasks")
+    if set(policy.get("done_requires_review_gate_pass_for_profiles", [])) != {"tiny", "bugfix", "standard", "full"}:
+        findings.append("task board must require review_gate pass for all task profiles")
+    if set(policy.get("goal_contract_required_for_profiles", [])) != {"bugfix", "standard", "full"}:
+        findings.append("task board must require refined goal contracts for bugfix, standard, and full profiles")
+    if set(policy.get("goal_contract_required_states", [])) != {"active", "review", "done"}:
+        findings.append("task board must require refined goal contracts for active, review, and done states")
+    if not {"plan", "implementation", "verification", "handoff"}.issubset(set(policy.get("goal_contract_required_before_stages", []))):
+        findings.append("task board must require refined goal contracts before protected implementation stages")
+    if set(policy.get("goal_contract_required_fields", [])) != set(GOAL_CONTRACT_REQUIRED_FIELDS):
+        findings.append("task board goal_contract required fields must match generated policy")
+    if set(policy.get("task_decomposition_required_for_profiles", [])) != {"tiny", "bugfix", "standard", "full"}:
+        findings.append("task board must require task_decomposition for all task profiles")
+    if policy.get("task_decomposition_complete_before_done") is not True:
+        findings.append("task board must require task_decomposition before done")
     if policy.get("review_gate_open_findings_must_be_empty") is not True:
         findings.append("task board must require empty review_gate open findings")
     if policy.get("review_fix_loop_required_at_stage_exit") is not True:
@@ -726,6 +982,8 @@ def score_task_board() -> dict:
             if not str(item.get("delivery_conclusion", "")).strip():
                 findings.append(f"{task_id} is done without delivery_conclusion")
         findings.extend(requirement_findings(task_id, item, profile, policy))
+        findings.extend(goal_contract_findings(task_id, item, policy))
+        findings.extend(task_decomposition_findings(task_id, item, policy))
         findings.extend(review_gate_findings(task_id, item, profile, policy))
         findings.extend(stage_review_findings(task_id, item, profile, policy))
         docs_path = item.get("docs_path")
@@ -783,8 +1041,10 @@ def score_mechanical_verification() -> dict:
         "feature_templates",
         "task_board",
         "role_contracts",
+        "loop_engineering",
         "manifest",
         "skill_hygiene",
+        "skill_runtime",
         "mcp_policy",
         "template_rendering",
         "test_baseline",
@@ -1011,6 +1271,145 @@ def score_resource_catalog() -> dict:
             findings.append("resource catalog has no resources")
     score = 100 - min(90, len(findings) * 15)
     return dimension("resource_catalog", score, findings, [f"{resource_count} resource(s)", f"{enabled_count} enabled"])
+
+
+def score_agent_runtime_architecture() -> dict:
+    findings: list[str] = []
+    expected = {
+        ".agent/runtime-policy.json": "agent-runtime-policy-v1",
+        ".agent/model-profiles.json": "agent-model-profiles-v1",
+        ".agent/agent-runtime.json": "agent-runtime-selection-v1",
+    }
+    for path, schema in expected.items():
+        config = load_json(Path(path))
+        if config.get("schema") != schema:
+            findings.append(f"{path} schema must be {schema}")
+    if not Path("scripts/agent_runtime.py").exists():
+        findings.append("missing scripts/agent_runtime.py")
+        report = {}
+    else:
+        result = subprocess.run([sys.executable, "scripts/agent_runtime.py", "doctor"], text=True, capture_output=True, check=False)
+        if result.returncode != 0:
+            output = (result.stdout + result.stderr).strip()
+            findings.append(f"agent_runtime doctor failed: {output}")
+        report, error = run_json_command([sys.executable, "scripts/agent_runtime.py", "report", "--json"])
+        if error:
+            findings.append(f"agent_runtime report unavailable: {error}")
+            report = {}
+    if report:
+        if report.get("project_target") not in {"agent", "mcp-server", "hybrid", "library"}:
+            findings.append("runtime project target is unknown")
+        if report.get("architecture_style") not in {"skill-first", "skill-first-mcp", "skill-first-hybrid", "skill-first-library", "project-defined"}:
+            findings.append("runtime architecture style is unknown")
+        if not report.get("default_adapter"):
+            findings.append("runtime default adapter is missing")
+        if report.get("model_profiles_required") is True and not report.get("selected_model_profiles"):
+            findings.append("runtime selected model profiles are missing")
+    score = 100 - min(90, len(findings) * 15)
+    evidence = [
+        f"target={report.get('project_target', 'unknown')}" if report else "target=unknown",
+        f"adapter={report.get('default_adapter', 'unknown')}" if report else "adapter=unknown",
+        f"models={','.join(report.get('selected_model_profiles', []))}" if report else "models=unknown",
+    ]
+    return dimension("agent_runtime_architecture", score, findings, evidence)
+
+
+def score_skill_runtime() -> dict:
+    runtime = load_json(Path(".agent/skill-runtime.json"))
+    findings: list[str] = []
+    if runtime.get("schema") != "agent-skill-runtime-v1":
+        findings.append(".agent/skill-runtime.json schema must be agent-skill-runtime-v1")
+    for section in (
+        "source_evidence",
+        "canonical_core",
+        "host_adapters",
+        "runtime_modes",
+        "command_lanes",
+        "review_lanes",
+        "impact_benchmarks",
+        "shortcut_debt",
+        "dependency_policy",
+    ):
+        if section not in runtime:
+            findings.append(f"missing skill runtime section: {section}")
+    evidence_items = runtime.get("source_evidence", [])
+    if not isinstance(evidence_items, list) or not evidence_items:
+        findings.append("skill runtime source evidence is missing")
+    else:
+        for item in evidence_items:
+            if item.get("status") not in {"verified", "partial", "blocked"}:
+                findings.append("skill runtime source evidence uses unknown status")
+    core = runtime.get("canonical_core", {})
+    path_patterns = set(core.get("path_patterns", []))
+    for pattern in ("SKILL.md", "AGENTS.md", "references/", "scripts/", "assets/"):
+        if pattern not in path_patterns:
+            findings.append(f"canonical core missing {pattern}")
+    if core.get("adapters_must_be_thin") is not True:
+        findings.append("host adapters must be thin")
+    host_adapters = runtime.get("host_adapters", {})
+    adapter_count = len(host_adapters.get("adapter_targets", [])) if isinstance(host_adapters.get("adapter_targets", []), list) else 0
+    parity_policy = host_adapters.get("parity_policy", {})
+    for key in (
+        "canonical_source_required",
+        "adapter_drift_must_be_detected",
+        "release_claim_requires_parity_evidence",
+        "hook_projection_boundary_required",
+        "orphaned_hook_files_are_findings",
+        "empty_hooks_object_may_suppress_autodiscovery",
+    ):
+        if parity_policy.get(key) is not True:
+            findings.append(f"adapter parity policy missing {key}")
+    modes = runtime.get("runtime_modes", {})
+    mode_count = len(modes.get("allowed_modes", [])) if isinstance(modes.get("allowed_modes", []), list) else 0
+    if "off" not in modes.get("allowed_modes", []):
+        findings.append("runtime modes must include off")
+    hook_boundaries = modes.get("hook_boundaries", {})
+    for key in (
+        "stdin_must_not_deadlock",
+        "stdin_errors_degrade_safely",
+        "strip_utf8_bom_before_json_parse",
+        "valid_json_required_when_host_requires_json",
+        "preserve_empty_additional_context",
+        "invalid_mandatory_output_exits_nonzero",
+        "hook_must_not_store_secrets",
+    ):
+        if hook_boundaries.get(key) is not True:
+            findings.append(f"hook boundary must enable {key}")
+    lanes = runtime.get("command_lanes", {})
+    review_lanes = runtime.get("review_lanes", {})
+    for lane in ("mode_switch", "complexity_review", "repository_audit", "debt_harvest", "impact_scoreboard", "help_status"):
+        if lane not in lanes:
+            findings.append(f"missing command lane: {lane}")
+    for lane in ("spec_compliance", "quality_security", "complexity_only", "debt_ledger", "impact_benchmark"):
+        if lane not in review_lanes:
+            findings.append(f"missing review lane: {lane}")
+    forbidden = set(review_lanes.get("complexity_only", {}).get("forbidden_findings", []))
+    for finding in ("correctness", "security", "privacy", "data-loss", "accessibility"):
+        if finding not in forbidden:
+            findings.append(f"complexity-only review must route {finding} elsewhere")
+    benchmark_policy = runtime.get("impact_benchmarks", {}).get("policy", {})
+    for key in ("baseline_arm_required", "skill_enabled_arm_required", "contamination_selftest_required", "correctness_or_safety_gate_required"):
+        if benchmark_policy.get(key) is not True:
+            findings.append(f"impact benchmark policy missing {key}")
+    debt = runtime.get("shortcut_debt", {})
+    if debt.get("marker") != "agent-gov-debt:":
+        findings.append("shortcut debt marker must be agent-gov-debt:")
+    for field in ("ceiling", "upgrade_trigger"):
+        if field not in debt.get("required_fields", []):
+            findings.append(f"shortcut debt required field missing: {field}")
+    dependency_policy = runtime.get("dependency_policy", {})
+    for key in ("local_doctors_dependency_free", "python_standard_library_only_for_generated_checks", "no_network_required_for_doctor"):
+        if dependency_policy.get(key) is not True:
+            findings.append(f"skill runtime dependency policy missing {key}")
+    if not Path("docs/SKILL_RUNTIME.md").exists():
+        findings.append("missing docs/SKILL_RUNTIME.md")
+    score = 100 - min(90, len(findings) * 10)
+    return dimension(
+        "skill_runtime",
+        score,
+        findings,
+        [f"{adapter_count} adapter target(s)", f"{mode_count} mode(s)", f"{len(lanes)} command lane(s)", f"{len(review_lanes)} review lane(s)"],
+    )
 
 
 def score_harness_evolution() -> dict:
@@ -1291,9 +1690,14 @@ def score_session_offload() -> dict:
     evidence.append(f"{len(offload_files)} offload file(s)")
     if active_session:
         active_dir = session_root / str(active_session)
-        for name in ("grounding.md", "offload.jsonl", "offload-index.md", "task-map.mmd", "refs/.gitkeep"):
+        for name in ("grounding.md", "offload.jsonl", "offload-index.md", "task-map.mmd", "refs/.gitkeep", "refs/git-status-short.txt"):
             if not (active_dir / name).exists():
                 findings.append(f"active session missing {active_dir / name}")
+        snapshot_path = active_dir / "refs/git-status-short.txt"
+        if snapshot_path.exists():
+            result = subprocess.run(["git", "status", "--short"], text=True, capture_output=True, check=False)
+            if result.returncode == 0 and snapshot_path.read_text(encoding="utf-8").rstrip("\n") != result.stdout.rstrip("\n"):
+                findings.append(f"{snapshot_path} must match current git status --short")
         grounding_text = (active_dir / "grounding.md").read_text(encoding="utf-8", errors="ignore") if (active_dir / "grounding.md").exists() else ""
         if grounding_text and "override memory summaries" not in grounding_text:
             findings.append("grounding missing truth-first memory boundary")
@@ -1502,6 +1906,7 @@ def collect_scores(extra_runlog_events: int = 0) -> dict:
         "required_paths": score_required_paths,
         "validation": score_validation,
         "workflow_profiles": score_workflow_profiles,
+        "loop_engineering": score_loop_engineering,
         "task_board": score_task_board,
         "role_contracts": score_role_contracts,
         "mechanical_verification": score_mechanical_verification,
@@ -1509,6 +1914,8 @@ def collect_scores(extra_runlog_events: int = 0) -> dict:
         "skill_hygiene": score_skill_hygiene,
         "project_skills": score_project_skills,
         "resource_catalog": score_resource_catalog,
+        "agent_runtime_architecture": score_agent_runtime_architecture,
+        "skill_runtime": score_skill_runtime,
         "harness_evolution": score_harness_evolution,
         "mcp_policy": score_mcp_policy,
         "governance_gc": score_governance_gc,
@@ -1602,6 +2009,36 @@ def record_runlog(report: dict) -> None:
         handle.write(json.dumps(item, ensure_ascii=False) + "\n")
 
 
+def git_status_short() -> str:
+    try:
+        result = subprocess.run(["git", "status", "--short"], text=True, capture_output=True, check=False)
+    except OSError:
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout.rstrip("\n")
+
+
+def refresh_active_session_git_status_snapshot() -> None:
+    index_path = Path(".agent/sessions/index.json")
+    if not index_path.exists():
+        return
+    index = load_json(index_path, {})
+    active_session = index.get("active_session")
+    if not active_session:
+        return
+    snapshot_path = Path(".agent/sessions") / str(active_session) / "refs/git-status-short.txt"
+    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+    text = git_status_short().rstrip("\n")
+    for _ in range(3):
+        snapshot_path.write_text(f"{text}\n" if text else "", encoding="utf-8")
+        current = git_status_short().rstrip("\n")
+        if current == text:
+            return
+        text = current
+    snapshot_path.write_text(f"{text}\n" if text else "", encoding="utf-8")
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     errors: list[str] = []
     if not CONFIG_PATH.exists():
@@ -1640,6 +2077,7 @@ def cmd_score(args: argparse.Namespace) -> int:
         LATEST_PATH.parent.mkdir(parents=True, exist_ok=True)
         LATEST_PATH.write_text(render_markdown(report), encoding="utf-8")
         record_runlog(report)
+        refresh_active_session_git_status_snapshot()
     if report.get("hard_fail_dimensions"):
         return 1
     if args.fail_under is not None and report["score"] < args.fail_under:
