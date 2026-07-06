@@ -212,6 +212,143 @@ def assert_blank_project_default_profile(temp_root: Path) -> None:
         raise SystemExit(1)
 
 
+def write_intake(path: Path, data: dict) -> None:
+    payload = {"schema": "agent-architecture-intake-v1", **data}
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def mark_blueprint_reviewed(target: Path) -> None:
+    blueprint_path = target / ".agent" / "blueprint.json"
+    blueprint = json.loads(blueprint_path.read_text(encoding="utf-8"))
+    blueprint["status"] = "reviewed"
+    blueprint["status_reason"] = "Regression fixture confirms project blueprint before implementation."
+    for record in blueprint.get("records", []):
+        if isinstance(record, dict):
+            record["status"] = "reviewed"
+            record["review_evidence"] = "npm regression readiness fixture"
+    blueprint_path.write_text(json.dumps(blueprint, indent=2) + "\n", encoding="utf-8")
+
+
+def assert_readiness_passes(target: Path, python: str) -> None:
+    run([python, "scripts/agent_blueprint.py", "readiness"], cwd=target)
+    run([python, "scripts/agent_runtime.py", "readiness"], cwd=target)
+    run([python, "scripts/agent_check.py", "--strict"], cwd=target)
+    run([python, "scripts/agent_validate.py", "readiness", "--require-configured"], cwd=target)
+    run(["node", str(NPM_BIN), "readiness", str(target)], cwd=PACKAGE_ROOT)
+
+
+def assert_agent_development_readiness(temp_root: Path, python: str) -> None:
+    blank = temp_root / "readiness-blank-default"
+    blank.mkdir(parents=True, exist_ok=True)
+    run(["node", str(NPM_BIN), "init", str(blank), "--tech-stack", "python", "--layout", "minimal", "--remote-kind", "local"], cwd=PACKAGE_ROOT)
+    harness = json.loads((blank / ".agent" / "harness.json").read_text(encoding="utf-8"))
+    readiness = harness.get("validation", {}).get("readiness", [])
+    for command in (
+        "python3 scripts/agent_blueprint.py readiness",
+        "python3 scripts/agent_runtime.py readiness",
+        "python3 scripts/agent_check.py --strict",
+    ):
+        if command not in readiness:
+            print(f"readiness suite missing command: {command}", file=sys.stderr)
+            print(json.dumps(readiness, indent=2), file=sys.stderr)
+            raise SystemExit(1)
+    run([python, "scripts/agent_check.py"], cwd=blank)
+    run([python, "scripts/agent_blueprint.py", "doctor"], cwd=blank)
+    run([python, "scripts/agent_runtime.py", "doctor"], cwd=blank)
+    strict_blank = run([python, "scripts/agent_check.py", "--strict"], cwd=blank, expect_ok=False)
+    strict_output = strict_blank.stdout + strict_blank.stderr
+    if "blueprint status must be reviewed" not in strict_output or "selection_status must be confirmed" not in strict_output:
+        print("strict readiness did not fail on draft blueprint and unconfirmed runtime", file=sys.stderr)
+        print(strict_output, file=sys.stderr)
+        raise SystemExit(1)
+    run([python, "scripts/agent_validate.py", "readiness", "--require-configured"], cwd=blank, expect_ok=False)
+    npm_blank = run(["node", str(NPM_BIN), "readiness", str(blank)], cwd=PACKAGE_ROOT, expect_ok=False)
+    if "generated-project implementation readiness" not in (npm_blank.stdout + npm_blank.stderr):
+        print("npm readiness output did not describe project readiness", file=sys.stderr)
+        print(npm_blank.stdout + npm_blank.stderr, file=sys.stderr)
+        raise SystemExit(1)
+    doctor_output = run(["node", str(NPM_BIN), "doctor", str(blank)], cwd=PACKAGE_ROOT).stdout
+    if "not target project implementation readiness" not in doctor_output:
+        print("npm doctor output did not distinguish install health from readiness", file=sys.stderr)
+        print(doctor_output, file=sys.stderr)
+        raise SystemExit(1)
+
+    matrix = [
+        (
+            "confirmed-agent",
+            {
+                "project_target": "agent",
+                "selection_status": "confirmed",
+                "language_preference": ["python"],
+            },
+        ),
+        (
+            "confirmed-hybrid",
+            {
+                "project_target": "hybrid",
+                "selection_status": "confirmed",
+                "language_preference": ["python"],
+            },
+        ),
+        (
+            "confirmed-mcp",
+            {
+                "project_target": "mcp-server",
+                "selection_status": "confirmed",
+            },
+        ),
+        (
+            "confirmed-library",
+            {
+                "project_target": "library",
+                "selection_status": "confirmed",
+            },
+        ),
+        (
+            "manual-llm-exception",
+            {
+                "project_target": "agent",
+                "default_runtime_adapter": "custom",
+                "selection_status": "confirmed",
+                "language_preference": ["python"],
+                "manual_llm_exception": {
+                    "status": "accepted",
+                    "rationale": "Regression fixture requires custom orchestration.",
+                    "owner": "architecture-review",
+                    "review_evidence": "docs/features/runtime/05_CODE_REVIEW.md",
+                    "validation_evidence": "python3 scripts/agent_runtime.py readiness",
+                    "residual_risk": "Custom orchestration needs project-owned regression coverage.",
+                },
+            },
+        ),
+    ]
+    for case_id, intake in matrix:
+        intake_path = temp_root / f"readiness-{case_id}-intake.json"
+        write_intake(intake_path, intake)
+        target = temp_root / f"readiness-{case_id}"
+        target.mkdir(parents=True, exist_ok=True)
+        run(
+            [
+                python,
+                str(INIT_SCRIPT),
+                str(target),
+                "--tech-stack",
+                "python",
+                "--layout",
+                "minimal",
+                "--remote-kind",
+                "local",
+                "--governance-profile",
+                "standard",
+                "--architecture-intake",
+                str(intake_path),
+            ],
+            cwd=PACKAGE_ROOT,
+        )
+        mark_blueprint_reviewed(target)
+        assert_readiness_passes(target, python)
+
+
 def assert_runtime_adoption_defaults(temp_root: Path, python: str) -> None:
     default_agent = temp_root / "runtime-adoption-default"
     default_agent.mkdir(parents=True, exist_ok=True)
@@ -319,6 +456,7 @@ def assert_runtime_adoption_defaults(temp_root: Path, python: str) -> None:
                     "owner": "architecture-review",
                     "review_evidence": "docs/features/runtime/05_CODE_REVIEW.md",
                     "validation_evidence": "python3 scripts/agent_runtime.py doctor",
+                    "residual_risk": "Custom adapter requires project-owned regression coverage.",
                 },
             },
             indent=2,
@@ -1720,6 +1858,7 @@ def main() -> int:
         assert_blank_project_default_profile(temp_root)
         assert_runtime_adoption_defaults(temp_root, python)
         assert_project_blueprint_governance(temp_root, python)
+        assert_agent_development_readiness(temp_root, python)
         assert_session_doctor_handles_long_git_status(temp_root, python)
         if sys.platform.startswith("win"):
             target = temp_root / "agent-gov"

@@ -62,6 +62,7 @@
 3. Harness 工程管理
    - 生成 `.agent/harness.json` 和 `scripts/agent_validate.py`。
    - 按技术栈预填 build、test、lint、typecheck 等验证命令。
+   - 把 strict implementation readiness 放在非默认 `readiness` suite 中，普通 doctor 可用于初始化健康检查，`readiness` 用于实施前硬门禁。
    - 通过 runlog 记录验证证据。
 
 4. 长会话和跨会话接续
@@ -183,6 +184,14 @@ npx @airpot/agent-gov@latest install-skill /path/to/repo
 npx @airpot/agent-gov@latest doctor /path/to/repo
 ```
 
+检查目标项目是否已满足 agent/runtime 实施前 strict readiness：
+
+```bash
+npx @airpot/agent-gov@latest readiness /path/to/repo
+```
+
+`doctor` 只表示 npm 包、初始化器和 bundled skill 安装健康；`readiness` 会调用目标项目的 `scripts/agent_check.py --strict`，未 review 的 blueprint 或 unresolved runtime gate 会导致非零退出。
+
 安装项目级 skill 后，重启或 reload Codex，让新的 skill 被发现。
 
 ## 纳入已有项目
@@ -228,7 +237,9 @@ python3 scripts/agent_check.py
 python3 scripts/agent_score.py doctor
 python3 scripts/agent_validate.py --list
 python3 scripts/agent_runtime.py doctor
+python3 scripts/agent_runtime.py readiness
 python3 scripts/agent_runtime.py report --json
+python3 scripts/agent_validate.py readiness --require-configured
 python3 scripts/agent_gc.py doctor
 python3 scripts/agent_score.py score --write
 ```
@@ -262,10 +273,12 @@ npx @airpot/agent-gov@latest [root] [options]
 
 ```bash
 python3 scripts/agent_check.py
+python3 scripts/agent_check.py --strict
 python3 scripts/agent_migrate.py doctor
 python3 scripts/agent_spec.py doctor
 python3 scripts/agent_spec.py list --json
 python3 scripts/agent_validate.py --list
+python3 scripts/agent_validate.py readiness --require-configured
 python3 scripts/agent_capabilities.py doctor
 python3 scripts/agent_runlog.py doctor
 python3 scripts/agent_tooling.py doctor

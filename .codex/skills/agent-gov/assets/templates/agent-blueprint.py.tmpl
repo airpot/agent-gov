@@ -288,6 +288,39 @@ def validate_all() -> tuple[list[str], list[str], dict[str, Any]]:
     return errors, warnings, report
 
 
+def unique(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+def readiness_findings(errors: list[str], report: dict[str, Any]) -> list[str]:
+    findings = list(errors)
+    if report.get("blueprint_status") != "reviewed":
+        findings.append("blueprint status must be reviewed before non-trivial implementation")
+    if report.get("archive_blocking_reasons"):
+        for reason in report.get("archive_blocking_reasons", []):
+            findings.append(f"blueprint archive-impact gate unresolved: {reason}")
+    blueprint = read_json(BLUEPRINT_PATH)
+    records = blueprint.get("records", []) if isinstance(blueprint, dict) else []
+    if isinstance(records, list):
+        for index, record in enumerate(records):
+            if not isinstance(record, dict):
+                findings.append(f"blueprint records[{index}] must be an object")
+                continue
+            record_id = str(record.get("id", index)).strip()
+            if str(record.get("status", "")).strip() != "reviewed":
+                findings.append(f"blueprint record must be reviewed before implementation: {record_id}")
+    else:
+        findings.append("blueprint records must be a list")
+    return unique(findings)
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     errors, warnings, report = validate_all()
     for warning in warnings:
@@ -301,6 +334,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         for reason in report["archive_blocking_reasons"]:
             print(f"warning: {reason}")
     print("agent blueprint doctor passed")
+    return 0
+
+
+def cmd_readiness(args: argparse.Namespace) -> int:
+    errors, warnings, report = validate_all()
+    for warning in warnings:
+        print(f"warning: {warning}")
+    findings = readiness_findings(errors, report)
+    if findings:
+        print("agent blueprint readiness failed")
+        for finding in findings:
+            print(f"error: {finding}")
+        return 1
+    print("agent blueprint readiness passed")
     return 0
 
 
@@ -322,6 +369,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     doctor = subparsers.add_parser("doctor", help="Validate project blueprint governance")
     doctor.set_defaults(func=cmd_doctor)
+    readiness = subparsers.add_parser("readiness", help="Validate strict pre-implementation blueprint readiness")
+    readiness.set_defaults(func=cmd_readiness)
     report = subparsers.add_parser("report", help="Print project blueprint report")
     report.add_argument("--json", action="store_true")
     report.set_defaults(func=cmd_report)

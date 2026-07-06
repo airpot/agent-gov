@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import math
 import re
@@ -1015,7 +1016,50 @@ def validate_spec_task_links(root: Path, task_ids: set[str]) -> list[str]:
     return errors
 
 
+def strict_readiness_errors(root: Path, harness: dict) -> list[str]:
+    errors: list[str] = []
+    validation = harness.get("validation", {}) if isinstance(harness, dict) else {}
+    readiness_commands = validation.get("readiness", []) if isinstance(validation, dict) else []
+    has_blueprint = (root / ".agent/blueprint.json").exists()
+    has_runtime = any(
+        (root / path).exists()
+        for path in (".agent/runtime-policy.json", ".agent/model-profiles.json", ".agent/agent-runtime.json")
+    )
+
+    if (has_blueprint or has_runtime) and not readiness_commands:
+        errors.append(".agent/harness.json validation.readiness must be configured for strict readiness")
+    expected_commands = []
+    if has_blueprint:
+        expected_commands.append("python3 scripts/agent_blueprint.py readiness")
+    if has_runtime:
+        expected_commands.append("python3 scripts/agent_runtime.py readiness")
+    if has_blueprint or has_runtime:
+        expected_commands.append("python3 scripts/agent_check.py --strict")
+    for command in expected_commands:
+        if command not in readiness_commands:
+            errors.append(f".agent/harness.json validation.readiness missing command: {command}")
+
+    command_specs: list[tuple[str, list[str], Path]] = []
+    if has_blueprint:
+        command_specs.append(("blueprint", [sys.executable, "scripts/agent_blueprint.py", "readiness"], root / "scripts/agent_blueprint.py"))
+    if has_runtime:
+        command_specs.append(("runtime", [sys.executable, "scripts/agent_runtime.py", "readiness"], root / "scripts/agent_runtime.py"))
+    for label, command, script_path in command_specs:
+        if not script_path.exists():
+            errors.append(f"missing strict readiness script for {label}: {script_path.relative_to(root).as_posix()}")
+            continue
+        result = subprocess.run(command, cwd=root, text=True, capture_output=True, check=False)
+        if result.returncode != 0:
+            output = (result.stdout + result.stderr).strip()
+            errors.append(f"{label} readiness failed: {output or 'no output'}")
+    return errors
+
+
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--strict", action="store_true", help="Run strict pre-implementation readiness gates")
+    args = parser.parse_args()
+
     root = Path.cwd()
 
     config_path = root / ".agent/config.json"
@@ -1101,6 +1145,7 @@ def main() -> int:
             missing.append(".agent/spec.json")
 
     harness_path = root / ".agent/harness.json"
+    harness = {}
     if harness_path.exists():
         harness = load_json(harness_path, ".agent/harness.json")
         if harness.get("schema") != "agent-harness-v1":
@@ -1971,6 +2016,14 @@ def main() -> int:
         for path in missing:
             print(f"missing: {path}")
         return 1
+
+    if args.strict:
+        readiness_errors = strict_readiness_errors(root, harness)
+        if readiness_errors:
+            print("agent project strict readiness failed")
+            for error in readiness_errors:
+                print(f"error: {error}")
+            return 1
 
     print("agent project check passed")
     return 0

@@ -30,6 +30,7 @@ Usage:
   agent-gov init [root] [initializer options]
   agent-gov install-skill [root] [--force] [--dry-run] [--global]
   agent-gov doctor [root]
+  agent-gov readiness [root]
 
 Examples:
   npx @airpot/agent-gov@latest
@@ -310,6 +311,8 @@ function installSkill(args) {
 function doctor(args) {
   const targetRoot = path.resolve(process.cwd(), firstPositional(args));
   const python = findPython();
+  console.log("agent-gov doctor checks package/install health, not target project implementation readiness.");
+  console.log("Use `agent-gov readiness <root>` for strict generated-project readiness gates.");
   const checks = [
     ["package", fs.existsSync(PACKAGE_JSON), PACKAGE_JSON],
     ["initializer", fs.existsSync(INIT_SCRIPT), INIT_SCRIPT],
@@ -328,8 +331,31 @@ function doctor(args) {
   return failed ? 1 : 0;
 }
 
+function readiness(args) {
+  const targetRoot = path.resolve(process.cwd(), firstPositional(args));
+  const python = findPython();
+  if (!python) {
+    throw new Error("Python 3 is required. Set AGENT_GOV_PYTHON or install python3.");
+  }
+  const checkScript = path.join(targetRoot, "scripts", "agent_check.py");
+  if (!fs.existsSync(checkScript)) {
+    throw new Error(`target project readiness check is missing: ${checkScript}`);
+  }
+  console.log("agent-gov readiness checks generated-project implementation readiness.");
+  console.log("Package/install health remains available through `agent-gov doctor <root>`.");
+  const result = spawnSync(
+    python.command,
+    [...python.args, "scripts/agent_check.py", "--strict"],
+    { cwd: targetRoot, stdio: "inherit" },
+  );
+  if (result.error) {
+    throw result.error;
+  }
+  return result.status ?? 1;
+}
+
 function main(argv) {
-  const commands = new Set(["init", "install-skill", "doctor", "help", "version"]);
+  const commands = new Set(["init", "install-skill", "doctor", "readiness", "help", "version"]);
   let command = "init";
   const args = [...argv];
   if (args.length > 0 && commands.has(args[0])) {
@@ -355,6 +381,9 @@ function main(argv) {
   }
   if (command === "doctor") {
     return doctor(args);
+  }
+  if (command === "readiness") {
+    return readiness(args);
   }
   return init(args);
 }

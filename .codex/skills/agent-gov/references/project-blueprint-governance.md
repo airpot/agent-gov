@@ -29,7 +29,7 @@ After requirements interview and before non-trivial implementation:
 2. Confirm technical architecture, module/directory boundary, and data/state ownership.
 3. Confirm external resources, MCP boundary, security/risk boundary, and validation strategy.
 4. Confirm agent runtime/framework strategy in `.agent/blueprint.json#/runtime_framework_decision`.
-5. Run `python3 scripts/agent_blueprint.py doctor`.
+5. Run `python3 scripts/agent_blueprint.py doctor`; before implementation, run `python3 scripts/agent_blueprint.py readiness`.
 6. Create or continue the feature-level OpenSpec change and fill `.agent-spec.json#/blueprint_impact`.
 
 Record unresolved choices in the blueprint `open_decisions` list instead of implementing around them silently.
@@ -72,8 +72,10 @@ Validation rules:
 Review blueprint work before implementation and during release readiness:
 
 - `scripts/agent_blueprint.py doctor` passes.
+- `scripts/agent_blueprint.py readiness` passes before non-trivial implementation.
 - `docs/PROJECT_BLUEPRINT.md` has all required sections.
 - `.agent/blueprint.json` has unique stable IDs.
+- `.agent/blueprint.json` and required blueprint records are marked `reviewed`.
 - Runtime decision agrees with `.agent/agent-runtime.json`.
 - Active OpenSpec changes have valid `blueprint_impact`.
 - Archive blocking reasons are either resolved or explicitly accepted with owner, date, and residual risk.

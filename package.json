@@ -1,6 +1,6 @@
 {
   "name": "@airpot/agent-gov",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "One-command project governance initializer for Codex and Claude agent workflows.",
   "license": "MIT",
   "type": "module",

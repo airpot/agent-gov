@@ -98,7 +98,7 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
    - Use `.agent/skill-runtime.json` and `docs/SKILL_RUNTIME.md` to govern portable Skill/plugin product architecture: canonical skill core, thin host adapters, runtime modes, command lanes, separated review lanes, benchmark evidence, and deliberate shortcut/debt ledgers.
    - During initialization, convert the user's architecture conversation into structured `--architecture-intake <json-file>` input when possible; the initializer does not read transient chat history directly.
    - Treat Strands as the default Skill-first agent runtime adapter, not as the architecture standard; keep Pydantic AI, LangGraph, MCP SDKs, and FastMCP-style servers as optional application-owned adapters and keep runtime dependencies in application code, not agent-gov.
-   - For `agent` and `hybrid` projects, treat runtime adoption as framework-first by default: run `python3 scripts/agent_runtime.py doctor` and `python3 scripts/agent_runtime.py report --json`, follow `.agent/agent-runtime.json` `runtime_adoption.package_plan` when adding application dependencies, and do not hand-write direct LLM orchestration unless `.agent/agent-runtime.json` records an accepted `manual_llm_exception` with rationale, owner, review evidence, and validation evidence.
+   - For `agent` and `hybrid` projects, treat runtime adoption as framework-first by default: run `python3 scripts/agent_runtime.py doctor`, `python3 scripts/agent_runtime.py readiness`, and `python3 scripts/agent_runtime.py report --json`, follow `.agent/agent-runtime.json` `runtime_adoption.package_plan` when adding application dependencies, and do not hand-write direct LLM orchestration unless `.agent/agent-runtime.json` records an accepted `manual_llm_exception` with rationale, owner, review evidence, validation evidence, and residual risk.
    - For MCP server projects, do not force model profiles or agent orchestration; require explicit MCP tool/resource/prompt, transport, host/client, credential, and destructive-operation boundaries.
    - Use `.agent/runlog.jsonl` for compact evidence of validation runs, session lifecycle events, accepted review exceptions, and high-risk capability use.
    - Use `.agent/tooling.json` and `scripts/agent_tooling.py` for bounded, path-first, line-numbered repository inspection.
@@ -138,6 +138,7 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
 
 11. **Validate**
    - Run the generated project check when available: `python3 scripts/agent_check.py`.
+   - Before agent/hybrid/MCP runtime implementation in `standard` or `full` projects, run strict readiness: `python3 scripts/agent_check.py --strict` or `python3 scripts/agent_validate.py readiness --require-configured`.
    - Check migration and version drift when available: `python3 scripts/agent_migrate.py doctor`.
    - Run `python3 scripts/agent_spec.py doctor` and `python3 scripts/agent_spec.py list --json`; `doctor` must fail while a completed `all_done` change remains active instead of archived.
    - Inspect executable feedback commands: `python3 scripts/agent_validate.py --list`.

@@ -396,6 +396,7 @@ def runtime_adoption_config(intake: dict, raw_intake: dict, tech_stack: list[str
             "required": framework_first,
             "commands": [
                 "python3 scripts/agent_runtime.py doctor",
+                "python3 scripts/agent_runtime.py readiness",
                 "python3 scripts/agent_runtime.py report --json",
             ],
             "must_resolve": [
@@ -643,6 +644,7 @@ def harness_config(
         "lint": [],
         "typecheck": [],
         "smoke": [],
+        "readiness": [],
     }
     for stack in tech_stack:
         for suite, commands in STACK_COMMANDS.get(stack.lower(), {}).items():
@@ -698,6 +700,13 @@ def harness_config(
             validation["test"].append("python3 scripts/agent_runtime.py doctor")
         if "python3 scripts/agent_blueprint.py doctor" not in validation["test"]:
             validation["test"].append("python3 scripts/agent_blueprint.py doctor")
+        for command in (
+            "python3 scripts/agent_blueprint.py readiness",
+            "python3 scripts/agent_runtime.py readiness",
+            "python3 scripts/agent_check.py --strict",
+        ):
+            if command not in validation["readiness"]:
+                validation["readiness"].append(command)
         if "python3 scripts/agent_resources.py list --json" not in validation["smoke"]:
             validation["smoke"].append("python3 scripts/agent_resources.py list --json")
         required_paths.extend(
@@ -3289,6 +3298,7 @@ def agent_runtime_config(project_name: str, created_at: str, intake: dict) -> di
         },
         "commands": {
             "doctor": "python3 scripts/agent_runtime.py doctor",
+            "readiness": "python3 scripts/agent_runtime.py readiness",
             "report": "python3 scripts/agent_runtime.py report --json",
         },
     }
@@ -3392,6 +3402,7 @@ def blueprint_config(project_name: str, created_at: str, intake: dict, tech_stac
         },
         "commands": {
             "doctor": "python3 scripts/agent_blueprint.py doctor",
+            "readiness": "python3 scripts/agent_blueprint.py readiness",
             "report": "python3 scripts/agent_blueprint.py report --json",
         },
         "open_decisions": [

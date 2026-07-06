@@ -23,6 +23,7 @@ Run:
 
 ```bash
 python3 scripts/agent_runtime.py doctor
+python3 scripts/agent_runtime.py readiness
 python3 scripts/agent_runtime.py report --json
 ```
 
@@ -89,7 +90,7 @@ For `agent` and `hybrid` targets, the default posture is framework-first:
 
 - use the primary runtime adapter in `.agent/agent-runtime.json` unless an exception is accepted
 - add dependencies from `runtime_adoption.package_plan` through the application package manager before writing runtime orchestration
-- run `python3 scripts/agent_runtime.py doctor` and `python3 scripts/agent_runtime.py report --json` before implementing agent runtime code
+- run `python3 scripts/agent_runtime.py doctor`, `python3 scripts/agent_runtime.py readiness`, and `python3 scripts/agent_runtime.py report --json` before implementing agent runtime code
 - do not hand-write direct LLM orchestration as the default path
 
 Direct model API orchestration without Strands, Pydantic AI, LangGraph, MCP SDKs, or another mature adapter is allowed only with a recorded `manual_llm_exception` containing:
@@ -98,6 +99,7 @@ Direct model API orchestration without Strands, Pydantic AI, LangGraph, MCP SDKs
 - owner
 - review evidence
 - validation evidence
+- residual risk
 
 Initialization never executes dependency installation commands. It generates the plan so implementation work can make an explicit application-owned dependency change.
 

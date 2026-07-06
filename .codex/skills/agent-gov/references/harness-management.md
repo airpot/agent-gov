@@ -252,8 +252,10 @@ python3 scripts/agent_resources.py doctor
 python3 scripts/agent_skill_hygiene.py doctor
 python3 scripts/agent_project_skills.py doctor
 python3 scripts/agent_blueprint.py doctor
+python3 scripts/agent_blueprint.py readiness
 python3 scripts/agent_project_skills.py report
 python3 scripts/agent_runtime.py doctor
+python3 scripts/agent_runtime.py readiness
 python3 scripts/agent_runlog.py doctor
 python3 scripts/agent_tooling.py doctor
 python3 scripts/agent_security.py doctor
@@ -262,6 +264,7 @@ python3 scripts/agent_verify.py doctor
 python3 scripts/agent_gc.py doctor
 python3 scripts/agent_score.py doctor
 python3 scripts/agent_validate.py --list
+python3 scripts/agent_validate.py readiness --require-configured
 python3 scripts/agent_sync_skills.py --dry-run
 python3 .agent/tools/agent_memory.py doctor
 python3 .agent/tools/agent_context.py doctor
@@ -280,7 +283,7 @@ make agent-validate
 
 ## Harness Feedback Surface
 
-`agent_validate.py` reads `.agent/harness.json`. New projects start with empty command lists so initialization succeeds before the application stack is known. Once the stack is known, fill in commands such as:
+`agent_validate.py` reads `.agent/harness.json`. Application build/test/lint command lists may start empty so initialization succeeds before the application stack is known; generated governance suites such as `readiness` may be preconfigured for `standard` and `full` profiles. Once the stack is known, fill in commands such as:
 
 ```json
 {
@@ -295,6 +298,8 @@ make agent-validate
 ```
 
 Agents should run `python3 scripts/agent_validate.py --list` before choosing validation, then run the narrowest configured suite that proves the change.
+
+`validation.readiness` is intentionally non-default. It should contain strict pre-implementation gates such as `python3 scripts/agent_blueprint.py readiness`, `python3 scripts/agent_runtime.py readiness`, and `python3 scripts/agent_check.py --strict`. Ordinary build/test/lint/smoke checks may pass on a freshly initialized draft project; readiness must fail until the blueprint is reviewed and runtime target-specific blocking reasons are resolved.
 
 `agent_validate.py` appends pass/fail evidence to `.agent/runlog.jsonl`. When validation is skipped, record the reason in the active session `validation.md`; optionally add a runlog entry with `python3 scripts/agent_runlog.py record --kind validation --outcome skipped --summary "..."`.
 
