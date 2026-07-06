@@ -31,6 +31,36 @@ RUNTIME_ADAPTERS = {
 }
 MODEL_ACCESS_STRATEGIES = {"openai-compatible-first", "litellm-gateway", "provider-sdk", "local-only", "custom"}
 SECRET_REF_PREFIXES = ("env:", "file-ref:", "vault:", "proxy:", "op:", "keychain:")
+RUNTIME_ADAPTER_PACKAGE_PLANS = {
+    "strands": {
+        "language": "python",
+        "packages": ["strands-agents"],
+        "commands": [
+            {"manager": "pip", "command": "python3 -m pip install strands-agents"},
+        ],
+        "source_url": "https://strandsagents.com/latest/documentation/docs/user-guide/quickstart/",
+        "notes": "Default Skill-first agent adapter. Add this dependency to application code before writing agent orchestration.",
+    },
+    "pydantic-ai": {
+        "language": "python",
+        "packages": ["pydantic-ai"],
+        "commands": [
+            {"manager": "pip", "command": "python3 -m pip install pydantic-ai"},
+            {"manager": "uv", "command": "uv add pydantic-ai"},
+        ],
+        "source_url": "https://ai.pydantic.dev/install/",
+        "notes": "Typed tooling and structured-output adapter. Use when tools or product code consume strict schemas.",
+    },
+    "langgraph": {
+        "language": "python",
+        "packages": ["langgraph"],
+        "commands": [
+            {"manager": "pip", "command": "python3 -m pip install -U langgraph"},
+        ],
+        "source_url": "https://docs.langchain.com/oss/python/langgraph/install",
+        "notes": "Conditional workflow adapter. Use only for explicit graph state, resumable workflows, or long-running orchestration.",
+    },
+}
 LAYOUTS = {
     "existing": [],
     "minimal": ["src", "tests", "docs", "scripts"],
@@ -273,6 +303,126 @@ def default_adapter_for_target(project_target: str, skill_first: bool) -> str:
     return "strands" if skill_first else "custom"
 
 
+def normalized_languages(tech_stack: list[str], language_preference: list[str]) -> list[str]:
+    aliases = {
+        "py": "python",
+        "python3": "python",
+        "ts": "typescript",
+        "js": "node",
+        "javascript": "node",
+    }
+    result: list[str] = []
+    for item in language_preference + tech_stack:
+        lowered = aliases.get(item.strip().lower(), item.strip().lower())
+        if lowered and lowered not in result:
+            result.append(lowered)
+    return result
+
+
+def runtime_package_plan_for_adapter(adapter: str) -> dict | None:
+    spec = RUNTIME_ADAPTER_PACKAGE_PLANS.get(adapter)
+    if not spec:
+        return None
+    return {
+        "adapter": adapter,
+        "language": spec["language"],
+        "packages": spec["packages"],
+        "commands": spec["commands"],
+        "source_url": spec["source_url"],
+        "execution_policy": "application-owned-review-before-execution",
+        "auto_install": False,
+        "notes": spec["notes"],
+    }
+
+
+def runtime_adoption_config(intake: dict, raw_intake: dict, tech_stack: list[str]) -> dict:
+    project_target = intake["project_target"]
+    architecture_style = intake["architecture_style"]
+    default_adapter = intake["default_runtime_adapter"]
+    framework_first = project_target in {"agent", "hybrid"} and architecture_style in {"skill-first", "skill-first-hybrid"}
+    languages = normalized_languages(tech_stack, intake.get("language_preference", []))
+    adapters: list[str] = []
+    for adapter in [default_adapter] + intake.get("optional_runtime_adapters", []):
+        if adapter not in adapters:
+            adapters.append(adapter)
+    package_plan = []
+    for adapter in adapters:
+        plan = runtime_package_plan_for_adapter(adapter)
+        if plan:
+            package_plan.append(plan)
+    manual_exception = raw_intake.get("manual_llm_exception", {})
+    if not isinstance(manual_exception, dict):
+        manual_exception = {}
+    manual_status = str(
+        raw_intake.get("manual_llm_exception_status", manual_exception.get("status", "not-accepted"))
+    ).strip() or "not-accepted"
+    needs_exception = framework_first and default_adapter in {"custom", "none"}
+    if not framework_first:
+        status = "not-applicable"
+    elif needs_exception:
+        status = "exception-accepted" if manual_status == "accepted" else "exception-required"
+    elif package_plan:
+        status = "planned"
+    else:
+        status = "needs-decision"
+    blocking_reasons = []
+    if framework_first and intake.get("selection_status") != "confirmed":
+        blocking_reasons.append("runtime architecture selection must be confirmed before implementing agent runtime code")
+    if framework_first and status == "needs-decision":
+        blocking_reasons.append("select an application-owned runtime adapter package plan or record a manual LLM exception")
+    if needs_exception and manual_status != "accepted":
+        blocking_reasons.append("custom or naked LLM runtime requires accepted manual_llm_exception")
+    if framework_first and package_plan and "python" not in languages:
+        blocking_reasons.append("selected default adapters are Python packages; confirm Python is part of the application stack or select another adapter")
+    return {
+        "schema": "agent-runtime-adoption-v1",
+        "status": status,
+        "policy": {
+            "default_posture": "framework-first" if framework_first else "target-specific",
+            "dependency_execution": "application-owned",
+            "silent_dependency_install": "forbidden",
+            "manual_llm_development": "exception-only" if framework_first else "project-defined",
+            "decision_required_before_agent_code": framework_first,
+        },
+        "primary_adapter": default_adapter,
+        "recommended_adapters": adapters,
+        "language_context": {
+            "tech_stack": tech_stack,
+            "language_preference": intake.get("language_preference", []),
+            "normalized_languages": languages,
+        },
+        "package_plan": package_plan,
+        "pre_implementation_gate": {
+            "required": framework_first,
+            "commands": [
+                "python3 scripts/agent_runtime.py doctor",
+                "python3 scripts/agent_runtime.py report --json",
+            ],
+            "must_resolve": [
+                "confirm runtime architecture selection",
+                "add selected adapter dependencies through the application package manager",
+                "verify model provider capabilities for tool calling and structured output",
+                "record manual_llm_exception before bypassing recommended adapters",
+            ],
+            "blocking_reasons": blocking_reasons,
+        },
+        "manual_llm_exception": {
+            "allowed": False if framework_first else True,
+            "status": manual_status,
+            "required_when": [
+                "runtime.default_adapter is custom or none for an agent/hybrid target",
+                "implementation bypasses package_plan for direct model API orchestration",
+            ],
+            "required_fields": ["rationale", "owner", "review_evidence", "validation_evidence"],
+            "rationale": str(manual_exception.get("rationale", "")).strip(),
+            "owner": str(manual_exception.get("owner", "")).strip(),
+            "review_evidence": str(manual_exception.get("review_evidence", "")).strip(),
+            "validation_evidence": str(manual_exception.get("validation_evidence", "")).strip(),
+            "residual_risk": str(manual_exception.get("residual_risk", manual_exception.get("risk", ""))).strip(),
+        },
+    }
+
+
 def mcp_server_intake_config(intake: dict, project_target: str) -> dict:
     enabled = project_target in {"mcp-server", "hybrid"} or bool_from_intake(intake, "mcp_server_enabled", False)
     capability_types = list_from_intake(intake, "mcp_capability_types", ["tools"] if enabled else [])
@@ -299,7 +449,8 @@ def mcp_server_intake_config(intake: dict, project_target: str) -> dict:
     }
 
 
-def architecture_intake_config(intake: dict, *, has_intake: bool) -> dict:
+def architecture_intake_config(intake: dict, *, has_intake: bool, tech_stack: list[str] | None = None) -> dict:
+    tech_stack = tech_stack or []
     project_target = normalize_project_target(
         str(
             intake.get(
@@ -354,7 +505,7 @@ def architecture_intake_config(intake: dict, *, has_intake: bool) -> dict:
     selection_status = str(intake.get("selection_status", "")).strip()
     if selection_status not in {"confirmed", "needs-confirmation"}:
         selection_status = "confirmed" if explicit_confirmed else "needs-confirmation"
-    return {
+    config = {
         "schema": "agent-architecture-intake-v1",
         "source": "structured-intake" if has_intake else "default-conservative",
         "project_target": project_target,
@@ -377,6 +528,8 @@ def architecture_intake_config(intake: dict, *, has_intake: bool) -> dict:
         "selected_model_profiles": selected_model_profiles,
         "mcp_server": mcp_server_intake_config(intake, project_target),
     }
+    config["runtime_adoption"] = runtime_adoption_config(config, intake, tech_stack)
+    return config
 
 
 def clean_layout_dir(value: str) -> str:
@@ -424,6 +577,8 @@ def config_path_pointers(governance_profile: str, openspec_enabled: bool, claude
     if profile_at_least(governance_profile, "standard"):
         paths.update(
             {
+                "project_blueprint": ".agent/blueprint.json",
+                "project_blueprint_doc": "docs/PROJECT_BLUEPRINT.md",
                 "workflow_config": ".agent/workflow.json",
                 "workflow_profiles": ".agent/workflow-profiles.json",
                 "loop_engineering": ".agent/loop-engineering.json",
@@ -541,6 +696,8 @@ def harness_config(
             validation["test"].append("python3 scripts/agent_resources.py doctor")
         if "python3 scripts/agent_runtime.py doctor" not in validation["test"]:
             validation["test"].append("python3 scripts/agent_runtime.py doctor")
+        if "python3 scripts/agent_blueprint.py doctor" not in validation["test"]:
+            validation["test"].append("python3 scripts/agent_blueprint.py doctor")
         if "python3 scripts/agent_resources.py list --json" not in validation["smoke"]:
             validation["smoke"].append("python3 scripts/agent_resources.py list --json")
         required_paths.extend(
@@ -553,6 +710,7 @@ def harness_config(
                 ".agent/worktrees.json",
                 ".agent/role-contracts.json",
                 ".agent/task-board.json",
+                ".agent/blueprint.json",
                 ".agent/knowledge.json",
                 ".agent/dev-map.json",
                 ".agent/skill-hygiene.json",
@@ -580,6 +738,7 @@ def harness_config(
                 ".agent/intake/.gitkeep",
                 ".agent/templates/project-review.md.tmpl",
                 ".agent/templates/project-fix-log.md.tmpl",
+                ".agent/templates/project-blueprint.md.tmpl",
                 ".agent/templates/intake-packet.md.tmpl",
                 ".agent/templates/resource-secrets.local.env.tmpl",
                 ".agent/templates/implementation-plan.md.tmpl",
@@ -605,6 +764,7 @@ def harness_config(
                 "scripts/agent_capabilities.py",
                 "scripts/agent_skill_hygiene.py",
                 "scripts/agent_project_skills.py",
+                "scripts/agent_blueprint.py",
                 "scripts/agent_runtime.py",
                 "scripts/agent_task.py",
                 "scripts/agent_verify.py",
@@ -613,6 +773,7 @@ def harness_config(
                 "scripts/agent_resources.py",
                 "docs/ARCHITECTURE.md",
                 "docs/RELIABILITY.md",
+                "docs/PROJECT_BLUEPRINT.md",
                 "docs/QUALITY_SCORE.md",
                 "docs/AI_CODING_GLOSSARY.md",
                 "docs/DOMAIN_GLOSSARY.md",
@@ -690,6 +851,7 @@ def harness_config(
     if profile_at_least(governance_profile, "standard"):
         observability["capability_registry"] = ".agent/capabilities.json"
         observability["resource_catalog"] = ".agent/resources.json"
+        observability["project_blueprint"] = ".agent/blueprint.json"
         observability["runtime_architecture"] = ".agent/agent-runtime.json"
         observability["skill_runtime"] = ".agent/skill-runtime.json"
         observability["loop_engineering"] = ".agent/loop-engineering.json"
@@ -700,6 +862,7 @@ def harness_config(
             [
                 "docs/ARCHITECTURE.md",
                 "docs/RELIABILITY.md",
+                "docs/PROJECT_BLUEPRINT.md",
                 "docs/QUALITY_SCORE.md",
                 "docs/AI_CODING_GLOSSARY.md",
                 "docs/DOMAIN_GLOSSARY.md",
@@ -795,6 +958,8 @@ def spec_config(project_name: str, created_at: str) -> dict:
             "completed_active_changes_fail_validation": True,
             "archive_before_completion_claim": True,
             "record_session_links": True,
+            "blueprint_impact_required_when_blueprint_exists": True,
+            "blueprint_archive_gate_enabled": True,
         },
         "commands": {
             "init": "python3 scripts/agent_spec.py init",
@@ -1279,14 +1444,22 @@ def workflow_config(project_name: str, created_at: str, openspec_enabled: bool) 
                 "required_for_profiles": ["standard", "full"],
                 "policy": ".agent/loop-engineering.json",
                 "loop_contract_required": True,
+                "readiness_level_required": True,
+                "attempt_ledger_required": True,
+                "failure_signature_required": True,
                 "iteration_budget_required": True,
+                "quota_policy_required": True,
+                "circuit_breaker_required": True,
                 "observation_signal_required": True,
                 "stop_conditions_required": True,
                 "evidence_per_iteration_required": True,
+                "safe_fallback_lane_required": True,
+                "state_transition_contract_required": True,
                 "same_failure_requires_strategy_change": True,
                 "repeat_failures_promote_to_harness_evolution": True,
                 "human_interrupt_for_high_risk_or_destructive": True,
                 "self_approval_forbidden": True,
+                "dependency_free_control_plane": True,
             },
             "goal_contract": {
                 "required_for_profiles": ["bugfix", "standard", "full"],
@@ -1457,44 +1630,181 @@ def loop_engineering_config(project_name: str, created_at: str) -> dict:
                 "name": "Anthropic Building Effective Agents",
                 "url": "https://www.anthropic.com/engineering/building-effective-agents",
                 "adopted_practice": "Prefer simple workflows first, then use evaluator-optimizer loops when feedback is objective.",
+                "source_status": "verified",
+                "dependency_policy": "source_only",
             },
             {
                 "name": "LangGraph",
                 "url": "https://github.com/langchain-ai/langgraph",
                 "adopted_practice": "Use explicit state transitions, durable progress, and human interrupt points for long-running loops.",
+                "source_status": "verified",
+                "dependency_policy": "source_only",
             },
             {
                 "name": "SWE-agent",
                 "url": "https://github.com/SWE-agent/SWE-agent",
                 "adopted_practice": "Treat tool interaction as an observe-act loop with bounded environment feedback.",
+                "source_status": "verified",
+                "dependency_policy": "source_only",
             },
             {
                 "name": "DSPy",
                 "url": "https://github.com/stanfordnlp/dspy",
                 "adopted_practice": "Optimize prompts or programs against eval signals instead of subjective self-approval.",
+                "source_status": "verified",
+                "dependency_policy": "source_only",
             },
             {
                 "name": "Promptfoo",
                 "url": "https://github.com/promptfoo/promptfoo",
                 "adopted_practice": "Keep regression evals in repeatable local or CI commands.",
+                "source_status": "verified",
+                "dependency_policy": "source_only",
+            },
+            {
+                "name": "Loop engineering control-plane research",
+                "url": "docs/features/agent-gov-loop-engineering-control-plane/01_REQUIREMENT_ANALYSIS.md",
+                "adopted_practice": "Absorb readiness levels, attempt ledgers, quotas, fallback lanes, and state transitions as repo-local governance mechanics.",
+                "source_status": "verified",
+                "dependency_policy": "source_only",
             },
         ],
         "policy": {
             "loop_contract_required_for_non_tiny_work": True,
+            "readiness_level_required_for_non_tiny_loops": True,
+            "unattended_requires_attempt_ledger": True,
             "bounded_iterations_required": True,
             "observation_signal_required": True,
             "stop_conditions_required": True,
             "evidence_per_iteration_required": True,
+            "attempt_ledger_required": True,
+            "failure_signature_required": True,
             "same_failure_requires_strategy_change": True,
             "repeat_failure_threshold": 2,
+            "strategy_change_required_before_same_failure_retry": True,
+            "quota_policy_required": True,
+            "circuit_breaker_required": True,
             "budget_exhaustion_blocks_completion_claim": True,
             "human_interrupt_for_high_risk_or_destructive": True,
+            "safe_fallback_lane_required": True,
+            "loop_state_transitions_required": True,
+            "resume_requires_last_committed_step_and_side_effect_boundary": True,
+            "external_mutation_requires_idempotency_or_approval": True,
             "self_approval_is_not_release_evidence": True,
             "finder_cannot_fix_applies_to_review_loops": True,
             "prevalidate_inputs_before_expensive_work": True,
             "failed_runs_exit_nonzero": True,
             "failed_runs_record_evidence_paths": True,
             "failed_optimization_cannot_be_improvement": True,
+            "dependency_free_control_plane": True,
+        },
+        "readiness_levels": {
+            "manual": {
+                "description": "Human-directed loop; agent records observations and waits for explicit instructions before each material action.",
+                "required_controls": ["loop_contract", "evidence_path", "safe_stop"],
+                "human_gate": "before_each_material_action",
+                "state_persistence": "session_or_feature_doc",
+            },
+            "report_only": {
+                "description": "Agent may inspect and report but cannot mutate project state without a follow-up approval.",
+                "required_controls": ["loop_contract", "observation_signal", "evidence_path", "safe_stop"],
+                "human_gate": "before_mutation",
+                "state_persistence": "session_or_feature_doc",
+            },
+            "assisted": {
+                "description": "Agent may iterate on bounded low/medium-risk work after a plan and must stop on repeated failures or risk escalation.",
+                "required_controls": ["loop_contract", "attempt_ledger", "failure_signature", "quota_policy", "stop_conditions", "safe_fallback_lane"],
+                "human_gate": "before_high_risk_or_external_mutation",
+                "state_persistence": "runlog_session_or_feature_doc",
+            },
+            "unattended": {
+                "description": "Agent may continue without immediate human input only when deterministic checks, quotas, approvals, and resume safety are present.",
+                "required_controls": ["attempt_ledger", "failure_signature", "quota_policy", "circuit_breaker", "human_interrupt_points", "non_empty_stop_conditions", "state_transition_contract", "safe_stop"],
+                "human_gate": "configured_interrupt_points",
+                "state_persistence": "runlog_session_or_feature_doc",
+            },
+        },
+        "attempt_ledger": {
+            "storage_policy": "prefer_existing_runlog_session_and_feature_docs",
+            "dedicated_ledger_path": ".agent/loop-runs.jsonl",
+            "dedicated_ledger_required": False,
+            "required_fields": [
+                "loop_id",
+                "iteration_id",
+                "readiness_level",
+                "owner_role",
+                "action_summary",
+                "evidence_paths",
+                "result_status",
+                "failure_signature",
+                "strategy_changed",
+                "budget_usage_summary",
+                "next_transition",
+            ],
+            "result_statuses": ["improved", "no_change", "failed", "blocked", "risk_changed", "completed"],
+            "failure_signature_policy": {
+                "stable_signature_required": True,
+                "signature_inputs": ["command_or_action", "error_class", "failing_artifact", "risk_state"],
+                "same_signature_retry_requires_strategy_changed": True,
+            },
+        },
+        "quota_policy": {
+            "iteration_count_required": True,
+            "elapsed_time_budget_required": True,
+            "token_budget_required_when_available": True,
+            "cost_budget_required_when_available": True,
+            "repeated_identical_action_limit": 1,
+            "budget_exhaustion_transition": "replan",
+            "high_risk_action_gate": "approval_required",
+        },
+        "circuit_breakers": {
+            "protected_actions": [
+                "destructive",
+                "production_write",
+                "release",
+                "billing",
+                "credential",
+                "privileged",
+                "external_mutation",
+            ],
+            "missing_approval_behavior": "fail_closed",
+            "identical_action_without_strategy_change_limit": 1,
+            "same_failure_threshold": 2,
+        },
+        "safe_fallback_lane": {
+            "must_preserve_human_gate": True,
+            "allowed_work": ["read_only_analysis", "test_preparation", "docs_review", "planning", "artifact_inventory"],
+            "forbidden_work": ["production_write", "release", "credential_use", "private_data_expansion", "destructive_change", "approval_dependent_action"],
+            "requires_explicit_non_bypass_statement": True,
+        },
+        "state_transitions": {
+            "states": ["pending", "running", "waiting_human", "waiting_tool", "paused", "retrying", "replan", "blocked", "completed", "failed", "cancelled"],
+            "allowed": {
+                "pending": ["running", "waiting_human", "cancelled"],
+                "running": ["waiting_human", "waiting_tool", "retrying", "replan", "blocked", "completed", "failed", "cancelled"],
+                "waiting_tool": ["running", "waiting_human", "blocked", "failed", "cancelled"],
+                "waiting_human": ["running", "paused", "blocked", "cancelled"],
+                "paused": ["running", "blocked", "cancelled"],
+                "retrying": ["running", "replan", "blocked", "failed"],
+                "replan": ["pending", "running", "waiting_human", "blocked", "failed"],
+                "blocked": ["waiting_human", "replan", "failed", "cancelled"],
+                "completed": [],
+                "failed": [],
+                "cancelled": [],
+            },
+            "exhaustion_transitions": ["replan", "blocked", "waiting_human", "failed"],
+            "resume_requirements": ["last_committed_step", "evidence_path", "external_side_effect_boundary", "idempotency_or_approval_for_external_mutation"],
+        },
+        "scoring": {
+            "dimension": "loop_engineering",
+            "structural_checks": ["readiness_levels", "attempt_ledger", "quota_policy", "circuit_breakers", "safe_fallback_lane", "state_transitions", "dependency_boundary"],
+            "score_is_advisory": True,
+        },
+        "dependency_boundary": {
+            "external_projects_are_sources_only": True,
+            "runtime_dependencies_allowed": [],
+            "forbidden_additions": ["scheduler", "daemon", "dashboard", "hosted_control_plane", "external_loop_runtime"],
+            "local_validation_requires_network": False,
         },
         "loop_types": {
             "work_loop": {
@@ -2455,6 +2765,7 @@ def context_budget_config(project_name: str, created_at: str, governance_profile
             ".agent/model-profiles.json",
             ".agent/agent-runtime.json",
             ".agent/skill-runtime.json",
+            ".agent/blueprint.json",
             ".agent/manifest.json",
             ".agent/workflow.json",
             ".agent/workflow-profiles.json",
@@ -2480,6 +2791,7 @@ def context_budget_config(project_name: str, created_at: str, governance_profile
             "docs/LOOP_ENGINEERING.md",
             "docs/RESOURCES.md",
             "docs/AGENT_RUNTIME_ARCHITECTURE.md",
+            "docs/PROJECT_BLUEPRINT.md",
             "docs/SKILL_RUNTIME.md",
             "docs/features/INDEX.md",
             "docs/adr/README.md",
@@ -2718,6 +3030,10 @@ def runtime_policy_config(project_name: str, created_at: str, intake: dict) -> d
                 "select": {"architecture_style": intake["architecture_style"], "default_runtime_adapter": intake["default_runtime_adapter"]},
             },
             {
+                "when": ["project_target is agent or hybrid", "architecture_style is skill-first"],
+                "select": {"runtime_adoption": "framework-first", "manual_llm_development": "exception-only"},
+            },
+            {
                 "when": ["project_target is mcp-server"],
                 "select": {"models_required": False, "mcp_server_boundaries": "required"},
             },
@@ -2783,10 +3099,19 @@ def runtime_policy_config(project_name: str, created_at: str, intake: dict) -> d
             },
             "custom": {
                 "role": "project-defined-adapter",
-                "status": "allowed",
-                "reason": "Allowed when project constraints do not fit a recommended adapter.",
+                "status": "exception-required-for-agent-targets",
+                "reason": "Allowed when project constraints do not fit a recommended adapter; agent/hybrid targets must record a manual LLM exception before hand-written orchestration.",
                 "install_policy": "application-owned-dependency",
             },
+        },
+        "framework_adoption": {
+            "default_posture_for_agent_and_hybrid": "framework-first",
+            "manual_llm_orchestration_without_adapter": "exception-only",
+            "initialization_generates_install_plan": True,
+            "initialization_runs_package_manager": False,
+            "dependency_execution_owner": "application",
+            "pre_implementation_gate": "python3 scripts/agent_runtime.py doctor",
+            "exception_required_fields": ["rationale", "owner", "review_evidence", "validation_evidence"],
         },
         "boundaries": {
             "agent_gov_must_not_import_runtime_frameworks": True,
@@ -2939,6 +3264,7 @@ def agent_runtime_config(project_name: str, created_at: str, intake: dict) -> di
                 "agent_gov_doctor_does_not_import_runtime_frameworks": True,
             },
         },
+        "runtime_adoption": intake["runtime_adoption"],
         "models": {
             "required": intake["model_profiles_required"],
             "access_strategy": intake["model_access_strategy"],
@@ -2965,6 +3291,112 @@ def agent_runtime_config(project_name: str, created_at: str, intake: dict) -> di
             "doctor": "python3 scripts/agent_runtime.py doctor",
             "report": "python3 scripts/agent_runtime.py report --json",
         },
+    }
+
+
+def blueprint_config(project_name: str, created_at: str, intake: dict, tech_stack: list[str], dirs: list[str]) -> dict:
+    project_target = intake["project_target"]
+    runtime_adoption = intake["runtime_adoption"]
+    if project_target in {"agent", "hybrid"}:
+        manual_exception = runtime_adoption.get("manual_llm_exception", {})
+        adoption_mode = "manual-llm-exception" if isinstance(manual_exception, dict) and manual_exception.get("status") == "accepted" else "framework-first"
+        direct_llm_policy = "exception-only"
+    elif project_target == "mcp-server":
+        adoption_mode = "mcp-first"
+        direct_llm_policy = "not-required-by-target"
+    elif project_target == "library":
+        adoption_mode = "library-only"
+        direct_llm_policy = "outside-deliverable"
+    else:
+        adoption_mode = "target-specific"
+        direct_llm_policy = "project-defined"
+    return {
+        "schema": "agent-blueprint-v1",
+        "project_name": project_name,
+        "created_at": created_at,
+        "status": "draft",
+        "status_reason": "Generated during initialization; review and confirm before non-trivial implementation.",
+        "docs": {
+            "blueprint": "docs/PROJECT_BLUEPRINT.md",
+            "template": ".agent/templates/project-blueprint.md.tmpl",
+            "runtime_architecture": "docs/AGENT_RUNTIME_ARCHITECTURE.md",
+        },
+        "records": [
+            {
+                "id": "BP-PRODUCT-001",
+                "title": "Product purpose and users",
+                "status": "draft",
+                "doc_section": "Product Purpose",
+                "linked_specs": [],
+                "linked_adrs": [],
+            },
+            {
+                "id": "BP-RUNTIME-001",
+                "title": "Agent runtime and framework decision",
+                "status": "draft",
+                "doc_section": "Agent Runtime And Framework Decision",
+                "linked_specs": [],
+                "linked_adrs": [],
+            },
+            {
+                "id": "BP-DATA-001",
+                "title": "Data and state ownership",
+                "status": "draft",
+                "doc_section": "Data And State Ownership",
+                "linked_specs": [],
+                "linked_adrs": [],
+            },
+            {
+                "id": "BP-SECURITY-001",
+                "title": "Security and risk boundaries",
+                "status": "draft",
+                "doc_section": "Security And Risk Boundaries",
+                "linked_specs": [],
+                "linked_adrs": [],
+            },
+            {
+                "id": "BP-VALIDATION-001",
+                "title": "Validation and harness strategy",
+                "status": "draft",
+                "doc_section": "Validation And Harness Strategy",
+                "linked_specs": [],
+                "linked_adrs": [],
+            },
+        ],
+        "runtime_framework_decision": {
+            "id": "BP-RUNTIME-001",
+            "project_target": project_target,
+            "runtime_adoption": adoption_mode,
+            "primary_adapter": intake["default_runtime_adapter"],
+            "recommended_adapters": runtime_adoption.get("recommended_adapters", []),
+            "package_plan": runtime_adoption.get("package_plan", []),
+            "direct_llm_call_policy": direct_llm_policy,
+            "manual_llm_exception": runtime_adoption.get("manual_llm_exception", {}),
+            "library_rationale": "Agent runtime is outside the deliverable." if project_target == "library" else "",
+            "linked_runtime_governance": ".agent/agent-runtime.json",
+            "linked_adr": "",
+            "mcp_boundary": intake.get("mcp_server", {}),
+        },
+        "module_directory_blueprint": {
+            "layout_dirs": dirs,
+            "tech_stack": tech_stack,
+            "source": ".agent/project-layout.json",
+        },
+        "spec_sync_policy": {
+            "impact_metadata_path": ".agent-spec.json#/blueprint_impact",
+            "known_blueprint_ids_required": True,
+            "no_impact_reason_required_for_architecture_surfaces": True,
+            "archive_blocks_when_blueprint_update_required": True,
+            "runtime_framework_change_requires_adr_or_exception": True,
+            "bootstrap_note_allowed_only_before_blueprint_exists": True,
+        },
+        "commands": {
+            "doctor": "python3 scripts/agent_blueprint.py doctor",
+            "report": "python3 scripts/agent_blueprint.py report --json",
+        },
+        "open_decisions": [
+            "Confirm product purpose, target users/operators, core workflows, domain model, data ownership, security boundaries, validation strategy, and runtime/framework decision before non-trivial implementation."
+        ],
     }
 
 
@@ -3396,6 +3828,17 @@ def capabilities_config(
             "validation": ["python3 scripts/agent_project_skills.py doctor"],
         },
         {
+            "id": "project-blueprint",
+            "kind": "policy",
+            "provider": "agent-gov",
+            "enabled": True,
+            "risk": "medium",
+            "owner": "governance-owner",
+            "description": "Global project blueprint for purpose, architecture, runtime/framework decisions, data/state ownership, resources, security, validation, and OpenSpec impact sync.",
+            "permissions": {"read": True, "write": "bounded", "network": False, "secrets": False},
+            "validation": ["python3 scripts/agent_blueprint.py doctor"],
+        },
+        {
             "id": "resource-catalog",
             "kind": "resource",
             "provider": "agent-gov",
@@ -3611,6 +4054,7 @@ def capabilities_config(
         "mechanical-verification": "executable",
         "skill-hygiene": "executable",
         "project-skill-governance": "executable",
+        "project-blueprint": "instruction",
         "resource-catalog": "integration",
         "agent-runtime-architecture": "instruction",
         "skill-runtime-governance": "instruction",
@@ -3644,6 +4088,7 @@ def capabilities_config(
         "mechanical-verification",
         "skill-hygiene",
         "project-skill-governance",
+        "project-blueprint",
         "resource-catalog",
         "agent-runtime-architecture",
         "skill-runtime-governance",
@@ -3778,6 +4223,7 @@ def evals_config(project_name: str, created_at: str, governance_profile: str) ->
                 "dev_map": {"weight": 6},
                 "skill_hygiene": {"weight": 6},
                 "project_skills": {"weight": 6},
+                "project_blueprint": {"weight": 8},
                 "resource_catalog": {"weight": 8},
                 "agent_runtime_architecture": {"weight": 8},
                 "skill_runtime": {"weight": 8},
@@ -3845,6 +4291,7 @@ def mechanical_checks_config(project_name: str, created_at: str, governance_prof
         ".agent/dev-map.json",
         ".agent/skill-hygiene.json",
         ".agent/project-skills.json",
+        ".agent/blueprint.json",
         ".agent/memory.json",
         ".agent/context.json",
         ".agent/capabilities.json",
@@ -3960,6 +4407,18 @@ def mechanical_checks_config(project_name: str, created_at: str, governance_prof
             "script": "scripts/agent_project_skills.py",
             "doctor_is_non_destructive": True,
             "requires_review_fix_review_for_lifecycle_changes": True,
+        },
+        "project_blueprint": {
+            "enabled": True,
+            "path": ".agent/blueprint.json",
+            "doc": "docs/PROJECT_BLUEPRINT.md",
+            "template": ".agent/templates/project-blueprint.md.tmpl",
+            "script": "scripts/agent_blueprint.py",
+            "doctor": "python3 scripts/agent_blueprint.py doctor",
+            "schema": "agent-blueprint-v1",
+            "required_for_profiles": ["standard", "full"],
+            "dependency_free": True,
+            "archive_gate": True,
         },
         "agent_runtime_architecture": {
             "enabled": True,
@@ -4096,6 +4555,7 @@ def manifest_config(project_name: str, created_at: str, harness: dict, evals: di
         ".agent/dev-map.json": "agent-dev-map-v1",
         ".agent/skill-hygiene.json": "agent-skill-hygiene-v1",
         ".agent/project-skills.json": "agent-project-skills-v1",
+        ".agent/blueprint.json": "agent-blueprint-v1",
         ".agent/memory.json": "agent-memory-v1",
         ".agent/context.json": "agent-context-budget-v1",
         ".agent/capabilities.json": "agent-capabilities-v1",
@@ -4427,11 +4887,9 @@ def agent_ground_rules(governance_profile: str) -> tuple[str, str]:
     if profile_at_least(governance_profile, "standard"):
         standard = [
             "- Use `.agent/workflow*.json`, `.agent/task-board.json`, `docs/features/`, `.agent/risk-zones.json`, `.agent/review-policy.json`, `.agent/worktrees.json`, and `.agent/role-contracts.json` for task flow, autonomy, isolation, review evidence, and finder-cannot-fix separation.",
-            "- Use `.agent/loop-engineering.json` and `docs/LOOP_ENGINEERING.md` for bounded work/review/debug/eval/recovery loops.",
-            "- Use `.agent/knowledge.json`, `.agent/memory.json`, `.agent/context.json`, `.agent/dev-map.json`, `docs/DEV_MAP.md`, `docs/AI_CODING_GLOSSARY.md`, and `docs/DOMAIN_GLOSSARY.md` for durable knowledge, memory retrieval, context budgets, navigation, and terminology.",
-            "- Use `.agent/resources.json`, `docs/RESOURCES.md`, and `scripts/agent_resources.py` for managed project resources and safe-use boundaries.",
-            "- Use `.agent/runtime-policy.json`, `.agent/model-profiles.json`, `.agent/agent-runtime.json`, `docs/AGENT_RUNTIME_ARCHITECTURE.md`, and `scripts/agent_runtime.py` for Skill-first runtime target, MCP boundary, model profile, adapter, and interview decisions.",
-            "- Use `.agent/skill-runtime.json` and `docs/SKILL_RUNTIME.md` for portable Skill/plugin architecture: canonical core, thin host adapters, runtime modes, command lanes, review lanes, impact benchmarks, and shortcut/debt ledgers.",
+            "- Use `.agent/blueprint.json`, `docs/PROJECT_BLUEPRINT.md`, and `scripts/agent_blueprint.py` for the global product/architecture blueprint before feature-level OpenSpec implementation.",
+            "- Use `.agent/loop-engineering.json`, `docs/LOOP_ENGINEERING.md`, `.agent/knowledge.json`, `.agent/memory.json`, `.agent/context.json`, `docs/DEV_MAP.md`, and `docs/DOMAIN_GLOSSARY.md` for bounded loops, durable knowledge, memory retrieval, context budgets, navigation, and terminology.",
+            "- Use `.agent/resources.json`, `.agent/runtime-policy.json`, `.agent/model-profiles.json`, `.agent/agent-runtime.json`, `.agent/skill-runtime.json`, and their docs/scripts for resources, Skill-first runtime, model profiles, adapters, and portable Skill/plugin governance.",
             "- Use `.agent/capabilities.json`, `.agent/mechanical-checks.json`, `.agent/baselines.json`, `.agent/harness-evolution.json`, `.agent/mcp-policy.json`, `.agent/governance-gc.json`, and `scripts/agent_*` doctors for capability risk, hard checks, incident promotion, integration boundaries, and governance gardening.",
         ]
     if profile_at_least(governance_profile, "full"):
@@ -4464,21 +4922,17 @@ def agent_workflow(governance_profile: str, spec_workflow_step: str) -> tuple[st
         standard = [
             "- Run `python3 .agent/tools/agent_memory.py doctor` and retrieve durable context with `timeline`, `search`, then `detail` only as needed.",
             "- Run `python3 .agent/tools/agent_context.py doctor` and keep large docs behind summaries and detail commands.",
-            "- Run `python3 scripts/agent_capabilities.py doctor`, `python3 scripts/agent_resources.py doctor`, `python3 scripts/agent_task.py doctor`, `python3 scripts/agent_verify.py doctor`, and `python3 scripts/agent_gc.py doctor`.",
+            "- Run standard doctors for capabilities, resources, blueprint, runtime, task board, verification, and governance GC before broad work.",
             "- Read `.agent/workflow.json`, `.agent/workflow-profiles.json`, `.agent/task-board.json`, `.agent/risk-zones.json`, and `.agent/review-policy.json`; choose the lightest sufficient workflow profile before implementation.",
-            "- For non-tiny work, complete the requirements interview gate before design or implementation: ask one question at a time, provide a recommended answer and reason, cross-check claims against current code/docs, and update `docs/DOMAIN_GLOSSARY.md` when terms are ambiguous.",
+            "- For non-tiny work, complete requirements interview, cross-check code/docs, update terminology when needed, decompose tasks, then run review-fix-review before done.",
+            "- For project creation, architecture/runtime/layout/data/resource/security/MCP/validation changes, update or verify `.agent/blueprint.json` and `docs/PROJECT_BLUEPRINT.md` before feature-level implementation.",
             "- Read `.agent/worktrees.json`; prefer an ignored isolated worktree for feature work, plan execution, or risky refactors.",
             "- Read `docs/DEV_MAP.md` and `.agent/dev-map.json` before broad codebase navigation or module-boundary edits.",
-            "- Before using managed resources, run `agent_resources.py match` then `resolve`; keep raw secrets in ignored local files or an external vault/proxy.",
-            "- Before implementing agents, MCP servers, hybrids, or runtime libraries, run `agent_runtime.py doctor` and confirm `.agent/agent-runtime.json`.",
-            "- Before publishing or adapting a portable Skill/plugin, confirm `.agent/skill-runtime.json` and `docs/SKILL_RUNTIME.md`; keep behavior in the canonical Skill core and host adapters thin.",
-            "- Run `python3 scripts/agent_skill_hygiene.py report --json` when reviewing installed or project-level skills; treat it as read-only fact collection, not cleanup authority.",
-            "- For bugs, test failures, build failures, unexpected behavior, or governance failures, classify the harness gap with `.agent/harness-evolution.json`.",
+            "- Before resource or runtime work, run resource/runtime match, resolve, doctor, and report commands; keep secrets out of repo files and follow `runtime_adoption.package_plan` or an accepted manual LLM exception.",
+            "- For portable Skill/plugin work, confirm `.agent/skill-runtime.json` and `docs/SKILL_RUNTIME.md`; keep canonical Skill behavior separate from thin host adapters.",
             "- For non-tiny work, create or update a task-board record with `python3 scripts/agent_task.py` and keep `docs/features/<task-id>/` stage documents current.",
             "- For standard or full work, capture before/after snapshots with `python3 scripts/agent_verify.py snapshot --name <name>` and compare regressions before handoff.",
-            "- Before enabling MCP or external integrations, update `.agent/mcp-policy.json`, keep credentials outside the repo, and record high-risk use in runlog.",
-            "- For reusable context, run `python3 .agent/tools/agent_memory.py ingest-session --reason handoff`.",
-            "- For oversized governance docs, run `python3 .agent/tools/agent_context.py suggest` and validate any compressed rewrite with `validate-pair`.",
+            "- For bugs, test/build failures, repeated loop failures, or governance failures, record reproduction/root cause and classify harness gaps with `.agent/harness-evolution.json`.",
             "- Use ADRs for durable architecture decisions, RFCs for proposals, and postmortems for incidents.",
             "- Run `python3 scripts/agent_gc.py report` during periodic governance cleanup.",
         ]
@@ -4508,6 +4962,7 @@ def harness_commands(governance_profile: str) -> str:
                 "python3 scripts/agent_knowledge.py",
                 "python3 scripts/agent_invariants.py",
                 "python3 scripts/agent_capabilities.py doctor",
+                "python3 scripts/agent_blueprint.py doctor",
                 "python3 scripts/agent_resources.py doctor",
                 "python3 scripts/agent_runtime.py doctor",
                 "python3 scripts/agent_skill_hygiene.py doctor",
@@ -4545,6 +5000,8 @@ python3 scripts/agent_gc.py doctor
 python3 .agent/tools/agent_context.py scan --limit 10
 python3 .agent/tools/agent_context.py suggest
 python3 scripts/agent_capabilities.py doctor
+python3 scripts/agent_blueprint.py doctor
+python3 scripts/agent_blueprint.py report --json
 python3 scripts/agent_skill_hygiene.py doctor
 python3 scripts/agent_project_skills.py doctor
 python3 scripts/agent_project_skills.py report
@@ -4563,6 +5020,7 @@ python3 scripts/agent_verify.py compare --before .agent/baselines/before-change.
 - Choose the lightest sufficient workflow profile: `tiny`, `bugfix`, `standard`, or `full`.
 - For non-tiny work, keep `.agent/task-board.json` and `docs/features/<task-id>/` current.
 - Complete the requirements interview gate before design or implementation: ask one question at a time, recommend an answer with rationale, cross-check user claims against current code/docs, and update `docs/DOMAIN_GLOSSARY.md` for stable terms.
+- After requirements interview and before non-trivial implementation, keep the global blueprint current in `docs/PROJECT_BLUEPRINT.md` and `.agent/blueprint.json`; feature-level OpenSpec changes must declare `.agent-spec.json#/blueprint_impact`.
 - Classify task risk with `.agent/risk-zones.json` before implementation; stop and re-plan when the risk level increases.
 - Follow the `implementation_discipline` gate for non-trivial implementation: surface assumptions, choose the simplest maintainable approach, check local reuse/stdlib/native/existing dependency paths before new code, keep diffs tied to the request, and define success criteria.
 - For external-source-driven changes, record each source as verified, partial, or blocked before turning it into project rules.
@@ -4574,7 +5032,7 @@ python3 scripts/agent_verify.py compare --before .agent/baselines/before-change.
 - For standard and full work, capture before/after mechanical snapshots and compare them before handoff.
 - Before broad edits, read `docs/DEV_MAP.md` and update it when entry points, ownership, or read-before-edit guidance changes.
 - Before using remote servers, databases, repositories, deployment targets, or compute machines, match and resolve them through `.agent/resources.json` and `scripts/agent_resources.py`; keep raw secrets in ignored local files or external vault/proxy references.
-- Before implementing product-level LLM agents, MCP servers, hybrid agent-plus-MCP systems, or runtime libraries, confirm the project target, Skill-first runtime contract, MCP server boundary when applicable, model capability flags in `.agent/model-profiles.json`, and adapter rules in `.agent/runtime-policy.json`.
+- Before product runtime work, confirm project target, Skill-first contract, MCP boundary when applicable, model capability flags, adapter rules, `.agent/blueprint.json` `runtime_framework_decision`, and `.agent/agent-runtime.json` `runtime_adoption`; direct LLM orchestration without a mature adapter requires an accepted manual exception.
 - Run review-fix loops for substantial changes.
 - Run spec compliance review before code quality review for delegated or substantial implementation, and re-review after fixes.
 - Keep complexity-only audit findings separate from correctness, security, and spec review findings.
@@ -4656,28 +5114,15 @@ def build_values(root: Path, args: argparse.Namespace) -> dict[str, str]:
         "agent_harness_commands": harness_commands(args.governance_profile),
         **quality,
         "standard_docs_intro": (
-            "Knowledge metadata is tracked in `.agent/knowledge.json`. Update `owner`, `last_reviewed`, `source_links`, and `known_stale_sections` when durable knowledge changes.\n"
-            "Development navigation is tracked in `.agent/dev-map.json` and `docs/DEV_MAP.md`.\n"
-            "Project-domain terminology is tracked in `docs/DOMAIN_GLOSSARY.md`; use it to resolve naming conflicts before implementation.\n"
-            "Skill topology and hygiene policy are tracked in `.agent/skill-hygiene.json`; scans are read-only and cleanup requires human confirmation.\n"
-            "Project skill lifecycle governance is tracked in `.agent/project-skills.json`; use `scripts/agent_project_skills.py` to report managed, unmanaged, missing, drifted, pinned, and manifest boundary states.\n"
-            "Cross-session working memory is tracked in `.agent/memory.json` and `.agent/memory/`. Store summaries, decisions, validation, and retrieval handles; do not store raw transcripts.\n"
-            "Capability governance is tracked in `.agent/capabilities.json`.\n"
-            "Project resource assets are tracked in `.agent/resources.json`; use `scripts/agent_resources.py` to match and resolve servers, databases, repositories, deployment targets, compute machines, and credential references without storing raw secrets.\n"
-            "Skill runtime governance is tracked in `.agent/skill-runtime.json`; use `docs/SKILL_RUNTIME.md` before publishing or adapting portable Skills, native host adapters, command lanes, runtime modes, benchmarks, or shortcut ledgers.\n"
-            "Lightweight security governance is tracked in `.agent/security.json`; standard profile scans sensitive-looking paths without reading secret contents.\n"
-            "Workflow gates, including risk classification, implementation discipline, diff traceability, and review evidence, are tracked in `.agent/workflow.json`.\n"
-            "Workflow profiles are tracked in `.agent/workflow-profiles.json`. Cross-session task state is tracked in `.agent/task-board.json` and `docs/features/`.\n"
-            "Loop engineering policy is tracked in `.agent/loop-engineering.json` and `docs/LOOP_ENGINEERING.md`; use it for bounded work, review-fix, debugging, eval optimization, and session recovery loops.\n"
-            "Risk autonomy is tracked in `.agent/risk-zones.json`. Diff and review policy is tracked in `.agent/review-policy.json`.\n"
-            "Isolated worktree policy is tracked in `.agent/worktrees.json`.\n"
-            "Role contracts are tracked in `.agent/role-contracts.json`. Mechanical checks and before/after baselines are tracked in `.agent/mechanical-checks.json` and `.agent/baselines.json`.\n"
-            "Harness evolution is tracked in `.agent/harness-evolution.json`. Periodic governance gardening is tracked in `.agent/governance-gc.json`."
+            "Standard governance state lives under `.agent/`; human-readable maps live under `docs/`. Use the relevant generated doctor before relying on any surface.\n"
+            "Key authorities: `.agent/workflow.json`, `.agent/task-board.json`, `.agent/blueprint.json`, `.agent/agent-runtime.json`, `.agent/resources.json`, `.agent/skill-runtime.json`, `.agent/context.json`, `.agent/memory.json`, `.agent/review-policy.json`, `.agent/worktrees.json`, `.agent/role-contracts.json`, `.agent/mechanical-checks.json`, `.agent/harness-evolution.json`, and `.agent/governance-gc.json`.\n"
+            "Keep raw transcripts, secrets, private host data, and long diagnostic output out of tracked governance files."
             if profile_at_least(args.governance_profile, "standard")
             else ""
         ),
         "standard_docs_links": (
             "- [Architecture](ARCHITECTURE.md): system boundaries, dependency direction, and major design decisions.\n"
+            "- [Project Blueprint](PROJECT_BLUEPRINT.md): product purpose, global architecture, runtime/framework decision, data/state ownership, resources, security, validation, milestones, and linked specs/ADRs.\n"
             "- [Reliability](RELIABILITY.md): runtime behavior, observability, rollback, and operational risks.\n"
             "- [Governance Score](QUALITY_SCORE.md): local score dimensions, dashboard, and drift signals.\n"
             "- [AI Coding Glossary](AI_CODING_GLOSSARY.md): shared terms for skills, tools, MCP, harness, sessions, memory, and reviews.\n"
@@ -4695,26 +5140,7 @@ def build_values(root: Path, args: argparse.Namespace) -> dict[str, str]:
             else ""
         ),
         "standard_config_updates": (
-            "Update `.agent/workflow.json` when lifecycle gates, risk classification, implementation discipline, diff traceability, review order, TDD/debugging rules, or completion evidence rules change.\n"
-            "Update `.agent/workflow-profiles.json` when task-size process weights or required stage documents change.\n"
-            "Update `.agent/loop-engineering.json` and `docs/LOOP_ENGINEERING.md` when loop types, iteration budgets, observation signals, stop conditions, evidence paths, or escalation rules change.\n"
-            "Update `.agent/task-board.json` and `docs/features/` when non-tiny task state, stage, or delivery conclusions change.\n"
-            "Update `docs/DOMAIN_GLOSSARY.md` when requirements interviews introduce or resolve project-domain terms.\n"
-            "Update `.agent/risk-zones.json` when risk levels, autonomy rules, approval gates, or high-risk path patterns change.\n"
-            "Update `.agent/review-policy.json` when diff traceability categories, human review evidence, or automated review boundaries change.\n"
-            "Update `.agent/worktrees.json` when isolated worktree locations, baseline validation, or guarded cleanup rules change.\n"
-            "Update `.agent/role-contracts.json` when role inputs, outputs, forbidden actions, or finder-cannot-fix policy changes.\n"
-            "Update `.agent/memory.json` when memory stores, privacy tags, or retention policy change.\n"
-            "Update `.agent/capabilities.json` when agent-visible tools, external integrations, permissions, owners, or risk levels change.\n"
-            "Update `.agent/resources.json` when servers, databases, repositories, deployment targets, compute machines, endpoint references, credential references, owners, usage rules, health checks, or resource risk levels change.\n"
-            "Update `.agent/skill-runtime.json` and `docs/SKILL_RUNTIME.md` when portable Skill/plugin core rules, host adapters, runtime modes, command lanes, review lanes, impact benchmark policy, or shortcut/debt marker policy changes.\n"
-            "Update `.agent/security.json` when credential boundary policy, sensitive-path scans, or local security suites change.\n"
-            "Update `.agent/dev-map.json` and `docs/DEV_MAP.md` when entry points, ownership, read-before-edit guidance, or common project patterns change.\n"
-            "Update `.agent/skill-hygiene.json` when skill scan roots, stale thresholds, risk signals, or canary policy change.\n"
-            "Update `.agent/project-skills.json` when project-level skills are added, adopted, updated, deprecated, removed, pinned, or reclassified between production and workspace-only intent.\n"
-            "Update `.agent/mechanical-checks.json` and `.agent/baselines.json` when hard checks or baseline comparison policy changes.\n"
-            "Update `.agent/harness-evolution.json` when incident categories or promotion targets change.\n"
-            "Update `.agent/governance-gc.json` when periodic governance cleanup checks or thresholds change."
+            "Update the matching `.agent/*.json` authority and linked `docs/*.md` page when workflow, blueprint, runtime, resource, skill, context, memory, review, worktree, role, baseline, harness-evolution, or governance-gc policy changes."
             if profile_at_least(args.governance_profile, "standard")
             else ""
         ),
@@ -4824,7 +5250,15 @@ def init_project(args: argparse.Namespace) -> int:
     if standard_enabled:
         writer.ensure_line(".gitignore", ".agent/local/")
         raw_architecture_intake = load_architecture_intake(args.architecture_intake)
-        architecture_intake = architecture_intake_config(raw_architecture_intake, has_intake=bool(args.architecture_intake))
+        architecture_intake = architecture_intake_config(
+            raw_architecture_intake,
+            has_intake=bool(args.architecture_intake),
+            tech_stack=tech_stack,
+        )
+        writer.write(
+            ".agent/blueprint.json",
+            json.dumps(blueprint_config(project_name, values["created_at"], architecture_intake, tech_stack, dirs), indent=2) + "\n",
+        )
         writer.write(
             ".agent/workflow.json",
             json.dumps(workflow_config(project_name, values["created_at"], openspec_enabled), indent=2) + "\n",
@@ -4975,6 +5409,7 @@ def init_project(args: argparse.Namespace) -> int:
     standard_templates = (
         "project-review.md.tmpl",
         "project-fix-log.md.tmpl",
+        "project-blueprint.md.tmpl",
         "intake-packet.md.tmpl",
         "resource-secrets.local.env.tmpl",
         "implementation-plan.md.tmpl",
@@ -5026,6 +5461,7 @@ def init_project(args: argparse.Namespace) -> int:
         writer.write("scripts/agent_capabilities.py", template("agent-capabilities.py.tmpl"), executable=True)
         writer.write("scripts/agent_skill_hygiene.py", template("agent-skill-hygiene.py.tmpl"), executable=True)
         writer.write("scripts/agent_project_skills.py", template("agent-project-skills.py.tmpl"), executable=True)
+        writer.write("scripts/agent_blueprint.py", template("agent-blueprint.py.tmpl"), executable=True)
         writer.write("scripts/agent_runtime.py", template("agent-runtime.py.tmpl"), executable=True)
         writer.write("scripts/agent_task.py", template("agent-task.py.tmpl"), executable=True)
         writer.write("scripts/agent_verify.py", template("agent-verify.py.tmpl"), executable=True)
@@ -5041,6 +5477,7 @@ def init_project(args: argparse.Namespace) -> int:
     if standard_enabled:
         writer.write("docs/ARCHITECTURE.md", render(template("docs-architecture.md.tmpl"), values))
         writer.write("docs/RELIABILITY.md", render(template("docs-reliability.md.tmpl"), values))
+        writer.write("docs/PROJECT_BLUEPRINT.md", render(template("docs-project-blueprint.md.tmpl"), values))
         writer.write("docs/QUALITY_SCORE.md", render(template("docs-quality-score.md.tmpl"), values))
         writer.write("docs/AI_CODING_GLOSSARY.md", render(template("docs-ai-coding-glossary.md.tmpl"), values))
         writer.write("docs/DOMAIN_GLOSSARY.md", render(template("docs-domain-glossary.md.tmpl"), values))

@@ -50,6 +50,7 @@ scripts/
 - Use embedded spec changes for non-trivial project changes, not for ordinary checkpoint notes.
 - Link active session records to a spec change when work is change-driven.
 - Treat non-trivial implementation as a gated flow: approved proposal/design, then implementation plan, then execution.
+- In standard/full projects with blueprint governance, every non-trivial change must declare `.agent-spec.json#/blueprint_impact` and mirror it in `proposal.md`. Architecture, runtime/framework, layout, data/state ownership, resource, security, MCP, validation, or harness changes either update `.agent/blueprint.json` / `docs/PROJECT_BLUEPRINT.md` or record a meaningful no-impact reason.
 - For multi-step work, require plan artifacts to list exact files, commands, expected results, and review/validation checkpoints.
 - Do not start implementation from an ambiguous or unapproved spec unless the user explicitly asks for exploratory work and the session records that exception.
 
@@ -66,6 +67,7 @@ scripts/
 Before considering a project initialized:
 
 - `.agent/spec.json` exists and has schema `agent-spec-v1`.
+- If `.agent/blueprint.json` exists, `scripts/agent_spec.py doctor` validates active changes' `blueprint_impact` metadata and archive readiness for blueprint-impacting changes.
 - `scripts/agent_spec.py doctor` passes.
 - `openspec/config.yaml`, `openspec/project.md`, `openspec/changes/`, and `openspec/specs/` exist.
 - Agents know when to create or continue embedded spec changes.

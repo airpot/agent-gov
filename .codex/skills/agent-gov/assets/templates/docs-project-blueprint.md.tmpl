@@ -1,0 +1,91 @@
+# Project Blueprint: {{project_name}}
+
+This document is the global product and architecture blueprint for this repository. It is finalized after the requirements interview and before non-trivial OpenSpec implementation.
+
+## Product Purpose
+
+- Current status: draft after initialization.
+- Purpose: record the product outcome this repository exists to deliver.
+
+## Target Users / Operators
+
+- Current status: draft after initialization.
+- Users:
+- Operators:
+
+## Non-Goals
+
+- Current status: draft after initialization.
+
+## Core Workflows
+
+- Current status: draft after initialization.
+
+## Domain Model
+
+- Current status: draft after initialization.
+
+## System Boundary
+
+- Current status: draft after initialization.
+
+## Quality Attributes
+
+- Current status: draft after initialization.
+
+## Runtime And Framework Choices
+
+- Current status: draft after initialization.
+- Runtime governance authority: `.agent/agent-runtime.json`
+- Runtime doctor: `python3 scripts/agent_runtime.py doctor`
+
+## Agent Runtime And Framework Decision
+
+- Current status: draft after initialization.
+- Blueprint authority: `.agent/blueprint.json#/runtime_framework_decision`
+- Agent and hybrid projects default to framework-first adoption.
+- MCP server projects default to MCP-first boundaries.
+- Library projects may remain library-only with rationale.
+- Direct hand-written LLM orchestration requires an accepted manual LLM exception with rationale, owner, review evidence, validation evidence, and residual risk.
+
+## Module / Directory Blueprint
+
+- Current status: draft after initialization.
+- Layout authority: `.agent/project-layout.json`
+
+## Data And State Ownership
+
+- Current status: draft after initialization.
+- Product runtime state belongs to application-owned storage, not `.agent/sessions/`.
+
+## External Resources And MCP Boundary
+
+- Current status: draft after initialization.
+- Resource authority: `.agent/resources.json`
+- MCP trust boundary authority: `.agent/mcp-policy.json`
+
+## Security And Risk Boundaries
+
+- Current status: draft after initialization.
+- Security governance: `.agent/security.json`
+- Risk governance: `.agent/risk-zones.json`
+
+## Validation And Harness Strategy
+
+- Current status: draft after initialization.
+- Harness registry: `.agent/harness.json`
+- Blueprint doctor: `python3 scripts/agent_blueprint.py doctor`
+
+## Milestones / Build Order
+
+- Current status: draft after initialization.
+
+## Open Decisions
+
+- Confirm purpose, users, core workflows, data ownership, external resources, security boundaries, validation strategy, and runtime/framework decision before non-trivial implementation.
+
+## Linked Specs / ADRs
+
+- Blueprint records: `.agent/blueprint.json#/records`
+- OpenSpec changes declare impact at `.agent-spec.json#/blueprint_impact`.
+- Durable architecture decisions should link ADRs from `docs/adr/`.

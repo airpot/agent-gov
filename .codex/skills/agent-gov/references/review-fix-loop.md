@@ -11,8 +11,11 @@ Review the initialized project before handoff. At minimum, check:
 - `AGENTS.md` is short, stable, and agent-focused.
 - `CLAUDE.md` is thin and does not duplicate long instructions.
 - `.agent/workflow.json` records lifecycle gates for risk classification, spec approval, plan quality, implementation discipline, diff traceability, worktree isolation, TDD/debugging, review sequence, human review evidence, completion verification, and finish choices.
+- `.agent/blueprint.json`, `docs/PROJECT_BLUEPRINT.md`, `.agent/templates/project-blueprint.md.tmpl`, and `scripts/agent_blueprint.py` exist for standard/full projects; blueprint doctor passes; active OpenSpec changes declare valid `blueprint_impact`.
 - `.agent/workflow-profiles.json` records `tiny`, `bugfix`, `standard`, and `full` process weights, and `.agent/workflow.json` points to it.
-- `.agent/loop-engineering.json` exists, `.agent/workflow.json` has a `loop_engineering` gate, and non-tiny iterative work has loop contracts for budget, observation signal, stop conditions, evidence, and escalation.
+- `.agent/loop-engineering.json` exists, `.agent/workflow.json` has a `loop_engineering` gate, and non-tiny iterative work has loop contracts for readiness level, budget, observation signal, stop conditions, evidence, and escalation.
+- `.agent/loop-engineering.json` defines `manual`, `report_only`, `assisted`, and `unattended` readiness levels, and unattended readiness requires attempt ledger evidence, failure signatures, quota/circuit-breaker controls, human interrupt points, state persistence, and safe stop behavior.
+- `.agent/loop-engineering.json` defines attempt ledger fields, quota policy, circuit breakers for destructive/production/release/billing/credential/privileged/external mutation actions, safe fallback lanes, explicit loop state transitions, and a dependency-free source-only boundary for external loop research.
 - `.agent/task-board.json`, `.agent/intake/`, and `docs/features/INDEX.md` exist; non-tiny task state can be created with `scripts/agent_task.py`, bugfix/standard/full active, review, or done tasks have a complete refined goal contract, and tiny no-task-board work has session/runlog/intake review evidence.
 - `docs/DOMAIN_GLOSSARY.md` exists; non-tiny work has requirements interview evidence before implementation or done state.
 - `.agent/risk-zones.json` records low, medium, high, and critical autonomy rules; high and critical risk require human review, and critical work is not autonomous modification work.
@@ -56,6 +59,8 @@ Review the initialized project before handoff. At minimum, check:
 - Skill or governance optimization claims have isolated baseline/current evidence and check for global hook, plugin, cache, or session contamination.
 - Skill-impact claims do not count line, cost, speed, or token reductions as improvements when requirements, correctness, safety, privacy, data-loss handling, accessibility, or required validation were dropped.
 - Failed profile, benchmark, optimization, migration, or pipeline runs are marked failed with evidence paths where available and do not exit zero.
+- Repeated loop attempts record stable failure signatures and strategy-change evidence before retry; budget exhaustion stops into replan, blocked, human gate, failed, or accepted exception rather than silent continuation.
+- Safe fallback work preserves unresolved human gates and stays within read-only analysis, test preparation, docs review, planning, or artifact inventory.
 - High-risk and critical changes have reviewer, diff range, reviewed files, high-risk paths checked, and conclusion recorded.
 - Incidental diff lines are removed or recorded as accepted exceptions.
 - No secrets or private host credentials are written.

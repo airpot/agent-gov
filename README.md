@@ -125,6 +125,13 @@
     - `agent_score.py` 会把关键治理 JSON / JSONL 的解析、schema 有效性、`agent_verify.py` 机械快照和 `agent_gc.py` 漂移报告作为门禁，避免基础配置或治理漂移损坏时仍然给出 pass。
     - `agent_verify.py` 提供硬机械检查和 before/after baseline 对比，覆盖 JSON/JSONL、required paths、feature templates、task-board、role contracts、模板渲染、测试数量基线和本地 Markdown links。
 
+12. Agent runtime 框架采用门禁
+    - 对 `agent` 和 `hybrid` 目标，默认是 framework-first，而不是让开发者猜要不要用框架。
+    - `.agent/agent-runtime.json` 会生成 `runtime_adoption`：primary adapter、recommended adapters、package plan、pre-implementation gate 和 manual LLM exception 契约。
+    - 默认 Skill-first agent 会给出 Strands 安装计划；需要结构化输出时会给出 Pydantic AI 计划；需要长流程/状态图时会给出 LangGraph 计划。
+    - 初始化不会静默执行 `pip`、`uv`、`npm` 等安装命令；依赖变更仍归应用层，通过 spec/task/review-fix/validation 落地。
+    - 直接手写 LLM 调用、绕过成熟 runtime adapter，只能作为例外：必须记录 rationale、owner、review evidence 和 validation evidence。
+
 ## 不做什么
 
 - 不替代真实测试、构建、人工审查或安全审计。
@@ -220,6 +227,8 @@ npx @airpot/agent-gov@latest install-skill . --force-skill
 python3 scripts/agent_check.py
 python3 scripts/agent_score.py doctor
 python3 scripts/agent_validate.py --list
+python3 scripts/agent_runtime.py doctor
+python3 scripts/agent_runtime.py report --json
 python3 scripts/agent_gc.py doctor
 python3 scripts/agent_score.py score --write
 ```

@@ -13,9 +13,12 @@ Borrow these practices from mature agent workflow projects:
 - Convert approved specs into executable plans with exact files, commands, expected results, and no placeholders.
 - Convert accepted goals into task decomposition before implementation: tiny checklist, bugfix fix chain, or standard/full task graph.
 - Convert iterative work into explicit loop contracts with goals, observation signals, budgets, stop conditions, evidence paths, and escalation rules.
+- Classify non-tiny iterative loops by readiness level before continuation: `manual`, `report_only`, `assisted`, or `unattended`.
+- Require unattended loops to have attempt ledger evidence, stable failure signatures, quota/circuit-breaker controls, explicit interrupt points, state persistence, and safe stop behavior before automatic continuation.
 - Record a compact goal contract for standard/full or otherwise long-running work: objective, user-approved outcome, non-goals, constraints, success evidence, stop conditions, current decision summary, open decisions, task id, and spec id.
 - Surface assumptions, ambiguity, and tradeoffs before implementation when a request has multiple plausible meanings.
 - Run a requirements interview for non-tiny work: one unresolved question at a time, recommended answer plus rationale, shared-understanding confirmation, domain glossary updates, and code/docs cross-checks before design or implementation.
+- Convert requirements interview output into a global project blueprint before non-trivial architecture or implementation work. Use `.agent/blueprint.json` and `docs/PROJECT_BLUEPRINT.md` for product purpose, system boundary, runtime/framework choice, layout, data/state ownership, resource/MCP/security boundaries, validation strategy, milestones, open decisions, and linked specs/ADRs.
 - Prefer simple direct code, and justify new abstractions or speculative flexibility before adding them.
 - For research-driven updates, record each external source as verified, partial, or blocked before using it as governance evidence.
 - Use a minimal-sufficient ladder before adding implementation or process: skip unneeded work, reuse local patterns, prefer standard library/native platform features, use existing dependencies before new ones, and only then add the smallest new code.
@@ -34,6 +37,7 @@ Borrow these practices from mature agent workflow projects:
 - For skill-impact claims, require benchmark evidence with baseline and skill-enabled arms, isolated workspaces or plugin dirs, contamination self-test, correctness/safety gates, preserved artifacts, and limitation notes.
 - For every task profile, run review-fix-review before completion. Tiny tasks use lightweight evidence in the active session, runlog, or `.agent/intake/` when no task-board record exists; bugfix tasks review reproduction/root-cause/regression; standard/full tasks use protected stage exits.
 - For non-tiny work loops, use `.agent/loop-engineering.json` and `docs/LOOP_ENGINEERING.md` to bound plan-act-observe-adjust, review-fix-review, debugging, eval optimization, and session recovery loops.
+- Use safe fallback lanes only when they preserve the unresolved human gate and stay within read-only analysis, test preparation, docs review, planning, or artifact inventory.
 - Archive embedded spec changes as soon as they reach `all_done`; do not leave completed work in `openspec/changes/<name>/`.
 - Require fresh validation evidence before claiming completion, merge readiness, or PR readiness.
 - Treat knowledge promotion as a reviewed handoff: session observations, external research, or repeated workflow lessons should become durable only through an evidence-backed promotion bundle with source status, target surface, authority level, freshness, and review reference.
@@ -53,6 +57,7 @@ Do not adopt these as absolute project rules:
 
 ```text
 .agent/
+  blueprint.json
   workflow.json
   workflow-profiles.json
   loop-engineering.json
@@ -65,6 +70,7 @@ Do not adopt these as absolute project rules:
   baselines.json
   runlog.jsonl
   templates/
+    project-blueprint.md.tmpl
     implementation-plan.md.tmpl
     debugging-record.md.tmpl
     features/
@@ -83,12 +89,14 @@ Do not adopt these as absolute project rules:
       offload-index.md
       offload.jsonl
 docs/
+  PROJECT_BLUEPRINT.md
   DOMAIN_GLOSSARY.md
   features/
     INDEX.md
 ```
 
 `.agent/workflow.json` is the lifecycle policy. `.agent/workflow-profiles.json` maps task size and risk to process weight. `.agent/loop-engineering.json` defines bounded loop contracts, budgets, stop conditions, evidence, and escalation. `.agent/task-board.json` is the cross-session task index. `.agent/role-contracts.json` makes role inputs, outputs, forbidden actions, and finder-cannot-fix separation machine-checkable. `.agent/risk-zones.json` is the risk and autonomy policy. `.agent/review-policy.json` is the diff traceability and human review policy. `.agent/worktrees.json` is the isolation and finish policy. Session files and runlog entries store evidence.
+`.agent/blueprint.json` and `docs/PROJECT_BLUEPRINT.md` are the global product and architecture authority. OpenSpec changes are the change-level authority and declare `.agent-spec.json#/blueprint_impact`.
 `.agent/intake/` is the optional pre-task holding area for raw/refined goals, stack intake, tiny no-task-board review evidence, and next-gate decisions before a task id exists.
 
 ## Workflow Profiles
@@ -156,13 +164,16 @@ At minimum, standard/full work must pass review-fix-review before exiting `spec`
 Use `.agent/loop-engineering.json` for non-tiny work that can repeat. The loop contract should name:
 
 - loop type: `work_loop`, `review_fix_loop`, `debugging_loop`, `eval_optimization_loop`, or `session_recovery_loop`
+- readiness level: `manual`, `report_only`, `assisted`, or `unattended`
 - goal and owner role
 - observation signal that tells the agent whether the iteration improved, failed, or changed risk
 - iteration budget and stop conditions
 - evidence path for each iteration
 - escalation rule when the same failure repeats or the budget is exhausted
 
-Do not retry the same patch, prompt, test command, or review round after the same failure repeats without a new hypothesis or strategy change. When the failure reveals a missing rule, script, workflow gate, role boundary, knowledge source, or context budget, classify it in `.agent/harness-evolution.json`; use `loop_gap` when the missing control is the loop contract itself.
+Do not retry the same patch, prompt, test command, tool sequence, or review round after the same failure repeats without a new hypothesis or strategy change. Record attempts with loop id, iteration id, readiness level, owner role, action summary, evidence paths, result status, failure signature, strategy-change flag, budget usage, and next transition. When the failure reveals a missing rule, script, workflow gate, role boundary, knowledge source, or context budget, classify it in `.agent/harness-evolution.json`; use `loop_gap` when the missing control is the loop contract itself.
+
+Loop state transitions should be explicit enough to resume safely: pending, running, waiting_human, waiting_tool, paused, retrying, replan, blocked, completed, failed, and cancelled. Budget exhaustion may only lead to replan, blocked, a human gate, failed, or an accepted exception. Before replaying external mutation after resume, require the last committed step, side-effect boundary, and idempotency or approval evidence.
 
 ## Plan Quality
 

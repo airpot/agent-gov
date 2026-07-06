@@ -16,7 +16,7 @@ agent-gov = governance control plane
 
 - `.agent/runtime-policy.json`: architecture contract, project-target interview questions, decision rules, and adapter policy.
 - `.agent/model-profiles.json`: Qwen, DeepSeek, OpenAI-compatible, optional LiteLLM, and local model profiles with explicit capability flags.
-- `.agent/agent-runtime.json`: selected project target, architecture, default runtime adapter, model strategy, MCP server boundary, skill registry, and application-state boundary.
+- `.agent/agent-runtime.json`: selected project target, architecture, default runtime adapter, runtime adoption plan, model strategy, MCP server boundary, skill registry, and application-state boundary.
 - `scripts/agent_runtime.py`: dependency-free doctor/report/interview CLI.
 
 Run:
@@ -82,6 +82,24 @@ The standard is the Skill-first contract plus an explicit project target, not a 
 - Model access: OpenAI-compatible first, with optional LiteLLM gateway for routing Qwen, DeepSeek, OpenAI, local OpenAI-compatible servers, or project proxies.
 
 agent-gov must not import or install runtime frameworks. Runtime dependencies belong to the application.
+
+## Framework Adoption Gate
+
+For `agent` and `hybrid` targets, the default posture is framework-first:
+
+- use the primary runtime adapter in `.agent/agent-runtime.json` unless an exception is accepted
+- add dependencies from `runtime_adoption.package_plan` through the application package manager before writing runtime orchestration
+- run `python3 scripts/agent_runtime.py doctor` and `python3 scripts/agent_runtime.py report --json` before implementing agent runtime code
+- do not hand-write direct LLM orchestration as the default path
+
+Direct model API orchestration without Strands, Pydantic AI, LangGraph, MCP SDKs, or another mature adapter is allowed only with a recorded `manual_llm_exception` containing:
+
+- rationale
+- owner
+- review evidence
+- validation evidence
+
+Initialization never executes dependency installation commands. It generates the plan so implementation work can make an explicit application-owned dependency change.
 
 ## MCP Server Target
 

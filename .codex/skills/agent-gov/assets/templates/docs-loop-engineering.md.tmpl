@@ -7,15 +7,27 @@ The machine-readable policy lives in `.agent/loop-engineering.json`.
 ## Rules
 
 - Start each non-tiny loop with a loop contract: loop type, goal, observation signal, iteration budget, stop conditions, owner role, and evidence path.
+- Classify each non-tiny loop before it runs: `manual`, `report_only`, `assisted`, or `unattended`.
+- Use `unattended` only when attempt ledger evidence, failure signatures, quotas, circuit breakers, explicit human interrupt points, state persistence, and non-empty stop conditions are present.
 - Treat the configured loop budget as a guardrail. Budget exhaustion means stop, summarize evidence, and re-plan instead of trying the same action again.
 - Record evidence for each iteration in feature docs, validation notes, runlog entries, review artifacts, or session files.
+- Treat attempt ledger fields as mandatory evidence for repeated work: loop id, iteration id, readiness level, owner role, action summary, evidence paths, result status, failure signature, strategy-change flag, budget usage summary, and next transition.
 - Change strategy after the same failure repeats. Do not retry the same prompt, patch, or command sequence without a new hypothesis.
 - Escalate repeated failures into `.agent/harness-evolution.json` with `python3 scripts/agent_gc.py classify --category <category> --summary <summary>`.
 - Keep independent review independent: reviewer and verifier roles report findings; fixes go back to the coordinator or worker.
-- Use human interrupt points before high-risk, destructive, production, release, billing, or privileged actions.
+- Use human interrupt points before high-risk, destructive, production, release, billing, credential, privileged, or external mutation actions.
+- Fail closed when approval evidence is missing for protected actions.
+- If a primary lane is blocked by a human decision, fallback work is limited to read-only analysis, test preparation, docs review, planning, or artifact inventory. It must explicitly state that it does not bypass the unresolved gate.
 - Do not use self-approval, reassuring language, or subjective confidence as release evidence.
 - Prevalidate inputs before expensive profile, benchmark, optimization, migration, or pipeline work.
 - Failed profile, benchmark, optimization, migration, or pipeline runs must exit non-zero, record evidence paths where available, and cannot be counted as improvements.
+
+## Readiness Levels
+
+- `manual`: human-directed; the agent records evidence and waits before each material action.
+- `report_only`: read-only inspection and reporting; mutation requires follow-up approval.
+- `assisted`: bounded low/medium-risk iteration after a plan; repeated failures, risk escalation, or budget exhaustion stop the loop.
+- `unattended`: continuation without immediate human input; allowed only with deterministic observation signals, attempt ledger evidence, quotas, circuit breakers, interrupt points, state transitions, and resume safety.
 
 ## Loop Types
 
@@ -34,6 +46,18 @@ Use the smallest durable artifact that proves the iteration happened:
 - `docs/features/<task-id>/06_TEST_REPORT.md` and `.agent/runlog.jsonl` for validation results.
 - `.agent/sessions/<session-id>/grounding.md` and `validation.md` for recovery and handoff evidence.
 - `.agent/evals/latest.md` and `.agent/baselines/*.json` for score or regression loops.
+
+Prefer existing runlog, session, and feature artifacts for attempt ledgers. Add `.agent/loop-runs.jsonl` only when review shows those stores cannot represent iterations unambiguously.
+
+## State Transitions
+
+Loops move through explicit states: `pending`, `running`, `waiting_human`, `waiting_tool`, `paused`, `retrying`, `replan`, `blocked`, `completed`, `failed`, and `cancelled`.
+
+Budget exhaustion may only transition to `replan`, `blocked`, `waiting_human`, `failed`, or an accepted exception. Resume after interruption requires the last committed step, an evidence path, and the external side-effect boundary; external mutation requires idempotency or approval evidence before replay.
+
+## Dependency Boundary
+
+External loop projects and articles are source evidence only. Local doctors, scores, and validation must not import, install, shell out to, or require a scheduler, daemon, dashboard, hosted control plane, or external loop runtime.
 
 ## Failure Escalation
 

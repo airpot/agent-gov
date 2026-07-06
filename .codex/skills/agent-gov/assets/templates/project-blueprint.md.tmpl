@@ -1,0 +1,84 @@
+# Project Blueprint: {{project_name}}
+
+Use this template when creating or refreshing `docs/PROJECT_BLUEPRINT.md`. Keep `.agent/blueprint.json` as the structured authority and this Markdown document as the reviewed human-readable blueprint.
+
+## Product Purpose
+
+- Current status:
+
+## Target Users / Operators
+
+- Users:
+- Operators:
+
+## Non-Goals
+
+-
+
+## Core Workflows
+
+-
+
+## Domain Model
+
+-
+
+## System Boundary
+
+-
+
+## Quality Attributes
+
+-
+
+## Runtime And Framework Choices
+
+- Runtime governance authority: `.agent/agent-runtime.json`
+- Runtime doctor: `python3 scripts/agent_runtime.py doctor`
+
+## Agent Runtime And Framework Decision
+
+- Blueprint authority: `.agent/blueprint.json#/runtime_framework_decision`
+- Project target:
+- Runtime adoption:
+- Primary adapter:
+- Recommended adapters:
+- Package plan:
+- Direct LLM call policy:
+- Manual LLM exception:
+- Linked ADR:
+
+## Module / Directory Blueprint
+
+- Layout authority: `.agent/project-layout.json`
+
+## Data And State Ownership
+
+-
+
+## External Resources And MCP Boundary
+
+- Resource authority: `.agent/resources.json`
+- MCP trust boundary authority: `.agent/mcp-policy.json`
+
+## Security And Risk Boundaries
+
+- Security governance: `.agent/security.json`
+- Risk governance: `.agent/risk-zones.json`
+
+## Validation And Harness Strategy
+
+- Harness registry: `.agent/harness.json`
+- Blueprint doctor: `python3 scripts/agent_blueprint.py doctor`
+
+## Milestones / Build Order
+
+-
+
+## Open Decisions
+
+-
+
+## Linked Specs / ADRs
+
+- OpenSpec changes declare impact at `.agent-spec.json#/blueprint_impact`.

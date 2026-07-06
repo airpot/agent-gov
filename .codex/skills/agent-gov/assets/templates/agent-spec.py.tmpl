@@ -16,8 +16,15 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 CHANGES_ROOT = ROOT / "openspec" / "changes"
 ARCHIVE_ROOT = CHANGES_ROOT / "archive"
+BLUEPRINT_PATH = ROOT / ".agent" / "blueprint.json"
 ARTIFACTS = ("proposal", "design", "tasks")
 PROFILE_VALUES = {"tiny", "bugfix", "standard", "full"}
+IMPACT_TYPES = {"none", "add", "modify", "deprecate"}
+RUNTIME_IMPACT_TYPES = {"none", "add", "change", "exception"}
+ARCHITECTURE_SURFACE_RE = re.compile(
+    r"(architecture|runtime|framework|layout|data|state|resource|security|mcp|validation|harness)",
+    re.IGNORECASE,
+)
 PLACEHOLDER_PATTERNS = (
     "TBD",
     "TODO",
@@ -65,6 +72,32 @@ def task_board_ids() -> set[str] | None:
     board = read_json(board_path)
     items = board.get("items", []) if isinstance(board, dict) else []
     return {str(item.get("id")) for item in items if isinstance(item, dict) and item.get("id")}
+
+
+def blueprint_enabled() -> bool:
+    return BLUEPRINT_PATH.exists()
+
+
+def blueprint_ids() -> set[str]:
+    blueprint = read_json(BLUEPRINT_PATH)
+    records = blueprint.get("records", []) if isinstance(blueprint, dict) else []
+    ids: set[str] = set()
+    if isinstance(records, list):
+        for record in records:
+            if isinstance(record, dict) and record.get("id"):
+                ids.add(str(record["id"]))
+    return ids
+
+
+def default_blueprint_impact() -> dict[str, Any]:
+    return {
+        "affected_blueprint_ids": [],
+        "impact_type": "none",
+        "runtime_framework_impact": "none",
+        "blueprint_update_required": False,
+        "adr_required": False,
+        "no_impact_reason": "",
+    }
 
 
 def artifact_path(base: Path, artifact: str) -> Path:
@@ -192,6 +225,65 @@ def resolve_change(raw: str, *, include_archived: bool = False, require_active: 
     return matches[0]
 
 
+def blueprint_impact_errors(metadata_path: Path, metadata: dict[str, Any], known_ids: set[str]) -> list[str]:
+    errors: list[str] = []
+    name = str(metadata.get("name") or metadata_path.parent.name)
+    if not blueprint_enabled() and "blueprint_impact" not in metadata:
+        return errors
+    impact = metadata.get("blueprint_impact")
+    if not isinstance(impact, dict):
+        return [f"change {name} metadata missing blueprint_impact object"]
+    impact_type = str(impact.get("impact_type", "")).strip()
+    runtime_impact = str(impact.get("runtime_framework_impact", "")).strip()
+    affected = impact.get("affected_blueprint_ids", [])
+    if impact_type not in IMPACT_TYPES:
+        errors.append(f"change {name} blueprint_impact impact_type must be one of {', '.join(sorted(IMPACT_TYPES))}")
+    if runtime_impact not in RUNTIME_IMPACT_TYPES:
+        errors.append(f"change {name} blueprint_impact runtime_framework_impact must be one of {', '.join(sorted(RUNTIME_IMPACT_TYPES))}")
+    if not isinstance(affected, list):
+        errors.append(f"change {name} blueprint_impact affected_blueprint_ids must be a list")
+        affected = []
+    unknown = [str(item) for item in affected if known_ids and str(item) not in known_ids]
+    if unknown:
+        errors.append(f"change {name} blueprint_impact unknown affected_blueprint_ids: {', '.join(unknown)}")
+    bootstrap_note = str(impact.get("bootstrap_note", "")).strip()
+    bootstrap_allowed = bool(bootstrap_note and not blueprint_enabled() and impact_type == "add")
+    if impact_type != "none" and not affected and not bootstrap_allowed:
+        errors.append(f"change {name} blueprint_impact non-none impact requires affected_blueprint_ids")
+    no_impact_reason = str(impact.get("no_impact_reason", "")).strip()
+    if impact_type == "none" and ARCHITECTURE_SURFACE_RE.search(str(metadata.get("summary", "")) + " " + name):
+        if len(no_impact_reason) < 12:
+            errors.append(f"change {name} blueprint_impact no_impact_reason is required for architecture/runtime/harness-looking changes")
+    if runtime_impact in {"change", "exception"}:
+        has_decision = bool(str(impact.get("linked_adr", "")).strip() or str(impact.get("accepted_exception", "")).strip())
+        if impact.get("adr_required") is not True and not has_decision:
+            errors.append(f"change {name} runtime framework change or exception requires adr_required true, linked_adr, or accepted_exception")
+    return errors
+
+
+def archive_blueprint_errors(metadata: dict[str, Any]) -> list[str]:
+    name = str(metadata.get("name", "<unknown>"))
+    impact = metadata.get("blueprint_impact", {})
+    if not isinstance(impact, dict):
+        return []
+    errors: list[str] = []
+    if impact.get("blueprint_update_required") is True:
+        evidence = [
+            str(impact.get("blueprint_update_evidence", "")).strip(),
+            str(impact.get("blueprint_already_current_reason", "")).strip(),
+        ]
+        if not any(evidence):
+            errors.append(f"change {name} requires blueprint update evidence before archive")
+    if str(impact.get("runtime_framework_impact", "")).strip() in {"change", "exception"}:
+        if not (
+            str(impact.get("linked_adr", "")).strip()
+            or str(impact.get("accepted_exception", "")).strip()
+            or str(impact.get("blueprint_update_evidence", "")).strip()
+        ):
+            errors.append(f"change {name} requires runtime framework ADR or exception evidence before archive")
+    return errors
+
+
 def metadata_errors(metadata_path: Path, metadata: dict[str, Any], task_ids: set[str] | None) -> list[str]:
     errors: list[str] = []
     name = str(metadata.get("name") or metadata_path.parent.name)
@@ -208,6 +300,7 @@ def metadata_errors(metadata_path: Path, metadata: dict[str, Any], task_ids: set
         errors.append(f"change {name} metadata missing task_id for non-tiny profile")
     if task_ids is not None and task_id and task_id not in task_ids:
         errors.append(f"change {name} task_id not found in .agent/task-board.json: {task_id}")
+    errors.extend(blueprint_impact_errors(metadata_path, metadata, blueprint_ids()))
     return errors
 
 
@@ -299,11 +392,19 @@ def command_new_change(args: argparse.Namespace) -> int:
         "task_id": args.task_id,
         "requires_spec_delta": bool(args.requires_spec_delta),
     }
+    if blueprint_enabled():
+        metadata["blueprint_impact"] = default_blueprint_impact()
     if args.task_link_exception:
         metadata["task_link_exception"] = args.task_link_exception
     (base / ".agent-spec.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     templates = {
-        "proposal.md": f"# Proposal: {name}\n\n## Summary\n\n{args.summary}\n\n## Goals\n\n- TBD\n\n## Non-Goals\n\n- TBD\n\n## User Workflows\n\n- TBD\n\n## User Impact\n\n- TBD\n",
+        "proposal.md": f"# Proposal: {name}\n\n## Summary\n\n{args.summary}\n\n"
+        + (
+            "## Blueprint Impact\n\n```yaml\naffected_blueprint_ids: []\nimpact_type: none\nruntime_framework_impact: none\nblueprint_update_required: false\nadr_required: false\nno_impact_reason: \"\"\n```\n\nThe structured authority is `.agent-spec.json#/blueprint_impact`. This section mirrors that metadata for human review.\n\n"
+            if blueprint_enabled()
+            else ""
+        )
+        + "## Goals\n\n- TBD\n\n## Non-Goals\n\n- TBD\n\n## User Workflows\n\n- TBD\n\n## User Impact\n\n- TBD\n",
         "design.md": f"# Design: {name}\n\n## Architecture\n\nTBD\n\n## Validation Strategy\n\nTBD\n\n## Risks\n\nTBD\n",
         "tasks.md": f"# Tasks: {name}\n\n## Specification\n\n- [ ] Complete proposal, design, and capability specs.\n\n## Implementation\n\n- [ ] Implement the approved change.\n\n## Validation\n\n- [ ] Run relevant validation commands.\n\n## Review\n\n- [ ] Review implementation and update this checklist.\n",
     }
@@ -402,6 +503,12 @@ def command_archive(args: argparse.Namespace) -> int:
     if tasks["incomplete"] and not args.force:
         print(f"error: change has {tasks['incomplete']} incomplete task(s); use --force to archive anyway", file=sys.stderr)
         return 1
+    if not args.force:
+        blueprint_errors = archive_blueprint_errors(metadata)
+        if blueprint_errors:
+            for error in blueprint_errors:
+                print(f"error: {error}", file=sys.stderr)
+            return 1
 
     archive_date = args.date or datetime.now(timezone.utc).date().isoformat()
     target = ARCHIVE_ROOT / f"{archive_date}-{normalize_name(name)}"

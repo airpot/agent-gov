@@ -37,6 +37,7 @@ openspec/config.yaml
   dev-map.json
   skill-hygiene.json
   project-skills.json
+  blueprint.json
   skill-runtime.json
   runtime-policy.json
   model-profiles.json
@@ -95,6 +96,7 @@ openspec/config.yaml
       .gitkeep
     project-review.md.tmpl
     project-fix-log.md.tmpl
+    project-blueprint.md.tmpl
     resource-secrets.local.env.tmpl
     implementation-plan.md.tmpl
     debugging-record.md.tmpl
@@ -129,6 +131,7 @@ scripts/
   agent_resources.py
   agent_skill_hygiene.py
   agent_project_skills.py
+  agent_blueprint.py
   agent_runtime.py
   agent_runlog.py
   agent_tooling.py
@@ -146,6 +149,7 @@ docs/
   SECURITY.md
   TOOLING.md
   QUALITY_SCORE.md
+  PROJECT_BLUEPRINT.md
   LOOP_ENGINEERING.md
   RESOURCES.md
   AGENT_RUNTIME_ARCHITECTURE.md
@@ -174,7 +178,7 @@ Makefile                   # optional if missing
 - Use `.agent/project-layout.json` as the fixed directory contract for top-level project structure.
 - Use `.agent/spec.json` and `scripts/agent_spec.py` as the embedded specification policy and command surface.
 - Use `.agent/workflow.json` as the lifecycle gate policy for risk classification, design/spec approval, plan quality, implementation discipline, diff traceability, isolated work, TDD, debugging, review order, human review evidence, completion proof, and finish choices.
-- Use `.agent/loop-engineering.json` as the bounded-loop policy for work loops, review-fix loops, debugging loops, eval optimization loops, and session recovery loops.
+- Use `.agent/loop-engineering.json` as the bounded-loop policy for work loops, review-fix loops, debugging loops, eval optimization loops, session recovery loops, readiness levels, attempt ledgers, quota/circuit-breaker controls, safe fallback lanes, and explicit loop state transitions.
 - Use `.agent/risk-zones.json` as the task risk and autonomy policy.
 - Use `.agent/review-policy.json` as the diff traceability, automated review boundary, and human review evidence policy.
 - Use `.agent/worktrees.json` as the git worktree isolation and guarded cleanup policy.
@@ -189,6 +193,7 @@ Makefile                   # optional if missing
 - Use `.agent/dev-map.json` and `docs/DEV_MAP.md` as a concise repository navigation map for entry points, ownership, read-before-edit docs, and common patterns.
 - Use `.agent/skill-hygiene.json` and `scripts/agent_skill_hygiene.py` for read-only skill topology, source/hash, symlink, frontmatter, stale, and risk-signal scans.
 - Use `.agent/project-skills.json` and `scripts/agent_project_skills.py` as the repo-local project skill registry and lifecycle fact surface for managed, unmanaged, orphaned, missing, drifted, pinned, unpinned, unknown-source, unsafe-path, manifest-mismatch, capability-mismatch, and review-pending states.
+- Use `.agent/blueprint.json`, `docs/PROJECT_BLUEPRINT.md`, `.agent/templates/project-blueprint.md.tmpl`, and `scripts/agent_blueprint.py` as the global project blueprint surface for product purpose, architecture, runtime/framework decision, layout, data/state ownership, resources, MCP, security, validation, milestones, and OpenSpec impact sync.
 - Use `.agent/skill-runtime.json` and `docs/SKILL_RUNTIME.md` as the portable Skill/plugin runtime governance surface for canonical Skill cores, thin host adapters, runtime modes, command lanes, review lanes, benchmark evidence, and deliberate shortcut/debt ledgers.
 - Default skill installation inside a project to project-local `.codex/skills/<skill>`. A global/user-level install requires explicit user intent such as `--global`.
 - Include both project-local and global installed skills in governance reports. Global discoveries are external facts, not repo-editable source paths; unmanaged global installs require registry coverage or an explicit policy exception.
@@ -246,6 +251,7 @@ python3 scripts/agent_capabilities.py doctor
 python3 scripts/agent_resources.py doctor
 python3 scripts/agent_skill_hygiene.py doctor
 python3 scripts/agent_project_skills.py doctor
+python3 scripts/agent_blueprint.py doctor
 python3 scripts/agent_project_skills.py report
 python3 scripts/agent_runtime.py doctor
 python3 scripts/agent_runlog.py doctor

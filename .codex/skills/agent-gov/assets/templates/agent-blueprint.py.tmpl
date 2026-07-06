@@ -1,0 +1,337 @@
+#!/usr/bin/env python3
+"""Validate and report project blueprint governance."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+
+BLUEPRINT_PATH = Path(".agent/blueprint.json")
+BLUEPRINT_DOC = Path("docs/PROJECT_BLUEPRINT.md")
+AGENT_RUNTIME_PATH = Path(".agent/agent-runtime.json")
+CHANGES_ROOT = Path("openspec/changes")
+REQUIRED_SECTIONS = (
+    "Product Purpose",
+    "Target Users / Operators",
+    "Non-Goals",
+    "Core Workflows",
+    "Domain Model",
+    "System Boundary",
+    "Quality Attributes",
+    "Runtime And Framework Choices",
+    "Agent Runtime And Framework Decision",
+    "Module / Directory Blueprint",
+    "Data And State Ownership",
+    "External Resources And MCP Boundary",
+    "Security And Risk Boundaries",
+    "Validation And Harness Strategy",
+    "Milestones / Build Order",
+    "Open Decisions",
+    "Linked Specs / ADRs",
+)
+PROJECT_TARGETS = {"agent", "mcp-server", "hybrid", "library"}
+BLUEPRINT_STATUSES = {"draft", "reviewed", "needs-update"}
+IMPACT_TYPES = {"none", "add", "modify", "deprecate"}
+RUNTIME_IMPACT_TYPES = {"none", "add", "change", "exception"}
+ARCHITECTURE_SURFACE_RE = re.compile(
+    r"(architecture|runtime|framework|layout|data|state|resource|security|mcp|validation|harness)",
+    re.IGNORECASE,
+)
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"error: invalid JSON in {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise SystemExit(f"error: {path} must contain a JSON object")
+    return data
+
+
+def markdown_sections(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    sections: set[str] = set()
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        if line.startswith("## "):
+            sections.add(line[3:].strip())
+    return sections
+
+
+def blueprint_ids(blueprint: dict[str, Any]) -> tuple[set[str], list[str]]:
+    ids: set[str] = set()
+    errors: list[str] = []
+    records = blueprint.get("records", [])
+    if not isinstance(records, list) or not records:
+        return ids, [".agent/blueprint.json records must be a non-empty list"]
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            errors.append(f"records[{index}] must be an object")
+            continue
+        record_id = str(record.get("id", "")).strip()
+        if not record_id:
+            errors.append(f"records[{index}] missing id")
+        elif record_id in ids:
+            errors.append(f"duplicate blueprint id: {record_id}")
+        else:
+            ids.add(record_id)
+        if str(record.get("status", "")).strip() not in BLUEPRINT_STATUSES:
+            errors.append(f"record {record_id or index} status must be draft, reviewed, or needs-update")
+    return ids, errors
+
+
+def complete_manual_exception(exception: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    if not isinstance(exception, dict):
+        return ["manual_llm_exception must be an object"]
+    for field in ("rationale", "owner", "review_evidence", "validation_evidence"):
+        if not str(exception.get(field, "")).strip():
+            errors.append(f"manual_llm_exception missing {field}")
+    if not str(exception.get("residual_risk", exception.get("risk", ""))).strip():
+        errors.append("manual_llm_exception missing residual_risk")
+    return errors
+
+
+def validate_runtime_decision(blueprint: dict[str, Any], runtime: dict[str, Any]) -> tuple[list[str], list[str], dict[str, Any]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    decision = blueprint.get("runtime_framework_decision", {})
+    if not isinstance(decision, dict) or not decision:
+        return ["runtime_framework_decision is required"], warnings, {}
+    target = str(decision.get("project_target", "")).strip()
+    adoption = str(decision.get("runtime_adoption", "")).strip()
+    primary = str(decision.get("primary_adapter", "")).strip()
+    recommended = decision.get("recommended_adapters", [])
+    package_plan = decision.get("package_plan", [])
+    direct_policy = str(decision.get("direct_llm_call_policy", "")).strip()
+    if target not in PROJECT_TARGETS:
+        errors.append("runtime_framework_decision.project_target is invalid")
+    if not isinstance(recommended, list):
+        errors.append("runtime_framework_decision.recommended_adapters must be a list")
+        recommended = []
+    if not isinstance(package_plan, list):
+        errors.append("runtime_framework_decision.package_plan must be a list")
+        package_plan = []
+    if target in {"agent", "hybrid"}:
+        if adoption not in {"framework-first", "manual-llm-exception"}:
+            errors.append("agent/hybrid blueprint runtime_adoption must be framework-first or manual-llm-exception")
+        if adoption == "framework-first" and not primary:
+            errors.append("agent/hybrid blueprint must record primary_adapter")
+        if adoption == "framework-first" and primary not in {"custom", "none"} and not package_plan:
+            errors.append("framework-first blueprint must record an application-owned package_plan")
+        if direct_policy != "exception-only":
+            errors.append("agent/hybrid blueprint direct_llm_call_policy must be exception-only")
+        if adoption == "manual-llm-exception":
+            errors.extend(complete_manual_exception(decision.get("manual_llm_exception", {})))
+    elif target == "mcp-server":
+        if adoption != "mcp-first":
+            errors.append("mcp-server blueprint runtime_adoption must be mcp-first")
+        boundary = decision.get("mcp_boundary", {})
+        if not isinstance(boundary, dict) or not boundary:
+            errors.append("mcp-server blueprint must record mcp_boundary")
+        else:
+            for field in ("capability_types", "transports", "host_client_boundary", "contract_manifest", "policy"):
+                if field not in boundary:
+                    errors.append(f"mcp_boundary missing {field}")
+    elif target == "library":
+        if adoption != "library-only":
+            errors.append("library blueprint runtime_adoption must be library-only")
+        if not str(decision.get("library_rationale", "")).strip():
+            errors.append("library blueprint must record library_rationale")
+    if runtime:
+        runtime_target = str(runtime.get("project_target", "")).strip()
+        if runtime_target and target and runtime_target != target:
+            errors.append(f"blueprint project_target {target} conflicts with .agent/agent-runtime.json {runtime_target}")
+        runtime_default = str(runtime.get("runtime", {}).get("default_adapter", "")).strip()
+        if target in {"agent", "hybrid"} and primary and runtime_default and primary != runtime_default:
+            errors.append(f"blueprint primary_adapter {primary} conflicts with runtime default_adapter {runtime_default}")
+        runtime_exception = runtime.get("runtime_adoption", {}).get("manual_llm_exception", {})
+        blueprint_exception = decision.get("manual_llm_exception", {})
+        if isinstance(runtime_exception, dict) and isinstance(blueprint_exception, dict):
+            runtime_status = str(runtime_exception.get("status", "")).strip()
+            blueprint_status = str(blueprint_exception.get("status", "")).strip()
+            if runtime_status == "accepted" and blueprint_status not in {"accepted", "approved"}:
+                errors.append("runtime manual_llm_exception is accepted but blueprint exception status is not accepted")
+    elif target in {"agent", "hybrid", "mcp-server"}:
+        warnings.append(".agent/agent-runtime.json missing; runtime consistency could not be checked")
+    report = {
+        "project_target": target,
+        "runtime_adoption": adoption,
+        "primary_adapter": primary,
+        "recommended_adapters": recommended,
+        "package_plan_count": len(package_plan),
+    }
+    return errors, warnings, report
+
+
+def iter_active_changes() -> list[tuple[Path, dict[str, Any]]]:
+    if not CHANGES_ROOT.exists():
+        return []
+    rows: list[tuple[Path, dict[str, Any]]] = []
+    for metadata_path in sorted(CHANGES_ROOT.glob("*/.agent-spec.json")):
+        rows.append((metadata_path.parent, read_json(metadata_path)))
+    return rows
+
+
+def validate_blueprint_impact(metadata: dict[str, Any], known_ids: set[str], blueprint_exists: bool) -> tuple[list[str], list[str], list[str]]:
+    name = str(metadata.get("name", "<unknown>"))
+    errors: list[str] = []
+    warnings: list[str] = []
+    archive_blocks: list[str] = []
+    impact = metadata.get("blueprint_impact")
+    if impact is None:
+        errors.append(f"{name}: missing blueprint_impact")
+        return errors, warnings, archive_blocks
+    if not isinstance(impact, dict):
+        errors.append(f"{name}: blueprint_impact must be an object")
+        return errors, warnings, archive_blocks
+    impact_type = str(impact.get("impact_type", "")).strip()
+    runtime_impact = str(impact.get("runtime_framework_impact", "")).strip()
+    affected = impact.get("affected_blueprint_ids", [])
+    if impact_type not in IMPACT_TYPES:
+        errors.append(f"{name}: impact_type must be one of {sorted(IMPACT_TYPES)}")
+    if runtime_impact not in RUNTIME_IMPACT_TYPES:
+        errors.append(f"{name}: runtime_framework_impact must be one of {sorted(RUNTIME_IMPACT_TYPES)}")
+    if not isinstance(affected, list):
+        errors.append(f"{name}: affected_blueprint_ids must be a list")
+        affected = []
+    unknown = [str(item) for item in affected if str(item) not in known_ids]
+    if unknown:
+        errors.append(f"{name}: unknown affected_blueprint_ids: {', '.join(unknown)}")
+    bootstrap_note = str(impact.get("bootstrap_note", "")).strip()
+    bootstrap_allowed = bool(bootstrap_note and not blueprint_exists and impact_type == "add")
+    if impact_type != "none" and not affected and not bootstrap_allowed:
+        errors.append(f"{name}: non-none blueprint impact requires affected_blueprint_ids")
+    no_impact_reason = str(impact.get("no_impact_reason", "")).strip()
+    if impact_type == "none" and len(no_impact_reason) < 12:
+        warnings.append(f"{name}: no-impact reason is empty or too short")
+    if impact.get("blueprint_update_required") is True:
+        archive_blocks.append(f"{name}: blueprint_update_required is true; archive requires blueprint sync evidence")
+    if runtime_impact in {"change", "exception"} and not (impact.get("adr_required") is True or str(impact.get("linked_adr", "")).strip() or str(impact.get("accepted_exception", "")).strip()):
+        archive_blocks.append(f"{name}: runtime framework impact requires linked ADR or accepted exception")
+    touched = " ".join(str(value) for value in (metadata.get("summary", ""), name))
+    if impact_type == "none" and ARCHITECTURE_SURFACE_RE.search(touched) and len(no_impact_reason) < 12:
+        errors.append(f"{name}: architecture-looking no-impact change requires meaningful no_impact_reason")
+    return errors, warnings, archive_blocks
+
+
+def validate_all() -> tuple[list[str], list[str], dict[str, Any]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    blueprint = read_json(BLUEPRINT_PATH)
+    if not blueprint:
+        errors.append(f"missing {BLUEPRINT_PATH}")
+        return errors, warnings, {
+            "schema": "agent-blueprint-report-v1",
+            "status": "fail",
+            "errors": errors,
+            "warnings": warnings,
+        }
+    if blueprint.get("schema") != "agent-blueprint-v1":
+        errors.append(".agent/blueprint.json schema must be agent-blueprint-v1")
+    status = str(blueprint.get("status", "")).strip()
+    if status not in BLUEPRINT_STATUSES:
+        errors.append("blueprint status must be draft, reviewed, or needs-update")
+    elif status != "reviewed":
+        warnings.append(f"blueprint status is {status}; review before non-trivial implementation")
+    sections = markdown_sections(BLUEPRINT_DOC)
+    if not BLUEPRINT_DOC.exists():
+        errors.append(f"missing {BLUEPRINT_DOC}")
+    else:
+        missing_sections = [section for section in REQUIRED_SECTIONS if section not in sections]
+        for section in missing_sections:
+            errors.append(f"{BLUEPRINT_DOC} missing section: {section}")
+    known_ids, id_errors = blueprint_ids(blueprint)
+    errors.extend(id_errors)
+    runtime = read_json(AGENT_RUNTIME_PATH)
+    runtime_errors, runtime_warnings, runtime_report = validate_runtime_decision(blueprint, runtime)
+    errors.extend(runtime_errors)
+    warnings.extend(runtime_warnings)
+    active_changes: list[dict[str, Any]] = []
+    archive_blocks: list[str] = []
+    for base, metadata in iter_active_changes():
+        impact_errors, impact_warnings, impact_blocks = validate_blueprint_impact(metadata, known_ids, BLUEPRINT_PATH.exists())
+        errors.extend(impact_errors)
+        warnings.extend(impact_warnings)
+        archive_blocks.extend(impact_blocks)
+        if metadata.get("blueprint_impact"):
+            active_changes.append(
+                {
+                    "name": metadata.get("name", base.name),
+                    "path": base.as_posix(),
+                    "blueprint_impact": metadata.get("blueprint_impact"),
+                    "archive_blocking_reasons": impact_blocks,
+                }
+            )
+    report = {
+        "schema": "agent-blueprint-report-v1",
+        "status": "fail" if errors else "warn" if warnings or archive_blocks else "pass",
+        "blueprint_path": BLUEPRINT_PATH.as_posix(),
+        "doc_path": BLUEPRINT_DOC.as_posix(),
+        "blueprint_status": status,
+        "known_blueprint_ids": sorted(known_ids),
+        "runtime_framework_decision": runtime_report,
+        "active_changes": active_changes,
+        "archive_blocking_reasons": archive_blocks,
+        "errors": errors,
+        "warnings": warnings,
+    }
+    return errors, warnings, report
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    errors, warnings, report = validate_all()
+    for warning in warnings:
+        print(f"warning: {warning}")
+    if errors:
+        print("agent blueprint doctor failed")
+        for error in errors:
+            print(f"error: {error}")
+        return 1
+    if report.get("archive_blocking_reasons"):
+        for reason in report["archive_blocking_reasons"]:
+            print(f"warning: {reason}")
+    print("agent blueprint doctor passed")
+    return 0
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    _errors, _warnings, report = validate_all()
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(f"status: {report.get('status')}")
+        print(f"blueprint_status: {report.get('blueprint_status')}")
+        print(f"ids: {', '.join(report.get('known_blueprint_ids', []))}")
+        for reason in report.get("archive_blocking_reasons", []):
+            print(f"archive_block: {reason}")
+    return 0 if report.get("status") != "fail" else 1
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    doctor = subparsers.add_parser("doctor", help="Validate project blueprint governance")
+    doctor.set_defaults(func=cmd_doctor)
+    report = subparsers.add_parser("report", help="Print project blueprint report")
+    report.add_argument("--json", action="store_true")
+    report.set_defaults(func=cmd_report)
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

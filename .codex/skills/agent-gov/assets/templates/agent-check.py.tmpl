@@ -36,6 +36,7 @@ BASE_REQUIRED = [
     ".agent/dev-map.json",
     ".agent/skill-hygiene.json",
     ".agent/project-skills.json",
+    ".agent/blueprint.json",
     ".agent/skill-runtime.json",
     ".agent/runtime-policy.json",
     ".agent/model-profiles.json",
@@ -68,6 +69,7 @@ BASE_REQUIRED = [
     ".agent/templates/grounding.md.tmpl",
     ".agent/templates/offload.jsonl.tmpl",
     ".agent/templates/offload-index.md.tmpl",
+    ".agent/templates/project-blueprint.md.tmpl",
     ".agent/templates/task-map.mmd.tmpl",
     ".agent/templates/refs/.gitkeep",
     ".agent/templates/project-review.md.tmpl",
@@ -105,6 +107,7 @@ BASE_REQUIRED = [
     ".codex/agents/governance-reviewer.toml",
     ".codex/agents/governance-coordinator.toml",
     "scripts/agent_check.py",
+    "scripts/agent_blueprint.py",
     "scripts/agent_spec.py",
     "scripts/agent_validate.py",
     "scripts/agent_knowledge.py",
@@ -124,6 +127,7 @@ BASE_REQUIRED = [
     "scripts/agent_gc.py",
     "docs/index.md",
     "docs/ARCHITECTURE.md",
+    "docs/PROJECT_BLUEPRINT.md",
     "docs/QUALITY.md",
     "docs/RELIABILITY.md",
     "docs/SECURITY.md",
@@ -800,25 +804,112 @@ def validate_loop_engineering(loop_config: dict, workflow: dict, harness_evoluti
     policy = loop_config.get("policy", {})
     for key in (
         "loop_contract_required_for_non_tiny_work",
+        "readiness_level_required_for_non_tiny_loops",
+        "unattended_requires_attempt_ledger",
         "bounded_iterations_required",
         "observation_signal_required",
         "stop_conditions_required",
         "evidence_per_iteration_required",
+        "attempt_ledger_required",
+        "failure_signature_required",
         "same_failure_requires_strategy_change",
+        "strategy_change_required_before_same_failure_retry",
+        "quota_policy_required",
+        "circuit_breaker_required",
         "budget_exhaustion_blocks_completion_claim",
         "human_interrupt_for_high_risk_or_destructive",
+        "safe_fallback_lane_required",
+        "loop_state_transitions_required",
+        "resume_requires_last_committed_step_and_side_effect_boundary",
+        "external_mutation_requires_idempotency_or_approval",
         "self_approval_is_not_release_evidence",
         "finder_cannot_fix_applies_to_review_loops",
         "prevalidate_inputs_before_expensive_work",
         "failed_runs_exit_nonzero",
         "failed_runs_record_evidence_paths",
         "failed_optimization_cannot_be_improvement",
+        "dependency_free_control_plane",
     ):
         if policy.get(key) is not True:
             errors.append(f"error: .agent/loop-engineering.json policy missing {key}")
     threshold = policy.get("repeat_failure_threshold")
     if not isinstance(threshold, int) or threshold < 2:
         errors.append("error: .agent/loop-engineering.json repeat_failure_threshold must be an integer >= 2")
+    for source in loop_config.get("sources", []):
+        if isinstance(source, dict):
+            if source.get("source_status") not in {"verified", "partial", "blocked"}:
+                errors.append("error: .agent/loop-engineering.json sources must record source_status")
+            if source.get("dependency_policy") != "source_only":
+                errors.append("error: .agent/loop-engineering.json sources must be source_only")
+    readiness = loop_config.get("readiness_levels", {})
+    for level in ("manual", "report_only", "assisted", "unattended"):
+        spec = readiness.get(level)
+        if not isinstance(spec, dict):
+            errors.append(f"error: .agent/loop-engineering.json missing readiness level: {level}")
+            continue
+        for key in ("required_controls", "human_gate", "state_persistence"):
+            if not spec.get(key):
+                errors.append(f"error: readiness level {level} missing {key}")
+    unattended_controls = set(readiness.get("unattended", {}).get("required_controls", []))
+    for control in ("attempt_ledger", "failure_signature", "quota_policy", "circuit_breaker", "human_interrupt_points", "non_empty_stop_conditions", "state_transition_contract", "safe_stop"):
+        if control not in unattended_controls:
+            errors.append(f"error: unattended readiness missing required control: {control}")
+    ledger = loop_config.get("attempt_ledger", {})
+    if not isinstance(ledger, dict):
+        errors.append("error: .agent/loop-engineering.json missing attempt_ledger")
+    else:
+        required_fields = set(ledger.get("required_fields", []))
+        for field in ("loop_id", "iteration_id", "readiness_level", "owner_role", "action_summary", "evidence_paths", "result_status", "failure_signature", "strategy_changed", "budget_usage_summary", "next_transition"):
+            if field not in required_fields:
+                errors.append(f"error: attempt_ledger missing required field: {field}")
+        signature = ledger.get("failure_signature_policy", {})
+        if signature.get("stable_signature_required") is not True:
+            errors.append("error: attempt_ledger must require stable failure signatures")
+        if signature.get("same_signature_retry_requires_strategy_changed") is not True:
+            errors.append("error: attempt_ledger must require strategy change before same-signature retry")
+    quota = loop_config.get("quota_policy", {})
+    for key in ("iteration_count_required", "elapsed_time_budget_required", "token_budget_required_when_available", "cost_budget_required_when_available"):
+        if quota.get(key) is not True:
+            errors.append(f"error: quota_policy missing {key}")
+    if quota.get("budget_exhaustion_transition") != "replan":
+        errors.append("error: quota_policy budget_exhaustion_transition must be replan")
+    breaker = loop_config.get("circuit_breakers", {})
+    protected = set(breaker.get("protected_actions", []))
+    for action in ("destructive", "production_write", "release", "billing", "credential", "privileged", "external_mutation"):
+        if action not in protected:
+            errors.append(f"error: circuit_breakers missing protected action: {action}")
+    if breaker.get("missing_approval_behavior") != "fail_closed":
+        errors.append("error: circuit_breakers missing_approval_behavior must be fail_closed")
+    fallback = loop_config.get("safe_fallback_lane", {})
+    if fallback.get("must_preserve_human_gate") is not True:
+        errors.append("error: safe_fallback_lane must preserve human gate")
+    if not fallback.get("allowed_work") or not fallback.get("forbidden_work"):
+        errors.append("error: safe_fallback_lane must list allowed_work and forbidden_work")
+    if fallback.get("requires_explicit_non_bypass_statement") is not True:
+        errors.append("error: safe_fallback_lane must require an explicit non-bypass statement")
+    transitions = loop_config.get("state_transitions", {})
+    states = set(transitions.get("states", []))
+    for state in ("pending", "running", "waiting_human", "waiting_tool", "paused", "retrying", "replan", "blocked", "completed", "failed", "cancelled"):
+        if state not in states:
+            errors.append(f"error: state_transitions missing state: {state}")
+    allowed = transitions.get("allowed", {})
+    for state in states:
+        if state not in allowed:
+            errors.append(f"error: state_transitions missing allowed transitions for {state}")
+    exhaustion = set(transitions.get("exhaustion_transitions", []))
+    if not exhaustion or not exhaustion.issubset({"replan", "blocked", "waiting_human", "failed", "accepted_exception"}):
+        errors.append("error: state_transitions exhaustion_transitions must stop into replan, blocked, waiting_human, failed, or accepted_exception")
+    resume_requirements = set(transitions.get("resume_requirements", []))
+    for requirement in ("last_committed_step", "external_side_effect_boundary", "idempotency_or_approval_for_external_mutation"):
+        if requirement not in resume_requirements:
+            errors.append(f"error: state_transitions resume_requirements missing {requirement}")
+    boundary = loop_config.get("dependency_boundary", {})
+    if boundary.get("external_projects_are_sources_only") is not True:
+        errors.append("error: dependency_boundary must keep external projects as sources only")
+    if boundary.get("runtime_dependencies_allowed") not in ([], None):
+        errors.append("error: dependency_boundary runtime_dependencies_allowed must be empty")
+    if boundary.get("local_validation_requires_network") is not False:
+        errors.append("error: dependency_boundary local validation must not require network")
     loop_types = loop_config.get("loop_types", {})
     required_types = {"work_loop", "review_fix_loop", "debugging_loop", "eval_optimization_loop", "session_recovery_loop"}
     for loop_type in required_types:
@@ -849,14 +940,22 @@ def validate_loop_engineering(loop_config: dict, workflow: dict, harness_evoluti
     loop_gate = gates.get("loop_engineering", {})
     for key in (
         "loop_contract_required",
+        "readiness_level_required",
+        "attempt_ledger_required",
+        "failure_signature_required",
         "iteration_budget_required",
+        "quota_policy_required",
+        "circuit_breaker_required",
         "observation_signal_required",
         "stop_conditions_required",
         "evidence_per_iteration_required",
+        "safe_fallback_lane_required",
+        "state_transition_contract_required",
         "same_failure_requires_strategy_change",
         "repeat_failures_promote_to_harness_evolution",
         "human_interrupt_for_high_risk_or_destructive",
         "self_approval_forbidden",
+        "dependency_free_control_plane",
     ):
         if loop_gate.get(key) is not True:
             errors.append(f"error: .agent/workflow.json loop_engineering gate missing {key}")
@@ -1651,6 +1750,27 @@ def main() -> int:
             print(f"error: resource catalog doctor failed: {output}")
             return 1
 
+    blueprint_path = root / ".agent/blueprint.json"
+    if blueprint_path.exists():
+        blueprint_config = load_json(blueprint_path, ".agent/blueprint.json")
+        if blueprint_config.get("schema") != "agent-blueprint-v1":
+            print("error: .agent/blueprint.json schema must be agent-blueprint-v1")
+            return 1
+        if not (root / "docs/PROJECT_BLUEPRINT.md").exists():
+            print("error: missing docs/PROJECT_BLUEPRINT.md")
+            return 1
+        if not (root / ".agent/templates/project-blueprint.md.tmpl").exists():
+            print("error: missing .agent/templates/project-blueprint.md.tmpl")
+            return 1
+        if not (root / "scripts/agent_blueprint.py").exists():
+            print("error: missing scripts/agent_blueprint.py")
+            return 1
+        result = subprocess.run([sys.executable, "scripts/agent_blueprint.py", "doctor"], text=True, capture_output=True, check=False)
+        if result.returncode != 0:
+            output = (result.stdout + result.stderr).strip()
+            print(f"error: project blueprint doctor failed: {output}")
+            return 1
+
     runtime_paths = [
         (".agent/runtime-policy.json", "agent-runtime-policy-v1"),
         (".agent/model-profiles.json", "agent-model-profiles-v1"),
@@ -1721,6 +1841,7 @@ def main() -> int:
             "dev_map",
             "skill_hygiene",
             "project_skills",
+            "project_blueprint",
             "skill_runtime",
             "harness_evolution",
             "governance_gc",

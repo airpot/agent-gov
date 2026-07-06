@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import traceback
 from pathlib import Path
 
 
@@ -21,11 +22,38 @@ def run(cmd: list[str], cwd: Path, expect_ok: bool = True, env: dict[str, str] |
     result = subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, check=False, env=env)
     if expect_ok and result.returncode != 0:
         print("command failed:", " ".join(cmd), file=sys.stderr)
+        print("cwd:", cwd, file=sys.stderr)
+        caller = traceback.extract_stack(limit=2)[0]
+        print(f"caller: {caller.filename}:{caller.lineno}", file=sys.stderr)
         print(result.stdout, file=sys.stderr)
         print(result.stderr, file=sys.stderr)
+        if len(cmd) >= 2 and cmd[1] == "scripts/agent_check.py":
+            scan = subprocess.run(
+                [cmd[0], ".agent/tools/agent_context.py", "scan", "--limit", "12"],
+                cwd=cwd,
+                text=True,
+                capture_output=True,
+                check=False,
+                env=env,
+            )
+            print(scan.stdout, file=sys.stderr)
+            print(scan.stderr, file=sys.stderr)
+            spec_list = subprocess.run(
+                [cmd[0], "scripts/agent_spec.py", "list", "--json"],
+                cwd=cwd,
+                text=True,
+                capture_output=True,
+                check=False,
+                env=env,
+            )
+            print(spec_list.stdout, file=sys.stderr)
+            print(spec_list.stderr, file=sys.stderr)
         raise SystemExit(result.returncode)
     if not expect_ok and result.returncode == 0:
         print("command unexpectedly passed:", " ".join(cmd), file=sys.stderr)
+        print("cwd:", cwd, file=sys.stderr)
+        caller = traceback.extract_stack(limit=2)[0]
+        print(f"caller: {caller.filename}:{caller.lineno}", file=sys.stderr)
         print(result.stdout, file=sys.stderr)
         print(result.stderr, file=sys.stderr)
         raise SystemExit(1)
@@ -182,6 +210,306 @@ def assert_blank_project_default_profile(temp_root: Path) -> None:
     if (explicit / ".agent" / "subagents.json").exists():
         print("explicit standard profile unexpectedly created full-profile subagent config", file=sys.stderr)
         raise SystemExit(1)
+
+
+def assert_runtime_adoption_defaults(temp_root: Path, python: str) -> None:
+    default_agent = temp_root / "runtime-adoption-default"
+    default_agent.mkdir(parents=True, exist_ok=True)
+    run(
+        [
+            python,
+            str(INIT_SCRIPT),
+            str(default_agent),
+            "--tech-stack",
+            "python",
+            "--layout",
+            "minimal",
+            "--remote-kind",
+            "local",
+            "--governance-profile",
+            "standard",
+        ],
+        cwd=PACKAGE_ROOT,
+    )
+    runtime = json.loads((default_agent / ".agent" / "agent-runtime.json").read_text(encoding="utf-8"))
+    adoption = runtime.get("runtime_adoption", {})
+    if adoption.get("status") != "planned":
+        print("default agent runtime adoption was not planned", file=sys.stderr)
+        print(json.dumps(adoption, indent=2), file=sys.stderr)
+        raise SystemExit(1)
+    if adoption.get("policy", {}).get("default_posture") != "framework-first":
+        print("default agent runtime adoption was not framework-first", file=sys.stderr)
+        raise SystemExit(1)
+    plan_adapters = {item.get("adapter") for item in adoption.get("package_plan", [])}
+    if "strands" not in plan_adapters or "pydantic-ai" not in plan_adapters:
+        print("default agent runtime adoption did not include Strands and Pydantic AI package plans", file=sys.stderr)
+        print(json.dumps(adoption.get("package_plan", []), indent=2), file=sys.stderr)
+        raise SystemExit(1)
+    commands = [
+        command.get("command", "")
+        for item in adoption.get("package_plan", [])
+        for command in item.get("commands", [])
+    ]
+    if not any("strands-agents" in command for command in commands):
+        print("default runtime adoption plan did not include strands-agents install command", file=sys.stderr)
+        raise SystemExit(1)
+    if not any("pydantic-ai" in command for command in commands):
+        print("default runtime adoption plan did not include pydantic-ai install command", file=sys.stderr)
+        raise SystemExit(1)
+    report = json.loads(run([python, "scripts/agent_runtime.py", "report", "--json"], cwd=default_agent).stdout)
+    if report.get("runtime_adoption", {}).get("primary_adapter") != "strands":
+        print("agent_runtime report did not expose Strands as primary adapter", file=sys.stderr)
+        print(json.dumps(report, indent=2), file=sys.stderr)
+        raise SystemExit(1)
+    run([python, "scripts/agent_runtime.py", "doctor"], cwd=default_agent)
+
+    custom_intake = temp_root / "custom-runtime-intake.json"
+    custom_intake.write_text(
+        json.dumps(
+            {
+                "schema": "agent-architecture-intake-v1",
+                "project_target": "agent",
+                "default_runtime_adapter": "custom",
+                "selection_status": "confirmed",
+                "language_preference": ["python"],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    custom_agent = temp_root / "runtime-adoption-custom-missing-exception"
+    custom_agent.mkdir(parents=True, exist_ok=True)
+    run(
+        [
+            python,
+            str(INIT_SCRIPT),
+            str(custom_agent),
+            "--tech-stack",
+            "python",
+            "--layout",
+            "minimal",
+            "--remote-kind",
+            "local",
+            "--governance-profile",
+            "standard",
+            "--architecture-intake",
+            str(custom_intake),
+        ],
+        cwd=PACKAGE_ROOT,
+    )
+    custom_doctor = run([python, "scripts/agent_runtime.py", "doctor"], cwd=custom_agent, expect_ok=False)
+    if "manual_llm_exception" not in (custom_doctor.stdout + custom_doctor.stderr):
+        print("custom runtime without exception did not fail on manual_llm_exception", file=sys.stderr)
+        print(custom_doctor.stdout + custom_doctor.stderr, file=sys.stderr)
+        raise SystemExit(1)
+
+    accepted_intake = temp_root / "custom-runtime-accepted-intake.json"
+    accepted_intake.write_text(
+        json.dumps(
+            {
+                "schema": "agent-architecture-intake-v1",
+                "project_target": "agent",
+                "default_runtime_adapter": "custom",
+                "selection_status": "confirmed",
+                "language_preference": ["python"],
+                "manual_llm_exception": {
+                    "status": "accepted",
+                    "rationale": "Project constraint requires a custom adapter boundary.",
+                    "owner": "architecture-review",
+                    "review_evidence": "docs/features/runtime/05_CODE_REVIEW.md",
+                    "validation_evidence": "python3 scripts/agent_runtime.py doctor",
+                },
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    accepted_agent = temp_root / "runtime-adoption-custom-accepted"
+    accepted_agent.mkdir(parents=True, exist_ok=True)
+    run(
+        [
+            python,
+            str(INIT_SCRIPT),
+            str(accepted_agent),
+            "--tech-stack",
+            "python",
+            "--layout",
+            "minimal",
+            "--remote-kind",
+            "local",
+            "--governance-profile",
+            "standard",
+            "--architecture-intake",
+            str(accepted_intake),
+        ],
+        cwd=PACKAGE_ROOT,
+    )
+    run([python, "scripts/agent_runtime.py", "doctor"], cwd=accepted_agent)
+
+
+def assert_project_blueprint_governance(temp_root: Path, python: str) -> None:
+    standard = temp_root / "project-blueprint-standard"
+    standard.mkdir(parents=True, exist_ok=True)
+    run(
+        [
+            python,
+            str(INIT_SCRIPT),
+            str(standard),
+            "--tech-stack",
+            "python",
+            "--layout",
+            "minimal",
+            "--remote-kind",
+            "local",
+            "--governance-profile",
+            "standard",
+        ],
+        cwd=PACKAGE_ROOT,
+    )
+    for relative in (
+        ".agent/blueprint.json",
+        "docs/PROJECT_BLUEPRINT.md",
+        ".agent/templates/project-blueprint.md.tmpl",
+        "scripts/agent_blueprint.py",
+    ):
+        if not (standard / relative).exists():
+            print(f"standard profile did not create blueprint artifact: {relative}", file=sys.stderr)
+            raise SystemExit(1)
+    run([python, "scripts/agent_blueprint.py", "doctor"], cwd=standard)
+    report = json.loads(run([python, "scripts/agent_blueprint.py", "report", "--json"], cwd=standard).stdout)
+    if report.get("runtime_framework_decision", {}).get("runtime_adoption") != "framework-first":
+        print("standard blueprint did not default agent target to framework-first", file=sys.stderr)
+        print(json.dumps(report, indent=2), file=sys.stderr)
+        raise SystemExit(1)
+    runtime_report = json.loads(run([python, "scripts/agent_runtime.py", "report", "--json"], cwd=standard).stdout)
+    if runtime_report.get("blueprint", {}).get("runtime_adoption") != "framework-first":
+        print("agent_runtime report did not include blueprint runtime decision", file=sys.stderr)
+        print(json.dumps(runtime_report, indent=2), file=sys.stderr)
+        raise SystemExit(1)
+
+    run(
+        [
+            python,
+            "scripts/agent_spec.py",
+            "new-change",
+            "blueprint-impact-smoke",
+            "--summary",
+            "Change runtime architecture smoke.",
+            "--profile",
+            "tiny",
+        ],
+        cwd=standard,
+    )
+    change = standard / "openspec" / "changes" / "blueprint-impact-smoke"
+    metadata_path = change / ".agent-spec.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if "blueprint_impact" not in metadata:
+        print("new-change did not scaffold blueprint_impact metadata", file=sys.stderr)
+        print(json.dumps(metadata, indent=2), file=sys.stderr)
+        raise SystemExit(1)
+    proposal_text = (change / "proposal.md").read_text(encoding="utf-8")
+    if "## Blueprint Impact" not in proposal_text:
+        print("new-change did not scaffold proposal Blueprint Impact section", file=sys.stderr)
+        raise SystemExit(1)
+    no_reason = run([python, "scripts/agent_spec.py", "doctor"], cwd=standard, expect_ok=False)
+    if "no_impact_reason" not in (no_reason.stdout + no_reason.stderr):
+        print("agent_spec doctor did not require no-impact reason for architecture-looking change", file=sys.stderr)
+        print(no_reason.stdout + no_reason.stderr, file=sys.stderr)
+        raise SystemExit(1)
+    metadata["blueprint_impact"]["impact_type"] = "modify"
+    metadata["blueprint_impact"]["affected_blueprint_ids"] = ["BP-UNKNOWN"]
+    metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+    unknown = run([python, "scripts/agent_spec.py", "doctor"], cwd=standard, expect_ok=False)
+    if "unknown affected_blueprint_ids" not in (unknown.stdout + unknown.stderr):
+        print("agent_spec doctor did not reject unknown blueprint ids", file=sys.stderr)
+        print(unknown.stdout + unknown.stderr, file=sys.stderr)
+        raise SystemExit(1)
+    metadata["blueprint_impact"]["affected_blueprint_ids"] = ["BP-RUNTIME-001"]
+    metadata["blueprint_impact"]["blueprint_update_required"] = True
+    metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+    (change / "proposal.md").write_text(
+        """# Proposal: blueprint-impact-smoke
+
+## Summary
+
+Change runtime architecture smoke.
+
+## Blueprint Impact
+
+```yaml
+affected_blueprint_ids:
+  - BP-RUNTIME-001
+impact_type: modify
+runtime_framework_impact: none
+blueprint_update_required: true
+adr_required: false
+no_impact_reason: ""
+```
+
+## Goals
+
+- Verify blueprint archive gate.
+""",
+        encoding="utf-8",
+    )
+    (change / "design.md").write_text("# Design: blueprint-impact-smoke\n\n## Architecture\n\nUse blueprint gate.\n", encoding="utf-8")
+    (change / "tasks.md").write_text("# Tasks: blueprint-impact-smoke\n\n## Validation\n\n- [x] Verify blueprint gate.\n", encoding="utf-8")
+    archive_block = run([python, "scripts/agent_spec.py", "archive", "blueprint-impact-smoke"], cwd=standard, expect_ok=False)
+    if "blueprint update evidence" not in (archive_block.stdout + archive_block.stderr):
+        print("archive did not block missing blueprint update evidence", file=sys.stderr)
+        print(archive_block.stdout + archive_block.stderr, file=sys.stderr)
+        raise SystemExit(1)
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["blueprint_impact"]["blueprint_update_evidence"] = "docs/PROJECT_BLUEPRINT.md reviewed for regression fixture"
+    metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+    run([python, "scripts/agent_spec.py", "archive", "blueprint-impact-smoke"], cwd=standard)
+
+    core = temp_root / "project-blueprint-core"
+    core.mkdir(parents=True, exist_ok=True)
+    run(
+        [
+            python,
+            str(INIT_SCRIPT),
+            str(core),
+            "--layout",
+            "minimal",
+            "--remote-kind",
+            "local",
+            "--governance-profile",
+            "core",
+        ],
+        cwd=PACKAGE_ROOT,
+    )
+    for relative in (".agent/blueprint.json", "docs/PROJECT_BLUEPRINT.md", "scripts/agent_blueprint.py"):
+        if (core / relative).exists():
+            print(f"core profile unexpectedly generated blueprint artifact: {relative}", file=sys.stderr)
+            raise SystemExit(1)
+
+    mcp_intake = temp_root / "project-blueprint-mcp-intake.json"
+    mcp_intake.write_text(json.dumps({"project_target": "mcp-server", "selection_status": "confirmed"}, indent=2) + "\n", encoding="utf-8")
+    mcp = temp_root / "project-blueprint-mcp"
+    mcp.mkdir(parents=True, exist_ok=True)
+    run([python, str(INIT_SCRIPT), str(mcp), "--layout", "minimal", "--governance-profile", "standard", "--architecture-intake", str(mcp_intake)], cwd=PACKAGE_ROOT)
+    mcp_blueprint = json.loads((mcp / ".agent" / "blueprint.json").read_text(encoding="utf-8"))
+    if mcp_blueprint.get("runtime_framework_decision", {}).get("runtime_adoption") != "mcp-first":
+        print("mcp-server blueprint did not use mcp-first runtime adoption", file=sys.stderr)
+        print(json.dumps(mcp_blueprint, indent=2), file=sys.stderr)
+        raise SystemExit(1)
+    run([python, "scripts/agent_blueprint.py", "doctor"], cwd=mcp)
+
+    library_intake = temp_root / "project-blueprint-library-intake.json"
+    library_intake.write_text(json.dumps({"project_target": "library", "selection_status": "confirmed"}, indent=2) + "\n", encoding="utf-8")
+    library = temp_root / "project-blueprint-library"
+    library.mkdir(parents=True, exist_ok=True)
+    run([python, str(INIT_SCRIPT), str(library), "--layout", "minimal", "--governance-profile", "standard", "--architecture-intake", str(library_intake)], cwd=PACKAGE_ROOT)
+    library_blueprint = json.loads((library / ".agent" / "blueprint.json").read_text(encoding="utf-8"))
+    if library_blueprint.get("runtime_framework_decision", {}).get("runtime_adoption") != "library-only":
+        print("library blueprint did not use library-only runtime adoption", file=sys.stderr)
+        print(json.dumps(library_blueprint, indent=2), file=sys.stderr)
+        raise SystemExit(1)
+    run([python, "scripts/agent_blueprint.py", "doctor"], cwd=library)
 
 
 def assert_workflow_stage_closure(target: Path) -> None:
@@ -1390,6 +1718,8 @@ def main() -> int:
         assert_install_skill_scope(temp_root)
         assert_doctor_requires_target_skill(temp_root)
         assert_blank_project_default_profile(temp_root)
+        assert_runtime_adoption_defaults(temp_root, python)
+        assert_project_blueprint_governance(temp_root, python)
         assert_session_doctor_handles_long_git_status(temp_root, python)
         if sys.platform.startswith("win"):
             target = temp_root / "agent-gov"

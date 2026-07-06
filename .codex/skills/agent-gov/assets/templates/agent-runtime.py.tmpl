@@ -14,6 +14,8 @@ from typing import Any
 POLICY_PATH = Path(".agent/runtime-policy.json")
 MODELS_PATH = Path(".agent/model-profiles.json")
 RUNTIME_PATH = Path(".agent/agent-runtime.json")
+BLUEPRINT_PATH = Path(".agent/blueprint.json")
+BLUEPRINT_SCRIPT = Path("scripts/agent_blueprint.py")
 SECRET_REF_PREFIXES = ("env:", "file-ref:", "vault:", "proxy:", "op:", "keychain:")
 SECRET_KEY_PATTERN = re.compile(r"(api[_-]?key|token|secret|password|credential|private[_-]?key)", re.IGNORECASE)
 RAW_SECRET_PATTERN = re.compile(r"(sk-[A-Za-z0-9_-]{12,}|[A-Za-z0-9_/-]{32,})")
@@ -23,6 +25,18 @@ PROJECT_TARGETS = {"agent", "mcp-server", "hybrid", "library"}
 MCP_CAPABILITY_TYPES = {"tools", "resources", "prompts"}
 MCP_TRANSPORTS = {"stdio", "http", "sse", "streamable-http", "websocket", "custom"}
 SAFE_SECRET_POLICY_VALUES = {"references-only", "outside-repo", "vault-or-proxy"}
+MANUAL_EXCEPTION_FIELDS = ("rationale", "owner", "review_evidence", "validation_evidence")
+SAFE_NON_SECRET_STRING_KEYS = {
+    "default_posture",
+    "dependency_execution",
+    "execution_policy",
+    "manual_llm_development",
+    "project_name",
+    "review_evidence",
+    "silent_dependency_install",
+    "status",
+    "validation_evidence",
+}
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -55,6 +69,8 @@ def scan_secret_values(value: Any, path: str = "") -> list[str]:
         for key, item in value.items():
             child_path = f"{path}.{key}" if path else str(key)
             if str(key) == "credential_material" and isinstance(item, str) and item in SAFE_SECRET_POLICY_VALUES:
+                continue
+            if str(key) in SAFE_NON_SECRET_STRING_KEYS and isinstance(item, str):
                 continue
             if isinstance(item, str) and SECRET_KEY_PATTERN.search(str(key)) and item and not is_ref(item):
                 findings.append(f"{child_path} must use a secret reference prefix")
@@ -94,6 +110,90 @@ def validate_capabilities(profile_id: str, profile: dict[str, Any]) -> list[str]
             continue
         errors.append(f"model profile {profile_id} capability {key} has invalid flag: {value!r}")
     return errors
+
+
+def validate_runtime_adoption(runtime: dict[str, Any], project_target: str, architecture_style: str) -> tuple[list[str], list[str], dict[str, Any]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    adoption = runtime.get("runtime_adoption", {})
+    if not isinstance(adoption, dict):
+        adoption = {}
+    framework_first = project_target in {"agent", "hybrid"} and architecture_style in {"skill-first", "skill-first-hybrid"}
+    selected_adapter = str(runtime.get("runtime", {}).get("default_adapter", "")).strip()
+    if framework_first and not adoption:
+        errors.append(".agent/agent-runtime.json runtime_adoption is required for agent/hybrid Skill-first targets")
+    status = str(adoption.get("status", "")).strip()
+    if framework_first and status not in {"planned", "exception-accepted"}:
+        errors.append("agent/hybrid Skill-first targets must have runtime_adoption.status planned or exception-accepted")
+    policy = adoption.get("policy", {}) if isinstance(adoption, dict) else {}
+    if framework_first:
+        if policy.get("default_posture") != "framework-first":
+            errors.append("runtime_adoption policy must default to framework-first for agent/hybrid Skill-first targets")
+        if policy.get("silent_dependency_install") != "forbidden":
+            errors.append("runtime_adoption must forbid silent dependency installation")
+        if policy.get("dependency_execution") != "application-owned":
+            errors.append("runtime_adoption dependency execution must be application-owned")
+    primary_adapter = str(adoption.get("primary_adapter", "")).strip()
+    if framework_first and primary_adapter != selected_adapter:
+        errors.append("runtime_adoption.primary_adapter must match runtime.default_adapter")
+    recommended = adoption.get("recommended_adapters", [])
+    if not isinstance(recommended, list):
+        errors.append("runtime_adoption.recommended_adapters must be a list")
+        recommended = []
+    if framework_first and selected_adapter not in {"custom", "none"} and selected_adapter not in recommended:
+        errors.append("runtime_adoption.recommended_adapters must include the selected adapter")
+    package_plan = adoption.get("package_plan", [])
+    if not isinstance(package_plan, list):
+        errors.append("runtime_adoption.package_plan must be a list")
+        package_plan = []
+    package_plan_adapters = set()
+    for index, plan in enumerate(package_plan):
+        if not isinstance(plan, dict):
+            errors.append(f"runtime_adoption.package_plan[{index}] must be an object")
+            continue
+        adapter = str(plan.get("adapter", "")).strip()
+        package_plan_adapters.add(adapter)
+        if not adapter:
+            errors.append(f"runtime_adoption.package_plan[{index}] missing adapter")
+        if plan.get("auto_install") is not False:
+            errors.append(f"runtime_adoption.package_plan[{index}] must set auto_install false")
+        if plan.get("execution_policy") != "application-owned-review-before-execution":
+            errors.append(f"runtime_adoption.package_plan[{index}] must be application-owned review-before-execution")
+        commands = plan.get("commands", [])
+        if not isinstance(commands, list) or not commands:
+            errors.append(f"runtime_adoption.package_plan[{index}] commands must not be empty")
+        for command_index, command in enumerate(commands):
+            if not isinstance(command, dict) or not str(command.get("command", "")).strip():
+                errors.append(f"runtime_adoption.package_plan[{index}].commands[{command_index}] must include a command")
+    if framework_first and selected_adapter not in {"custom", "none", "mcp-server"} and selected_adapter not in package_plan_adapters:
+        errors.append(f"runtime_adoption.package_plan must include selected adapter: {selected_adapter}")
+    gate = adoption.get("pre_implementation_gate", {})
+    if framework_first:
+        if not isinstance(gate, dict) or gate.get("required") is not True:
+            errors.append("runtime_adoption.pre_implementation_gate.required must be true for agent/hybrid Skill-first targets")
+        blocking = gate.get("blocking_reasons", []) if isinstance(gate, dict) else []
+        if runtime.get("selection_status") == "confirmed" and isinstance(blocking, list):
+            blocking = [item for item in blocking if "selection must be confirmed" not in str(item)]
+        if blocking:
+            warnings.append("runtime adoption has unresolved pre-implementation gate items")
+    manual_exception = adoption.get("manual_llm_exception", {})
+    if not isinstance(manual_exception, dict):
+        manual_exception = {}
+    exception_status = str(manual_exception.get("status", "")).strip()
+    if framework_first and selected_adapter in {"custom", "none"}:
+        if exception_status != "accepted":
+            errors.append("custom/none runtime adapter requires accepted manual_llm_exception for agent/hybrid targets")
+        for field in MANUAL_EXCEPTION_FIELDS:
+            if not str(manual_exception.get(field, "")).strip():
+                errors.append(f"manual_llm_exception missing required field: {field}")
+    return errors, warnings, {
+        "status": status,
+        "primary_adapter": primary_adapter,
+        "recommended_adapters": recommended,
+        "package_plan": package_plan,
+        "pre_implementation_blocking_reasons": gate.get("blocking_reasons", []) if isinstance(gate, dict) else [],
+        "manual_llm_exception_status": exception_status,
+    }
 
 
 def validate_all() -> tuple[list[str], list[str], dict[str, Any]]:
@@ -143,6 +243,10 @@ def validate_all() -> tuple[list[str], list[str], dict[str, Any]]:
         policy_boundary = runtime.get("runtime", {}).get("adapter_policy", {})
         if policy_boundary.get("runtime_dependencies_are_application_owned") is not True:
             errors.append("runtime dependencies must be application-owned")
+
+    adoption_errors, adoption_warnings, adoption_report = validate_runtime_adoption(runtime, project_target, architecture_style)
+    errors.extend(adoption_errors)
+    warnings.extend(adoption_warnings)
 
     profiles = profile_map(models)
     if not profiles:
@@ -224,6 +328,7 @@ def validate_all() -> tuple[list[str], list[str], dict[str, Any]]:
         "architecture_style": architecture_style,
         "default_adapter": runtime.get("runtime", {}).get("default_adapter", ""),
         "optional_adapters": runtime.get("runtime", {}).get("optional_adapters", []),
+        "runtime_adoption": adoption_report,
         "model_profiles_required": models_required,
         "model_access_strategy": model_config.get("access_strategy", ""),
         "selected_model_profiles": selected_profiles,
@@ -237,6 +342,17 @@ def validate_all() -> tuple[list[str], list[str], dict[str, Any]]:
         "warnings": warnings,
         "errors": errors,
     }
+    if BLUEPRINT_PATH.exists():
+        blueprint = load_json(BLUEPRINT_PATH)
+        decision = blueprint.get("runtime_framework_decision", {}) if isinstance(blueprint, dict) else {}
+        report["blueprint"] = {
+            "path": str(BLUEPRINT_PATH),
+            "status": blueprint.get("status", "") if isinstance(blueprint, dict) else "",
+            "project_target": decision.get("project_target", "") if isinstance(decision, dict) else "",
+            "runtime_adoption": decision.get("runtime_adoption", "") if isinstance(decision, dict) else "",
+            "primary_adapter": decision.get("primary_adapter", "") if isinstance(decision, dict) else "",
+            "doctor": "python3 scripts/agent_blueprint.py doctor" if BLUEPRINT_SCRIPT.exists() else "",
+        }
     return errors, warnings, report
 
 
@@ -262,9 +378,23 @@ def cmd_report(args: argparse.Namespace) -> int:
     print(f"project_target: {report.get('project_target')}")
     print(f"architecture_style: {report.get('architecture_style')}")
     print(f"default_adapter: {report.get('default_adapter')}")
+    adoption = report.get("runtime_adoption", {})
+    print(f"runtime_adoption_status: {adoption.get('status')}")
+    print(f"runtime_primary_adapter: {adoption.get('primary_adapter')}")
+    package_plan = adoption.get("package_plan", [])
+    if package_plan:
+        print("runtime_install_commands:")
+        for plan in package_plan:
+            for command in plan.get("commands", []):
+                print(f"  - {command.get('command')}")
     print(f"model_profiles_required: {report.get('model_profiles_required')}")
     print(f"model_access_strategy: {report.get('model_access_strategy')}")
     print(f"selected_model_profiles: {', '.join(report.get('selected_model_profiles', []))}")
+    blueprint = report.get("blueprint", {})
+    if blueprint:
+        print(f"blueprint_status: {blueprint.get('status')}")
+        print(f"blueprint_runtime_adoption: {blueprint.get('runtime_adoption')}")
+        print(f"blueprint_doctor: {blueprint.get('doctor')}")
     mcp_server = report.get("mcp_server", {})
     print(f"mcp_server_enabled: {mcp_server.get('enabled')}")
     return 0 if report.get("status") == "pass" else 1
@@ -301,6 +431,11 @@ def cmd_interview(args: argparse.Namespace) -> int:
             "id": "structured_output_required",
             "question": "Do tools require strict structured outputs?",
             "recommended": "Yes if APIs or databases consume model outputs directly.",
+        },
+        {
+            "id": "runtime_framework_adoption",
+            "question": "Should implementation use the recommended runtime adapter instead of hand-written LLM orchestration?",
+            "recommended": "Yes for agent/hybrid targets; record a manual_llm_exception only when project constraints require custom orchestration.",
         },
     ]
     print(json.dumps({"schema": "agent-architecture-interview-v1", "questions": questions}, indent=2))

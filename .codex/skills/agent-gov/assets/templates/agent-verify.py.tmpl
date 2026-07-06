@@ -723,6 +723,7 @@ def check_governance_configs(config: dict) -> list[str]:
             ".agent/mcp-policy.json",
             ".agent/governance-gc.json",
             ".agent/resources.json",
+            ".agent/blueprint.json",
         }
     }
     expected.setdefault(".agent/manifest.json", "agent-governance-manifest-v1")
@@ -897,6 +898,19 @@ def check_governance_configs(config: dict) -> list[str]:
             if result.returncode != 0:
                 output = (result.stdout + result.stderr).strip()
                 errors.append(f"resource catalog doctor failed: {output}")
+    if check_enabled(config, "project_blueprint"):
+        blueprint_path = Path(config.get("checks", {}).get("project_blueprint", {}).get("path", ".agent/blueprint.json"))
+        blueprint = load_json(blueprint_path, {})
+        if blueprint.get("schema") != "agent-blueprint-v1":
+            errors.append(f"{blueprint_path} schema must be agent-blueprint-v1")
+        for name in ("docs/PROJECT_BLUEPRINT.md", ".agent/templates/project-blueprint.md.tmpl", "scripts/agent_blueprint.py"):
+            if not Path(name).exists():
+                errors.append(f"missing {name}")
+        if Path("scripts/agent_blueprint.py").exists():
+            result = subprocess.run([sys.executable, "scripts/agent_blueprint.py", "doctor"], text=True, capture_output=True, check=False)
+            if result.returncode != 0:
+                output = (result.stdout + result.stderr).strip()
+                errors.append(f"project blueprint doctor failed: {output}")
     return errors
 
 

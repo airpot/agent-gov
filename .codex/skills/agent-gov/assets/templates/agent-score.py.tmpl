@@ -60,6 +60,7 @@ SCHEMA_JSON_FILES = {
     ".agent/dev-map.json": "agent-dev-map-v1",
     ".agent/skill-hygiene.json": "agent-skill-hygiene-v1",
     ".agent/project-skills.json": "agent-project-skills-v1",
+    ".agent/blueprint.json": "agent-blueprint-v1",
     ".agent/memory.json": "agent-memory-v1",
     ".agent/context.json": "agent-context-budget-v1",
     ".agent/capabilities.json": "agent-capabilities-v1",
@@ -101,6 +102,7 @@ CRITICAL_JSON_FILES = {
     ".agent/dev-map.json",
     ".agent/skill-hygiene.json",
     ".agent/project-skills.json",
+    ".agent/blueprint.json",
     ".agent/resources.json",
     ".agent/runtime-policy.json",
     ".agent/model-profiles.json",
@@ -126,6 +128,7 @@ DEFAULT_DIMENSION_WEIGHTS = {
     "dev_map": 6,
     "skill_hygiene": 6,
     "project_skills": 6,
+    "project_blueprint": 8,
     "resource_catalog": 8,
     "agent_runtime_architecture": 8,
     "skill_runtime": 8,
@@ -144,7 +147,7 @@ DEFAULT_DIMENSION_WEIGHTS = {
     "knowledge": 6,
     "runlog": 6,
 }
-HARD_FAIL_DIMENSIONS = {"project_integrity", "required_paths", "workflow_profiles", "task_board", "mechanical_verification", "session_offload", "governance_gc"}
+HARD_FAIL_DIMENSIONS = {"project_integrity", "required_paths", "workflow_profiles", "task_board", "mechanical_verification", "session_offload", "project_blueprint", "governance_gc"}
 REVIEW_STATUSES = {"pending", "needs-fix", "pass", "accepted-with-exceptions", "not-required"}
 REQUIREMENT_STATUSES = {"pending", "in-progress", "complete", "blocked", "not-required"}
 DECOMPOSITION_STATUSES = {"pending", "in-progress", "complete", "blocked", "not-required"}
@@ -593,23 +596,94 @@ def score_loop_engineering() -> dict:
     policy = config.get("policy", {})
     for key in (
         "loop_contract_required_for_non_tiny_work",
+        "readiness_level_required_for_non_tiny_loops",
+        "unattended_requires_attempt_ledger",
         "bounded_iterations_required",
         "observation_signal_required",
         "stop_conditions_required",
         "evidence_per_iteration_required",
+        "attempt_ledger_required",
+        "failure_signature_required",
         "same_failure_requires_strategy_change",
+        "strategy_change_required_before_same_failure_retry",
+        "quota_policy_required",
+        "circuit_breaker_required",
         "budget_exhaustion_blocks_completion_claim",
         "human_interrupt_for_high_risk_or_destructive",
+        "safe_fallback_lane_required",
+        "loop_state_transitions_required",
+        "resume_requires_last_committed_step_and_side_effect_boundary",
+        "external_mutation_requires_idempotency_or_approval",
         "self_approval_is_not_release_evidence",
         "prevalidate_inputs_before_expensive_work",
         "failed_runs_exit_nonzero",
         "failed_runs_record_evidence_paths",
         "failed_optimization_cannot_be_improvement",
+        "dependency_free_control_plane",
     ):
         if policy.get(key) is not True:
             findings.append(f"loop policy missing {key}")
     if not isinstance(policy.get("repeat_failure_threshold"), int) or policy.get("repeat_failure_threshold") < 2:
         findings.append("repeat_failure_threshold must be >= 2")
+    for source in config.get("sources", []):
+        if isinstance(source, dict):
+            if source.get("source_status") not in {"verified", "partial", "blocked"}:
+                findings.append("loop sources must record source_status")
+            if source.get("dependency_policy") != "source_only":
+                findings.append("loop sources must be source_only")
+    readiness = config.get("readiness_levels", {})
+    if set(readiness) != {"manual", "report_only", "assisted", "unattended"}:
+        findings.append("readiness levels must be manual/report_only/assisted/unattended")
+    unattended_controls = set(readiness.get("unattended", {}).get("required_controls", []))
+    for control in ("attempt_ledger", "failure_signature", "quota_policy", "circuit_breaker", "human_interrupt_points", "non_empty_stop_conditions", "state_transition_contract", "safe_stop"):
+        if control not in unattended_controls:
+            findings.append(f"unattended readiness missing {control}")
+    ledger = config.get("attempt_ledger", {})
+    required_fields = set(ledger.get("required_fields", [])) if isinstance(ledger, dict) else set()
+    for field in ("loop_id", "iteration_id", "readiness_level", "owner_role", "action_summary", "evidence_paths", "result_status", "failure_signature", "strategy_changed", "budget_usage_summary", "next_transition"):
+        if field not in required_fields:
+            findings.append(f"attempt ledger missing {field}")
+    signature = ledger.get("failure_signature_policy", {}) if isinstance(ledger, dict) else {}
+    if signature.get("stable_signature_required") is not True:
+        findings.append("attempt ledger must require stable signatures")
+    if signature.get("same_signature_retry_requires_strategy_changed") is not True:
+        findings.append("same-signature retry must require strategy change")
+    quota = config.get("quota_policy", {})
+    for key in ("iteration_count_required", "elapsed_time_budget_required", "token_budget_required_when_available", "cost_budget_required_when_available"):
+        if quota.get(key) is not True:
+            findings.append(f"quota policy missing {key}")
+    if quota.get("budget_exhaustion_transition") != "replan":
+        findings.append("budget exhaustion must transition to replan")
+    breaker = config.get("circuit_breakers", {})
+    protected = set(breaker.get("protected_actions", []))
+    for action in ("destructive", "production_write", "release", "billing", "credential", "privileged", "external_mutation"):
+        if action not in protected:
+            findings.append(f"circuit breaker missing {action}")
+    if breaker.get("missing_approval_behavior") != "fail_closed":
+        findings.append("missing approval must fail closed")
+    fallback = config.get("safe_fallback_lane", {})
+    if fallback.get("must_preserve_human_gate") is not True:
+        findings.append("safe fallback must preserve human gate")
+    if not fallback.get("allowed_work") or not fallback.get("forbidden_work"):
+        findings.append("safe fallback must list allowed and forbidden work")
+    transitions = config.get("state_transitions", {})
+    states = set(transitions.get("states", []))
+    required_states = {"pending", "running", "waiting_human", "waiting_tool", "paused", "retrying", "replan", "blocked", "completed", "failed", "cancelled"}
+    if not required_states.issubset(states):
+        findings.append("state transitions missing required loop states")
+    exhaustion = set(transitions.get("exhaustion_transitions", []))
+    if not exhaustion or not exhaustion.issubset({"replan", "blocked", "waiting_human", "failed", "accepted_exception"}):
+        findings.append("loop exhaustion transitions must stop into safe terminal/replan states")
+    resume_requirements = set(transitions.get("resume_requirements", []))
+    if not {"last_committed_step", "external_side_effect_boundary", "idempotency_or_approval_for_external_mutation"}.issubset(resume_requirements):
+        findings.append("resume requirements must protect committed steps and external side effects")
+    boundary = config.get("dependency_boundary", {})
+    if boundary.get("external_projects_are_sources_only") is not True:
+        findings.append("external loop projects must be source-only")
+    if boundary.get("runtime_dependencies_allowed") not in ([], None):
+        findings.append("loop control plane must not require runtime dependencies")
+    if boundary.get("local_validation_requires_network") is not False:
+        findings.append("loop control plane local validation must not require network")
     loop_types = config.get("loop_types", {})
     required_types = ("work_loop", "review_fix_loop", "debugging_loop", "eval_optimization_loop", "session_recovery_loop")
     for loop_type in required_types:
@@ -634,14 +708,22 @@ def score_loop_engineering() -> dict:
         findings.append("workflow loop_engineering gate must point to .agent/loop-engineering.json")
     for key in (
         "loop_contract_required",
+        "readiness_level_required",
+        "attempt_ledger_required",
+        "failure_signature_required",
         "iteration_budget_required",
+        "quota_policy_required",
+        "circuit_breaker_required",
         "observation_signal_required",
         "stop_conditions_required",
         "evidence_per_iteration_required",
+        "safe_fallback_lane_required",
+        "state_transition_contract_required",
         "same_failure_requires_strategy_change",
         "repeat_failures_promote_to_harness_evolution",
         "human_interrupt_for_high_risk_or_destructive",
         "self_approval_forbidden",
+        "dependency_free_control_plane",
     ):
         if gate.get(key) is not True:
             findings.append(f"workflow loop_engineering gate missing {key}")
@@ -650,7 +732,12 @@ def score_loop_engineering() -> dict:
     if ".agent/loop-engineering.json" not in evolution.get("promotion_targets", {}).get("loop_gap", []):
         findings.append("loop_gap promotion targets must include .agent/loop-engineering.json")
     score = 100 - min(90, len(findings) * 15)
-    return dimension("loop_engineering", score, findings, [f"{len(loop_types)} loop type(s)"])
+    evidence = [
+        f"{len(loop_types)} loop type(s)",
+        f"{len(readiness)} readiness level(s)",
+        f"{len(required_fields)} attempt ledger field(s)",
+    ]
+    return dimension("loop_engineering", score, findings, evidence)
 
 
 def profile_requires_review_gate(profile_name: str, profile: dict, policy: dict) -> bool:
@@ -1045,6 +1132,7 @@ def score_mechanical_verification() -> dict:
         "manifest",
         "skill_hygiene",
         "skill_runtime",
+        "project_blueprint",
         "mcp_policy",
         "template_rendering",
         "test_baseline",
@@ -1232,6 +1320,37 @@ def score_project_skills() -> dict:
             findings.append(f"{item.get('severity')}: {item.get('kind')}: {item.get('summary')}{path}")
     score = 100 - min(90, len(findings) * 8) - min(90, errors * 35) - min(50, warnings * 4)
     return dimension("project_skills", score, findings, [f"{skills} skill(s)", f"{registered} registered", f"{errors} error(s)", f"{warnings} warning(s)"])
+
+
+def score_project_blueprint() -> dict:
+    findings: list[str] = []
+    blueprint = load_json(Path(".agent/blueprint.json"))
+    if blueprint.get("schema") != "agent-blueprint-v1":
+        findings.append("invalid project blueprint schema")
+    if not Path("docs/PROJECT_BLUEPRINT.md").exists():
+        findings.append("missing docs/PROJECT_BLUEPRINT.md")
+    if not Path(".agent/templates/project-blueprint.md.tmpl").exists():
+        findings.append("missing .agent/templates/project-blueprint.md.tmpl")
+    if not Path("scripts/agent_blueprint.py").exists():
+        findings.append("missing scripts/agent_blueprint.py")
+        return dimension("project_blueprint", 0, findings, [])
+    report, error = run_json_command([sys.executable, "scripts/agent_blueprint.py", "report", "--json"])
+    if error:
+        findings.append(f"agent_blueprint report unavailable: {error}")
+        return dimension("project_blueprint", 30, findings, [])
+    for item in report.get("errors", [])[:10]:
+        findings.append(str(item))
+    blocking = report.get("archive_blocking_reasons", [])
+    if blocking:
+        findings.append(f"{len(blocking)} archive blocking blueprint reason(s)")
+    warnings = report.get("warnings", [])
+    score = 100 - min(90, len(report.get("errors", [])) * 25) - min(40, len(blocking) * 15) - min(20, len(warnings) * 3)
+    evidence = [
+        f"blueprint_status={report.get('blueprint_status', '')}",
+        f"{len(report.get('known_blueprint_ids', []))} blueprint id(s)",
+        f"{len(report.get('active_changes', []))} active change(s) with blueprint impact",
+    ]
+    return dimension("project_blueprint", score, findings, evidence)
 
 
 def score_resource_catalog() -> dict:
@@ -1913,6 +2032,7 @@ def collect_scores(extra_runlog_events: int = 0) -> dict:
         "dev_map": score_dev_map,
         "skill_hygiene": score_skill_hygiene,
         "project_skills": score_project_skills,
+        "project_blueprint": score_project_blueprint,
         "resource_catalog": score_resource_catalog,
         "agent_runtime_architecture": score_agent_runtime_architecture,
         "skill_runtime": score_skill_runtime,
