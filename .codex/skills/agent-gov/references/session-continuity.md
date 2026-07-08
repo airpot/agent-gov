@@ -82,6 +82,7 @@ docs/DEV_MAP.md
    - Ensure validation and session lifecycle evidence is present in `.agent/runlog.jsonl`.
    - Append a `checkpoint` event to `.agent/sessions/events.jsonl` with concise summary, changed files, validation, and next-step payload.
    - Keep long `git status --short` output in `refs/git-status-short.txt`; `changes.md` and `bootstrap.md` may show truncated human-readable snapshots that point to this full file. After commands that write session files, refresh the full snapshot last so it matches the current worktree state.
+   - Bootstrap and compact output must stay as compact recovery packets with evidence handles. Do not inline long historical `handoff.md`, `changes.md`, `validation.md`, `grounding.md`, memory digest, context digest, archived specs, or old dirty-tree bodies.
 
 3. **pre-compact**
    - Summarize task state into files before the session becomes too large.
@@ -157,7 +158,7 @@ python3 scripts/agent_runlog.py tail --limit 10
 python3 .agent/tools/governance_hook.py --event session-start
 ```
 
-- `bootstrap` prints and refreshes the active session startup packet.
+- `bootstrap` prints and refreshes the active session startup packet. It must stay compact and evidence-handle based; full details live behind `refs/git-status-short.txt`, `offload-index.md`, runlog ids, memory detail ids, and embedded spec paths.
 - `grounding` refreshes the truth-first repository snapshot; current files, configs, specs, task-board state, runlog evidence, and validation notes override memory and prior chat.
 - `offload-add` records compact session context with evidence handles. Entries are advisory and must not contain raw transcripts, terminal scrollback, secrets, or unsupported claims.
 - `offload-recall` searches advisory offload entries with bounded human-readable output; use it after `offload-index.md`, then verify selected facts from evidence handles.

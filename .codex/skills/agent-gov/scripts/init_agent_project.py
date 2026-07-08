@@ -241,6 +241,105 @@ def list_from_intake(intake: dict, key: str, default: list[str] | None = None) -
     return list(default or [])
 
 
+def object_list_from_intake(intake: dict, key: str) -> list[dict]:
+    value = intake.get(key, [])
+    if isinstance(value, dict):
+        return [value]
+    if not isinstance(value, list):
+        return []
+    result: list[dict] = []
+    for item in value:
+        if isinstance(item, dict):
+            result.append(dict(item))
+        elif isinstance(item, str) and item.strip():
+            result.append({"name": item.strip(), "version": "", "constraint": "", "source": "freeform-intake", "status": "unresolved"})
+    return result
+
+
+def nested_technology_versions(raw_intake: dict) -> dict:
+    value = raw_intake.get("technology_versions", {})
+    return value if isinstance(value, dict) else {}
+
+
+def version_value_from_intake(raw_intake: dict, key: str, default: object | None = None) -> object:
+    if key in raw_intake:
+        return raw_intake[key]
+    return nested_technology_versions(raw_intake).get(key, default)
+
+
+def version_object_list_from_intake(raw_intake: dict, key: str) -> list[dict]:
+    value = version_value_from_intake(raw_intake, key, [])
+    return object_list_from_intake({key: value}, key)
+
+
+def version_constraint_lookup(raw_intake: dict) -> dict[str, str]:
+    candidates = raw_intake.get("version_constraints")
+    if candidates is None:
+        candidates = nested_technology_versions(raw_intake).get("version_constraints", {})
+    lookup: dict[str, str] = {}
+    if isinstance(candidates, dict):
+        for key, value in candidates.items():
+            text = str(value).strip()
+            if key and text:
+                lookup[str(key).strip().lower()] = text
+    elif isinstance(candidates, list):
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", item.get("package", item.get("id", "")))).strip().lower()
+            version = str(item.get("version", item.get("constraint", item.get("range", "")))).strip()
+            if name and version:
+                lookup[name] = version
+    return lookup
+
+
+def version_decision_item(
+    name: str,
+    *,
+    version: str = "",
+    constraint: str = "",
+    source: str = "",
+    owner: str = "",
+    status: str = "",
+) -> dict:
+    name = str(name).strip()
+    version = str(version).strip()
+    constraint = str(constraint).strip()
+    status = str(status).strip() or ("decided" if version or constraint else "unresolved")
+    return {
+        "name": name,
+        "version": version,
+        "constraint": constraint,
+        "source": str(source).strip() or "architecture-intake",
+        "owner": str(owner).strip(),
+        "status": status,
+    }
+
+
+def normalize_version_decision_list(items: list[dict], *, default_source: str) -> list[dict]:
+    result: list[dict] = []
+    for item in items:
+        name = str(item.get("name", item.get("package", item.get("id", "")))).strip()
+        if not name:
+            continue
+        result.append(
+            version_decision_item(
+                name,
+                version=str(item.get("version", "")).strip(),
+                constraint=str(item.get("constraint", item.get("range", ""))).strip(),
+                source=str(item.get("source", default_source)).strip(),
+                owner=str(item.get("owner", "")).strip(),
+                status=str(item.get("status", "")).strip(),
+            )
+        )
+    return result
+
+
+def package_version_constraint(raw_intake: dict, package_name: str) -> str:
+    lookup = version_constraint_lookup(raw_intake)
+    return lookup.get(package_name.lower(), "")
+
+
 def normalize_provider_id(value: str) -> str:
     lowered = value.strip().lower().replace("_", "-")
     aliases = {
@@ -319,20 +418,38 @@ def normalized_languages(tech_stack: list[str], language_preference: list[str]) 
     return result
 
 
-def runtime_package_plan_for_adapter(adapter: str) -> dict | None:
+def runtime_package_plan_for_adapter(adapter: str, raw_intake: dict | None = None) -> dict | None:
     spec = RUNTIME_ADAPTER_PACKAGE_PLANS.get(adapter)
     if not spec:
         return None
-    return {
+    raw_intake = raw_intake or {}
+    package_versions = {
+        package: package_version_constraint(raw_intake, package)
+        for package in spec["packages"]
+    }
+    version_policy = "confirm-before-install"
+    if all(package_versions.values()):
+        version_status = "decided"
+    elif str(raw_intake.get("dependency_version_policy", "")).strip() in {"defer-to-lockfile", "application-lockfile", "managed-by-application"}:
+        version_status = "deferred-to-application-lockfile"
+        version_policy = str(raw_intake.get("dependency_version_policy", "")).strip()
+    else:
+        version_status = "unresolved"
+    plan = {
         "adapter": adapter,
         "language": spec["language"],
         "packages": spec["packages"],
+        "version_status": version_status,
+        "version_policy": version_policy,
         "commands": spec["commands"],
         "source_url": spec["source_url"],
         "execution_policy": "application-owned-review-before-execution",
         "auto_install": False,
         "notes": spec["notes"],
     }
+    if any(package_versions.values()):
+        plan["package_version_constraints"] = package_versions
+    return plan
 
 
 def runtime_adoption_config(intake: dict, raw_intake: dict, tech_stack: list[str]) -> dict:
@@ -347,7 +464,7 @@ def runtime_adoption_config(intake: dict, raw_intake: dict, tech_stack: list[str
             adapters.append(adapter)
     package_plan = []
     for adapter in adapters:
-        plan = runtime_package_plan_for_adapter(adapter)
+        plan = runtime_package_plan_for_adapter(adapter, raw_intake)
         if plan:
             package_plan.append(plan)
     manual_exception = raw_intake.get("manual_llm_exception", {})
@@ -421,6 +538,116 @@ def runtime_adoption_config(intake: dict, raw_intake: dict, tech_stack: list[str
             "validation_evidence": str(manual_exception.get("validation_evidence", "")).strip(),
             "residual_risk": str(manual_exception.get("residual_risk", manual_exception.get("risk", ""))).strip(),
         },
+    }
+
+
+def technology_version_decisions_config(intake: dict, raw_intake: dict, tech_stack: list[str]) -> dict:
+    languages = normalized_languages(tech_stack, intake.get("language_preference", []))
+    version_lookup = version_constraint_lookup(raw_intake)
+    version_policy = str(
+        version_value_from_intake(
+            raw_intake,
+            "version_policy",
+            "Record versions, ranges, LTS lines, managed-service versions, or defer-to-lockfile policies before implementation.",
+        )
+    ).strip()
+    dependency_policy = str(version_value_from_intake(raw_intake, "dependency_version_policy", "")).strip()
+
+    language_items = normalize_version_decision_list(
+        version_object_list_from_intake(raw_intake, "languages_and_runtimes"),
+        default_source="architecture-intake",
+    )
+    seen_language_names = {item["name"].lower() for item in language_items}
+    for language in languages:
+        if language.lower() in seen_language_names:
+            continue
+        constraint = version_lookup.get(language.lower(), "")
+        language_items.append(
+            version_decision_item(
+                language,
+                version=constraint,
+                constraint=constraint,
+                source="--tech-stack" if not constraint else "architecture-intake",
+                status="decided" if constraint else "unresolved",
+            )
+        )
+
+    package_managers = normalize_version_decision_list(
+        version_object_list_from_intake(raw_intake, "package_managers"),
+        default_source="architecture-intake",
+    )
+    if dependency_policy and not package_managers:
+        package_managers.append(
+            version_decision_item(
+                "application package manager",
+                constraint=dependency_policy,
+                source="architecture-intake",
+                status="decided",
+            )
+        )
+
+    frameworks = normalize_version_decision_list(version_object_list_from_intake(raw_intake, "frameworks_and_libraries"), default_source="architecture-intake")
+
+    datastores = normalize_version_decision_list(
+        version_object_list_from_intake(raw_intake, "datastores_and_services"),
+        default_source="architecture-intake",
+    )
+    deployments = normalize_version_decision_list(
+        version_object_list_from_intake(raw_intake, "deployment_targets"),
+        default_source="architecture-intake",
+    )
+    agent_runtime = normalize_version_decision_list(
+        version_object_list_from_intake(raw_intake, "agent_runtime_and_mcp"),
+        default_source="architecture-intake",
+    )
+    agent_runtime_names = {item["name"].lower() for item in agent_runtime}
+    for adapter in [intake.get("default_runtime_adapter", "")] + intake.get("optional_runtime_adapters", []):
+        adapter = str(adapter).strip()
+        if not adapter or adapter in {"custom", "none"} or adapter.lower() in agent_runtime_names:
+            continue
+        constraint = version_lookup.get(adapter.lower(), dependency_policy)
+        agent_runtime.append(
+            version_decision_item(
+                adapter,
+                constraint=constraint,
+                source="runtime adapter selection",
+                status="decided" if constraint else "unresolved",
+            )
+        )
+
+    evidence = normalize_version_decision_list(
+        version_object_list_from_intake(raw_intake, "lockfile_or_environment_evidence"),
+        default_source="repository evidence",
+    )
+    open_decisions = version_object_list_from_intake(raw_intake, "open_version_decisions")
+    if not open_decisions:
+        unresolved = [
+            item["name"]
+            for group in (language_items, package_managers, frameworks, datastores, deployments, agent_runtime)
+            for item in group
+            if item.get("status") == "unresolved"
+        ]
+        open_decisions = [{"id": "versions-unresolved", "question": "Confirm technology versions before implementation.", "owner": "", "items": unresolved, "implementation_impact": "readiness blocked"}] if unresolved else []
+
+    if any(item.get("status") == "decided" for group in (language_items, package_managers, frameworks, datastores, deployments, agent_runtime) for item in group):
+        status = "partially-decided" if open_decisions else "review-ready"
+    elif open_decisions:
+        status = "needs-decision"
+    else:
+        status = "missing"
+
+    return {
+        "status": status,
+        "source": "structured-intake" if raw_intake else "default-conservative",
+        "version_policy": version_policy,
+        "languages_and_runtimes": language_items,
+        "package_managers": package_managers,
+        "frameworks_and_libraries": frameworks,
+        "datastores_and_services": datastores,
+        "deployment_targets": deployments,
+        "agent_runtime_and_mcp": agent_runtime,
+        "lockfile_or_environment_evidence": evidence,
+        "open_version_decisions": open_decisions,
     }
 
 
@@ -593,6 +820,7 @@ def config_path_pointers(governance_profile: str, openspec_enabled: bool, claude
                 "skill_hygiene": ".agent/skill-hygiene.json",
                 "project_skills": ".agent/project-skills.json",
                 "skill_runtime": ".agent/skill-runtime.json",
+                "skill_optimization": ".agent/skill-optimization.json",
                 "runtime_policy": ".agent/runtime-policy.json",
                 "model_profiles": ".agent/model-profiles.json",
                 "agent_runtime": ".agent/agent-runtime.json",
@@ -698,6 +926,8 @@ def harness_config(
             validation["test"].append("python3 scripts/agent_resources.py doctor")
         if "python3 scripts/agent_runtime.py doctor" not in validation["test"]:
             validation["test"].append("python3 scripts/agent_runtime.py doctor")
+        if "python3 scripts/agent_skill_opt.py doctor" not in validation["test"]:
+            validation["test"].append("python3 scripts/agent_skill_opt.py doctor")
         if "python3 scripts/agent_blueprint.py doctor" not in validation["test"]:
             validation["test"].append("python3 scripts/agent_blueprint.py doctor")
         for command in (
@@ -725,6 +955,7 @@ def harness_config(
                 ".agent/skill-hygiene.json",
                 ".agent/project-skills.json",
                 ".agent/skill-runtime.json",
+                ".agent/skill-optimization.json",
                 ".agent/runtime-policy.json",
                 ".agent/model-profiles.json",
                 ".agent/agent-runtime.json",
@@ -773,6 +1004,7 @@ def harness_config(
                 "scripts/agent_capabilities.py",
                 "scripts/agent_skill_hygiene.py",
                 "scripts/agent_project_skills.py",
+                "scripts/agent_skill_opt.py",
                 "scripts/agent_blueprint.py",
                 "scripts/agent_runtime.py",
                 "scripts/agent_task.py",
@@ -791,6 +1023,7 @@ def harness_config(
                 "docs/RESOURCES.md",
                 "docs/AGENT_RUNTIME_ARCHITECTURE.md",
                 "docs/SKILL_RUNTIME.md",
+                "docs/SKILL_OPTIMIZATION.md",
                 "docs/features/INDEX.md",
                 "docs/features/.gitkeep",
                 "docs/tech-debt.md",
@@ -863,6 +1096,7 @@ def harness_config(
         observability["project_blueprint"] = ".agent/blueprint.json"
         observability["runtime_architecture"] = ".agent/agent-runtime.json"
         observability["skill_runtime"] = ".agent/skill-runtime.json"
+        observability["skill_optimization"] = ".agent/skill-optimization.json"
         observability["loop_engineering"] = ".agent/loop-engineering.json"
 
     required_docs = ["docs/QUALITY.md"]
@@ -880,6 +1114,7 @@ def harness_config(
                 "docs/RESOURCES.md",
                 "docs/AGENT_RUNTIME_ARCHITECTURE.md",
                 "docs/SKILL_RUNTIME.md",
+                "docs/SKILL_OPTIMIZATION.md",
                 "docs/features/INDEX.md",
                 "docs/tech-debt.md",
                 "docs/adr/README.md",
@@ -1411,6 +1646,23 @@ def workflow_config(project_name: str, created_at: str, openspec_enabled: bool) 
                 "ask_one_question_at_a_time": True,
                 "provide_recommended_answer_and_reason": True,
                 "structured_intake_output": "--architecture-intake JSON",
+                "version_constraints_required": True,
+                "required_version_fields": [
+                    "languages_and_runtimes",
+                    "package_managers",
+                    "frameworks_and_libraries",
+                    "datastores_and_services",
+                    "deployment_targets",
+                    "agent_runtime_and_mcp",
+                ],
+                "accepted_version_forms": [
+                    "exact",
+                    "range",
+                    "lts",
+                    "managed",
+                    "lockfile",
+                    "open_decision",
+                ],
                 "do_not_rely_on_transient_chat": True,
             },
             "task_decomposition": {
@@ -1452,6 +1704,7 @@ def workflow_config(project_name: str, created_at: str, openspec_enabled: bool) 
             "loop_engineering": {
                 "required_for_profiles": ["standard", "full"],
                 "policy": ".agent/loop-engineering.json",
+                "primitive_selection_required": True,
                 "loop_contract_required": True,
                 "readiness_level_required": True,
                 "attempt_ledger_required": True,
@@ -1468,6 +1721,12 @@ def workflow_config(project_name: str, created_at: str, openspec_enabled: bool) 
                 "repeat_failures_promote_to_harness_evolution": True,
                 "human_interrupt_for_high_risk_or_destructive": True,
                 "self_approval_forbidden": True,
+                "goal_based_requires_verifiable_convergence": True,
+                "external_polling_must_not_be_goal_only": True,
+                "scheduled_routine_requires_disable_policy": True,
+                "scripted_workflow_requires_pilot_and_cross_check": True,
+                "usage_evidence_required_for_expensive_or_autonomous_loops": True,
+                "host_native_features_optional_mappings": True,
                 "dependency_free_control_plane": True,
             },
             "goal_contract": {
@@ -1499,6 +1758,15 @@ def workflow_config(project_name: str, created_at: str, openspec_enabled: bool) 
                     "open_decisions",
                     "linked_task_id",
                     "linked_spec_change_id",
+                ],
+                "goal_based_loop_extra_fields": [
+                    "measurable_done_state",
+                    "proof_method",
+                    "protected_constraints",
+                    "turn_or_time_cap",
+                    "evidence_path",
+                    "evaluator_boundary",
+                    "stop_reason",
                 ],
                 "repository_truth_overrides_memory": True,
                 "update_when_user_changes_objective_or_scope": True,
@@ -1601,6 +1869,14 @@ def workflow_config(project_name: str, created_at: str, openspec_enabled: bool) 
                 "finding_bearing_review_must_remain_needs_fix": True,
                 "fix_requires_next_review_round": True,
             },
+            "skill_optimization_preflight": {
+                "required_for": ["agent_system_release", "production_skill_release", "agent_gov_package_release", "release_claim"],
+                "policy": ".agent/skill-optimization.json",
+                "command": "python3 scripts/agent_skill_opt.py preflight --skill <skill> --release-id <release-id>",
+                "release_check_validates_existing_only": True,
+                "missing_or_stale_preflight_fails_closed": True,
+                "repair_command_required": True,
+            },
             "human_review_evidence": {
                 "required_for": ["high_risk_change", "critical_risk_change", "release_claim", "delegated_substantial_change"],
                 "policy": ".agent/review-policy.json",
@@ -1677,9 +1953,45 @@ def loop_engineering_config(project_name: str, created_at: str) -> dict:
                 "source_status": "verified",
                 "dependency_policy": "source_only",
             },
+            {
+                "name": "Claude Code loops guidance",
+                "url": "https://claude.com/blog/getting-started-with-loops",
+                "adopted_practice": "Separate turn, goal, time, routine, and workflow loop shapes by trigger and stop condition.",
+                "source_status": "verified",
+                "dependency_policy": "source_only",
+            },
+            {
+                "name": "Claude Code goal command documentation",
+                "url": "https://code.claude.com/docs/en/goal",
+                "adopted_practice": "Treat goal loops as verifiable convergence work with an explicit done condition and cap.",
+                "source_status": "verified",
+                "dependency_policy": "source_only",
+            },
+            {
+                "name": "Claude Code scheduled tasks documentation",
+                "url": "https://code.claude.com/docs/en/scheduled-tasks",
+                "adopted_practice": "Govern durable recurring routines with cadence, permission, resource, stop, and disable metadata.",
+                "source_status": "verified",
+                "dependency_policy": "source_only",
+            },
+            {
+                "name": "Claude Code workflows documentation",
+                "url": "https://code.claude.com/docs/en/workflows",
+                "adopted_practice": "Govern script-held workflow orchestration with phase plans, pilots, cross-checks, resume boundaries, and cost evidence.",
+                "source_status": "verified",
+                "dependency_policy": "source_only",
+            },
+            {
+                "name": "ClaudeDevs X article",
+                "url": "https://x.com/ClaudeDevs/article/2074208949205881033",
+                "adopted_practice": "No procedural rule adopted because the article body was inaccessible in the implementation environment.",
+                "source_status": "blocked",
+                "dependency_policy": "source_only",
+            },
         ],
         "policy": {
             "loop_contract_required_for_non_tiny_work": True,
+            "primitive_selection_required_for_non_tiny_loops": True,
             "readiness_level_required_for_non_tiny_loops": True,
             "unattended_requires_attempt_ledger": True,
             "bounded_iterations_required": True,
@@ -1705,7 +2017,160 @@ def loop_engineering_config(project_name: str, created_at: str) -> dict:
             "failed_runs_exit_nonzero": True,
             "failed_runs_record_evidence_paths": True,
             "failed_optimization_cannot_be_improvement": True,
+            "goal_based_requires_verifiable_convergence": True,
+            "external_polling_must_not_be_goal_only": True,
+            "scheduled_routine_requires_disable_policy": True,
+            "scripted_workflow_requires_pilot_and_cross_check": True,
+            "usage_evidence_required_for_expensive_or_autonomous_loops": True,
+            "host_native_features_are_optional_mappings": True,
             "dependency_free_control_plane": True,
+        },
+        "primitive_selection": {
+            "required_for_non_tiny_work": True,
+            "selection_fields": [
+                "primitive",
+                "trigger_source",
+                "stop_condition",
+                "task_shape",
+                "evidence_quality",
+                "durability_requirement",
+                "misuse_check",
+            ],
+            "primitives": {
+                "turn_based": {
+                    "trigger_source": "user_prompt_or_manual_next_turn",
+                    "stop_condition": "current_turn_answered_or_user_input_required",
+                    "task_shape": "short exploration, manual review, or one-shot task",
+                    "required_evidence": ["summary_or_answer", "open_question_when_blocked"],
+                    "misuse_signals": ["used to hide a required multi-step plan", "claims unattended continuation"],
+                },
+                "goal_based": {
+                    "trigger_source": "previous_agent_turn_or_host_goal_mechanism",
+                    "stop_condition": "measurable_done_state_proven_or_cap_hit",
+                    "task_shape": "finite internal convergence the agent can move toward directly",
+                    "required_evidence": ["measurable_done_state", "proof_method", "protected_constraints", "turn_or_time_cap", "evidence_path", "evaluator_boundary", "stop_reason"],
+                    "misuse_signals": ["waiting on external CI or review", "subjective self-approval", "no durable proof"],
+                },
+                "time_based": {
+                    "trigger_source": "interval_timer_or_external_event_check",
+                    "stop_condition": "external_signal_observed, cap hit, or human gate reached",
+                    "task_shape": "session-local polling of CI, deployment, queues, issue trackers, PR reviews, monitoring, or third-party systems",
+                    "required_evidence": ["external_signal", "poll_interval_or_event", "check_cap", "stop_reason"],
+                    "misuse_signals": ["repeating finite verifiable work without a proof", "continuing after no new external signal"],
+                },
+                "scheduled_routine": {
+                    "trigger_source": "durable_schedule_or_recurring_event",
+                    "stop_condition": "per_run_stop_condition, expiry, disable policy, or approval gate",
+                    "task_shape": "durable unattended or cross-session recurring maintenance",
+                    "required_evidence": ["routine_id", "trigger_type", "cadence_or_event_source", "run_location", "permission_mode", "resource_boundary", "per_run_stop_condition", "disable_or_expiry_policy", "owner", "evidence_path"],
+                    "misuse_signals": ["session-local polling mislabeled as durable", "missing disable policy", "protected action without approval"],
+                },
+                "scripted_workflow": {
+                    "trigger_source": "script_or_runtime_holds_plan_and_state",
+                    "stop_condition": "phase_plan_complete, pilot fails, cap hit, or cross-check rejects",
+                    "task_shape": "large parallel, multi-agent, migration, audit, or adversarially checked work",
+                    "required_evidence": ["script_artifact_path", "phase_plan", "worker_role_boundaries", "concurrency_or_agent_cap", "pilot_scope", "cross_check_strategy", "state_resume_boundary", "save_reuse_policy", "cost_or_usage_evidence"],
+                    "misuse_signals": ["many workers without pilot", "no cross-check", "no state/resume boundary", "missing cost evidence"],
+                },
+            },
+            "external_polling_policy": {
+                "examples": ["ci", "deployment", "queue", "issue_tracker", "pr_review", "monitoring", "third_party_system"],
+                "allowed_primitives": ["time_based", "scheduled_routine"],
+                "forbidden_as_goal_only": True,
+                "requires_observed_signal_and_check_frequency": True,
+            },
+            "host_feature_mapping": {
+                "dependency_required": False,
+                "examples": {
+                    "/goal": "goal_based",
+                    "/loop": "goal_based_or_time_based",
+                    "/schedule": "scheduled_routine",
+                    "routines": "scheduled_routine",
+                    "dynamic_workflows": "scripted_workflow",
+                    "background_agents": "scripted_workflow_or_scheduled_routine",
+                },
+            },
+        },
+        "goal_contract": {
+            "goal_based_required_fields": [
+                "raw_goal",
+                "refined_goal",
+                "measurable_done_state",
+                "proof_method",
+                "protected_constraints",
+                "turn_or_time_cap",
+                "evidence_path",
+                "owner_role",
+                "evaluator_boundary",
+                "stop_reason",
+            ],
+            "evaluator_boundary_fields": [
+                "evaluator_type",
+                "can_read_files",
+                "can_run_tools",
+                "evidence_required_for_judgment",
+            ],
+            "self_approval_forbidden": True,
+            "cap_exhaustion_is_not_success": True,
+        },
+        "scheduled_routine": {
+            "required_fields": [
+                "routine_id_or_name",
+                "trigger_type",
+                "cadence_or_event_source",
+                "run_location",
+                "permission_mode",
+                "target_resources",
+                "credential_boundary",
+                "per_run_stop_condition",
+                "disable_or_expiry_policy",
+                "owner",
+                "evidence_path",
+            ],
+            "session_local_interval_polling_remains": "time_based",
+            "protected_actions_require": ["approval_evidence", "resource_policy_compatibility", "high_risk_runlog_evidence"],
+            "missing_approval_behavior": "fail_closed",
+        },
+        "scripted_workflow": {
+            "required_fields": [
+                "script_artifact_path_or_source",
+                "phase_plan",
+                "worker_role_boundaries",
+                "concurrency_or_agent_cap",
+                "pilot_scope",
+                "cross_check_or_adversarial_review_strategy",
+                "state_or_resume_boundary",
+                "save_or_reuse_policy",
+                "cost_or_usage_evidence",
+                "intermediate_result_storage",
+            ],
+            "broad_execution_requires_pilot": True,
+            "pilot_exception_requires_review": True,
+            "host_runtime_required": False,
+        },
+        "usage_evidence": {
+            "required_for": ["assisted", "unattended", "scheduled_routine", "scripted_workflow"],
+            "fields": [
+                "turn_count",
+                "elapsed_time",
+                "token_or_cost_summary",
+                "agent_or_worker_count",
+                "validation_result",
+                "stop_reason",
+                "human_interrupt_or_approval_evidence",
+            ],
+            "unavailable_metrics_policy": "record_unavailable_do_not_guess",
+            "valid_stop_reasons": [
+                "goal_passed",
+                "no_new_work",
+                "cap_exhausted",
+                "risk_increased",
+                "approval_missing",
+                "accepted_exception",
+                "blocked",
+                "failed",
+            ],
+            "cap_exhaustion_success": False,
         },
         "readiness_levels": {
             "manual": {
@@ -2642,6 +3107,7 @@ def governance_gc_config(project_name: str, created_at: str) -> dict:
             "stale_docs_warn_after_days": 180,
             "active_tasks_warn_after_days": 30,
             "baseline_warn_after_days": 30,
+            "component_review_warn_after_days": 90,
         },
         "checks": {
             "knowledge_owners": True,
@@ -2652,6 +3118,54 @@ def governance_gc_config(project_name: str, created_at: str) -> dict:
             "dev_map_presence": True,
             "resource_catalog_schema": True,
             "mcp_policy_disabled_or_audited": True,
+            "component_expiry": True,
+        },
+        "component_expiry": {
+            "policy": {
+                "owner_required": True,
+                "purpose_required": True,
+                "load_bearing_requires_validation": True,
+                "expiry_or_review_cadence_required": True,
+                "renewal_or_removal_path_required": True,
+            },
+            "components": [
+                {
+                    "id": "session-bootstrap",
+                    "kind": "session-artifact",
+                    "owner": "governance-owner",
+                    "purpose": "Compact recovery packet with evidence handles.",
+                    "load_bearing": True,
+                    "last_reviewed": created_at,
+                    "review_cadence": "90d",
+                    "validation": "python3 .agent/tools/agent_session.py doctor",
+                    "renewal_path": ".agent/tools/agent_session.py write_bootstrap",
+                    "removal_path": "not removable while session continuity is enabled",
+                },
+                {
+                    "id": "mechanical-contract-fixtures",
+                    "kind": "mechanical-check",
+                    "owner": "governance-owner",
+                    "purpose": "Negative fixtures for role, provider, protected-action, and bootstrap regressions.",
+                    "load_bearing": True,
+                    "last_reviewed": created_at,
+                    "review_cadence": "90d",
+                    "validation": "python3 scripts/agent_verify.py doctor",
+                    "renewal_path": ".agent/mechanical-checks.json#/checks/strict_agent_contracts",
+                    "removal_path": "remove only with an accepted review exception",
+                },
+                {
+                    "id": "skill-optimization-preflight",
+                    "kind": "release-gate",
+                    "owner": "governance-owner",
+                    "purpose": "Mandatory skill self-optimization preflight before agent-system and production Skill releases.",
+                    "load_bearing": True,
+                    "last_reviewed": created_at,
+                    "review_cadence": "90d",
+                    "validation": "python3 scripts/agent_skill_opt.py doctor",
+                    "renewal_path": ".agent/skill-optimization.json#/release_preflight",
+                    "removal_path": "requires accepted release-governance exception",
+                },
+            ],
         },
         "commands": {
             "doctor": "python3 scripts/agent_gc.py doctor",
@@ -2741,13 +3255,14 @@ def memory_config(project_name: str, created_at: str) -> dict:
 
 
 def context_budget_config(project_name: str, created_at: str, governance_profile: str) -> dict:
-    total_budget = 50000 if profile_at_least(governance_profile, "standard") else 40000
+    total_budget = 52000 if profile_at_least(governance_profile, "standard") else 40000
     agent_instruction_budget = 2200
     if profile_at_least(governance_profile, "full"):
         # Full profile tracks native adapters, subagents, security/tooling, and
-        # skill distribution. Keep it bounded, but avoid shipping a scaffold
-        # that immediately warns before the project has added any content.
-        total_budget = 50000
+        # skill distribution plus blueprint/runtime readiness. Keep it bounded,
+        # but avoid shipping a scaffold that immediately warns before the
+        # project has added any content.
+        total_budget = 56000
         agent_instruction_budget = 2400
     return {
         "schema": "agent-context-budget-v1",
@@ -2774,6 +3289,7 @@ def context_budget_config(project_name: str, created_at: str, governance_profile
             ".agent/model-profiles.json",
             ".agent/agent-runtime.json",
             ".agent/skill-runtime.json",
+            ".agent/skill-optimization.json",
             ".agent/blueprint.json",
             ".agent/manifest.json",
             ".agent/workflow.json",
@@ -2795,20 +3311,18 @@ def context_budget_config(project_name: str, created_at: str, governance_profile
             ".agent/evals/latest.md",
             "docs/TOOLING.md",
             "docs/QUALITY_SCORE.md",
-            "docs/DOMAIN_GLOSSARY.md",
             "docs/DEV_MAP.md",
             "docs/LOOP_ENGINEERING.md",
             "docs/RESOURCES.md",
             "docs/AGENT_RUNTIME_ARCHITECTURE.md",
             "docs/PROJECT_BLUEPRINT.md",
             "docs/SKILL_RUNTIME.md",
+            "docs/SKILL_OPTIMIZATION.md",
             "docs/features/INDEX.md",
             "docs/adr/README.md",
             "docs/rfcs/README.md",
             "docs/incidents/README.md",
             ".agent/templates/subagent-task.md.tmpl",
-            ".agent/templates/implementation-plan.md.tmpl",
-            ".agent/templates/debugging-record.md.tmpl",
             ".agent/templates/project-review.md.tmpl",
             ".agent/templates/features/01_REQUIREMENT_ANALYSIS.md.tmpl",
             ".agent/templates/features/07_DELIVERY_SUMMARY.md.tmpl",
@@ -3304,7 +3818,8 @@ def agent_runtime_config(project_name: str, created_at: str, intake: dict) -> di
     }
 
 
-def blueprint_config(project_name: str, created_at: str, intake: dict, tech_stack: list[str], dirs: list[str]) -> dict:
+def blueprint_config(project_name: str, created_at: str, intake: dict, tech_stack: list[str], dirs: list[str], raw_intake: dict | None = None) -> dict:
+    raw_intake = raw_intake or {}
     project_target = intake["project_target"]
     runtime_adoption = intake["runtime_adoption"]
     if project_target in {"agent", "hybrid"}:
@@ -3387,6 +3902,7 @@ def blueprint_config(project_name: str, created_at: str, intake: dict, tech_stac
             "linked_adr": "",
             "mcp_boundary": intake.get("mcp_server", {}),
         },
+        "technology_version_decisions": technology_version_decisions_config(intake, raw_intake, tech_stack),
         "module_directory_blueprint": {
             "layout_dirs": dirs,
             "tech_stack": tech_stack,
@@ -3610,6 +4126,155 @@ def skill_runtime_config(project_name: str, created_at: str) -> dict:
             "no_network_required_for_doctor": True,
             "no_global_plugin_state_required_for_doctor": True,
             "external_benchmarks_are_optional_and_must_be_declared": True,
+        },
+    }
+
+
+def skill_optimization_config(project_name: str, created_at: str) -> dict:
+    return {
+        "schema": "agent-skill-optimization-v1",
+        "project_name": project_name,
+        "created_at": created_at,
+        "purpose": "Govern skill self-optimization, candidate staging, release preflight, promotion limits, and rollback evidence.",
+        "evidence_root": "skillflows",
+        "modes": ["manual-only", "auto-candidate", "auto-apply-staged", "auto-promote"],
+        "default_skill_policy": {
+            "enabled": True,
+            "risk_class": "medium",
+            "mode": "auto-candidate",
+            "auto_promote_allowed": False,
+            "candidate_path": "skillflows/<skill>/optimization/runs/<run-id>/",
+            "production_write_requires": [
+                "mode permits transition",
+                "selection gate pass",
+                "held-out regression gate pass",
+                "review gate pass",
+                "rollback evidence",
+            ],
+        },
+        "skills": {},
+        "triggers": {
+            "manual": {
+                "enabled": True,
+                "description": "Maintainer explicitly requests skill optimization.",
+                "creates": ["signal summary", "candidate run or deferral", "gate evidence"],
+            },
+            "failure-threshold": {
+                "enabled": True,
+                "thresholds": {
+                    "repeated_failures": 2,
+                    "user_corrections": 2,
+                    "review_findings": 2,
+                    "regression_failures": 1,
+                    "context_budget_failures": 1,
+                    "release_gate_failures": 1,
+                },
+                "creates": ["skill optimization signal", "candidate run or deferred reason"],
+            },
+            "release-gate": {
+                "enabled": True,
+                "mandatory_for": ["agent-system", "production-skill", "agent-gov-package"],
+                "creates": ["release preflight report"],
+            },
+            "scheduled-sleep": {
+                "enabled": False,
+                "primitive": "scheduled_routine",
+                "default_mode": "dry-run",
+                "creates": ["signal scan", "dry-run candidate", "release-preflight finding"],
+            },
+        },
+        "scheduled_sleep": {
+            "enabled": False,
+            "primitive": "scheduled_routine",
+            "cadence_or_event_source": "unset",
+            "disable_or_expiry_policy": "disabled until maintainer enables a concrete routine with expiry",
+            "owner": "governance-owner",
+            "run_location": "repo-local scheduled runner or manual cron approved by project owner",
+            "permission_mode": "read-only dry-run by default",
+            "resource_boundary": "repo files and declared resources only",
+            "credential_boundary": "raw credentials forbidden; use env/file-ref/vault/proxy references only",
+            "cost_boundary": "no paid model or benchmark calls unless explicitly approved",
+            "evidence_path": "skillflows/<skill>/optimization/scheduled-sleep/",
+            "dry_run_default": True,
+            "human_interrupt_points": ["before candidate write", "before production write", "before release action"],
+            "fail_closed": True,
+            "safe_fallback_lane": "read-only signal inventory and report",
+        },
+        "signals": {
+            "stores": [
+                ".agent/runlog.jsonl",
+                ".agent/evals/latest.md",
+                ".agent/context/latest.md",
+                "skillflows/<skill>/reviews/",
+                "skillflows/<skill>/optimization/signals.jsonl",
+            ],
+            "required_fields": ["id", "source", "kind", "summary", "status", "evidence"],
+            "untriaged_statuses": ["new", "open", "untriaged", "needs-triage"],
+        },
+        "gates": {
+            "selection": {
+                "required": True,
+                "evidence": "skillflows/<skill>/optimization/runs/<run-id>/selection.md",
+            },
+            "held_out_regression": {
+                "required": True,
+                "evidence": "skillflows/<skill>/optimization/runs/<run-id>/gate-report.md",
+                "must_not_only_use_candidate_source_cases": True,
+            },
+            "review_fix": {
+                "required": True,
+                "latest_review_must_pass": True,
+                "open_blocker_major_minor_must_be_empty": True,
+            },
+            "release_preflight": {
+                "required": True,
+                "evidence": "skillflows/<skill>/optimization/release-preflight/<release-id>/",
+            },
+            "rollback": {
+                "required_for_production_write": True,
+                "required_fields": ["prior_identity", "candidate_identity", "rollback_path", "rollback_trigger", "validation_window"],
+            },
+        },
+        "promotion": {
+            "auto_promote_boundary": "local production skill files only",
+            "forbidden_auto_promote_actions": ["publish package", "push remote", "sign release", "bypass release-check"],
+            "high_risk_default_mode": "auto-candidate",
+            "requires_explicit_policy_opt_in": True,
+        },
+        "role_boundaries": {
+            "target": {"may_execute_skill": True, "may_write_candidate": False, "may_review": False},
+            "optimizer": {"may_stage_candidate": True, "may_publish": False, "may_self_approve": False},
+            "reviewer": {"may_report_findings": True, "may_fix_own_findings": False},
+            "finder_cannot_fix": True,
+        },
+        "release_preflight": {
+            "required": True,
+            "required_for": ["agent-system", "production-skill", "agent-gov-package"],
+            "release_id": {
+                "derived_from": ["skill name", "version or date", "short skill source tree identity"],
+                "override": "--release-id",
+            },
+            "path": "skillflows/<skill>/optimization/release-preflight/<release-id>/",
+            "artifact_names": [
+                "signal-scan.md",
+                "candidate-summary.md",
+                "gate-report.md",
+                "rejected-edits.jsonl",
+                "release-decision.md",
+                "rollback-plan.md",
+            ],
+            "metadata_artifact": "metadata.json",
+            "empty_rejected_edits_jsonl_valid": True,
+            "release_check_validates_existing_only": True,
+            "repair_command": "python3 scripts/agent_skill_opt.py preflight --skill <skill> --release-id <release-id>",
+            "fail_closed": True,
+        },
+        "commands": {
+            "doctor": "python3 scripts/agent_skill_opt.py doctor",
+            "report": "python3 scripts/agent_skill_opt.py report --json",
+            "release_id": "python3 scripts/agent_skill_opt.py release-id --skill <skill>",
+            "preflight": "python3 scripts/agent_skill_opt.py preflight --skill <skill> --release-id <release-id>",
+            "verify_preflight": "python3 scripts/agent_skill_opt.py verify-preflight --skill <skill> --release-id <release-id>",
         },
     }
 
@@ -3886,6 +4551,17 @@ def capabilities_config(
             "validation": ["python3 scripts/agent_verify.py doctor", "python3 scripts/agent_score.py doctor"],
         },
         {
+            "id": "skill-optimization-governance",
+            "kind": "policy",
+            "provider": "agent-gov",
+            "enabled": True,
+            "risk": "high",
+            "owner": "governance-owner",
+            "description": "Governed skill self-optimization, candidate staging, release preflight, promotion limits, and rollback evidence.",
+            "permissions": {"read": True, "write": "bounded", "network": False, "secrets": False},
+            "validation": ["python3 scripts/agent_skill_opt.py doctor", "python3 scripts/agent_verify.py doctor"],
+        },
+        {
             "id": "dev-map",
             "kind": "knowledge",
             "provider": "local",
@@ -4069,6 +4745,7 @@ def capabilities_config(
         "resource-catalog": "integration",
         "agent-runtime-architecture": "instruction",
         "skill-runtime-governance": "instruction",
+        "skill-optimization-governance": "instruction",
         "dev-map": "instruction",
         "harness-evolution": "instruction",
         "mcp-policy": "integration",
@@ -4103,6 +4780,7 @@ def capabilities_config(
         "resource-catalog",
         "agent-runtime-architecture",
         "skill-runtime-governance",
+        "skill-optimization-governance",
         "dev-map",
         "harness-evolution",
         "mcp-policy",
@@ -4118,6 +4796,9 @@ def capabilities_config(
     capabilities = [item for item in capabilities if item["id"] in allowed]
     for item in capabilities:
         item["capability_class"] = class_by_id.get(item["id"], "instruction")
+        item.setdefault("required", bool(item.get("enabled")))
+        item.setdefault("status", "present" if item.get("enabled") else "missing")
+        item.setdefault("fallback", "record degraded behavior and continue only within workflow, resource, MCP, secret, and risk boundaries")
     return {
         "schema": "agent-capabilities-v1",
         "project_name": project_name,
@@ -4130,7 +4811,11 @@ def capabilities_config(
             "record_high_risk_tool_use_in_runlog": True,
             "do_not_store_secrets": True,
             "classify_skill_tool_mcp_before_enabling": True,
+            "provider_status_required": True,
+            "required_provider_missing_blocks_readiness": True,
+            "optional_provider_requires_fallback": True,
         },
+        "provider_status_values": ["present", "missing", "unknown", "degraded"],
         "taxonomy": {
             "skill": "Instruction package loaded by the agent as guidance.",
             "tool": "Executable command or callable function with permissions, risk, owner, and validation.",
@@ -4238,6 +4923,7 @@ def evals_config(project_name: str, created_at: str, governance_profile: str) ->
                 "resource_catalog": {"weight": 8},
                 "agent_runtime_architecture": {"weight": 8},
                 "skill_runtime": {"weight": 8},
+                "skill_optimization": {"weight": 8},
                 "harness_evolution": {"weight": 6},
                 "mcp_policy": {"weight": 4},
                 "governance_gc": {"weight": 6},
@@ -4309,6 +4995,7 @@ def mechanical_checks_config(project_name: str, created_at: str, governance_prof
         ".agent/resources.json",
         ".agent/evals.json",
         ".agent/skill-runtime.json",
+        ".agent/skill-optimization.json",
         ".agent/mechanical-checks.json",
         ".agent/baselines.json",
         ".agent/harness-evolution.json",
@@ -4379,6 +5066,52 @@ def mechanical_checks_config(project_name: str, created_at: str, governance_prof
             "evidence_must_exist": True,
             "memory_is_advisory": True,
             "bootstrap_must_include_grounding_and_offload": True,
+            "bootstrap_must_not_inline_historical_sections": True,
+            "forbidden_bootstrap_sections": ["Handoff Summary", "Changed Files", "Validation"],
+        },
+        "governance_presets": {
+            "enabled": True,
+            "authority": ".agent/manifest.json#/governance_presets",
+            "source_status_required": True,
+            "version_or_revision_required": True,
+            "permission_scope_required": True,
+            "dry_run_conflict_reporting_required": True,
+            "no_automatic_dependency_install": True,
+        },
+        "capability_providers": {
+            "enabled": True,
+            "path": ".agent/capabilities.json",
+            "status_values": ["present", "missing", "unknown", "degraded"],
+            "required_provider_missing_blocks_readiness": True,
+            "optional_provider_requires_fallback": True,
+        },
+        "strict_agent_contracts": {
+            "enabled": True,
+            "role_contracts": ".agent/role-contracts.json",
+            "finder_cannot_fix_required": True,
+            "protected_action_evidence_required": True,
+            "native_adapter_parity_required": True,
+            "negative_fixtures": [
+                "reviewer-self-fix",
+                "verifier-write",
+                "worker-out-of-bound-write",
+                "missing-protected-action-approval",
+                "bootstrap-inline-history",
+            ],
+        },
+        "regression_criteria": {
+            "enabled": True,
+            "path": ".agent/baselines.json#/regression_criteria",
+            "baseline_behavior_required": True,
+            "expected_behavior_required": True,
+            "protected_invariants_required": True,
+            "rejected_regressions_required": True,
+        },
+        "component_expiry": {
+            "enabled": True,
+            "path": ".agent/governance-gc.json#/component_expiry",
+            "owner_required": True,
+            "load_bearing_requires_validation": True,
         },
         "manifest": {
             "enabled": True,
@@ -4452,6 +5185,18 @@ def mechanical_checks_config(project_name: str, created_at: str, governance_prof
             "require_review_lanes": True,
             "require_impact_benchmark_policy": True,
             "require_shortcut_debt_policy": True,
+            "dependency_free": True,
+        },
+        "skill_optimization": {
+            "enabled": True,
+            "path": ".agent/skill-optimization.json",
+            "doc": "docs/SKILL_OPTIMIZATION.md",
+            "schema": "agent-skill-optimization-v1",
+            "script": "scripts/agent_skill_opt.py",
+            "doctor": "python3 scripts/agent_skill_opt.py doctor",
+            "release_preflight_required": True,
+            "release_check_validates_existing_only": True,
+            "scheduled_sleep_is_scheduled_routine": True,
             "dependency_free": True,
         },
         "resource_catalog": {
@@ -4535,6 +5280,24 @@ def baselines_config(project_name: str, created_at: str) -> dict:
         "snapshot_dir": ".agent/baselines",
         "latest_snapshot": None,
         "snapshots": [],
+        "regression_criteria": [
+            {
+                "id": "session-bootstrap-compact",
+                "baseline_behavior": "bootstrap may include current status excerpts and evidence handles",
+                "expected_behavior": "bootstrap does not inline long historical handoff, changes, validation, grounding, memory, or context bodies",
+                "validation": "python3 .agent/tools/agent_session.py bootstrap && python3 scripts/agent_check.py",
+                "protected_invariants": ["Truth-First Grounding section", "Offload Index section", "refs/git-status-short.txt full snapshot"],
+                "rejected_regressions": ["Handoff Summary section reintroduced", "context budget exceeded", "full dirty tree missing from refs"],
+            },
+            {
+                "id": "agent-contract-fixtures",
+                "baseline_behavior": "role contracts and protected actions are policy text",
+                "expected_behavior": "mechanical checks reject known-bad role, provider, protected-action, and adapter cases",
+                "validation": "python3 scripts/agent_verify.py doctor",
+                "protected_invariants": ["finder-cannot-fix", "provider fallback", "approval evidence for protected actions"],
+                "rejected_regressions": ["reviewer self-fix allowed", "missing required provider ignored", "protected action without evidence"],
+            },
+        ],
         "policy": {
             "before_after_required_for_profiles": ["standard", "full"],
             "bugfix_should_capture_reproduction_baseline": True,
@@ -4575,6 +5338,7 @@ def manifest_config(project_name: str, created_at: str, harness: dict, evals: di
         ".agent/model-profiles.json": "agent-model-profiles-v1",
         ".agent/agent-runtime.json": "agent-runtime-selection-v1",
         ".agent/skill-runtime.json": "agent-skill-runtime-v1",
+        ".agent/skill-optimization.json": "agent-skill-optimization-v1",
         ".agent/tooling.json": "agent-tooling-v1",
         ".agent/security.json": "agent-security-v1",
         ".agent/evals.json": "agent-evals-v1",
@@ -4621,6 +5385,39 @@ def manifest_config(project_name: str, created_at: str, harness: dict, evals: di
             "authority": "advisory",
         },
         "score_dimensions": sorted(evals.get("dimensions", {})),
+        "governance_presets": {
+            "selected": [
+                {
+                    "id": f"{project_name}-default-{harness.get('profile', 'standard')}",
+                    "source_kind": "builtin",
+                    "source_status": "verified",
+                    "version": "agent-gov-bundled",
+                    "owner": "governance-owner",
+                    "permission_scope": "repo-local-files",
+                    "generated_paths": ".agent/harness.json#/invariants/required_paths",
+                    "validation": ["python3 scripts/agent_check.py"],
+                    "conflict_behavior": "preserve existing files and report manual merge work",
+                    "dry_run_supported": True,
+                    "auto_install_dependencies": False,
+                }
+            ],
+            "catalogs": [
+                {
+                    "id": "builtin-agent-gov",
+                    "source_kind": "builtin",
+                    "source_status": "verified",
+                    "version": "agent-gov-bundled",
+                    "network_required": False,
+                }
+            ],
+            "policy": {
+                "source_status_required": True,
+                "version_or_revision_required": True,
+                "permission_scope_required": True,
+                "blocked_sources_cannot_apply": True,
+                "no_automatic_dependency_install": True,
+            },
+        },
         "policy": {
             "generated_scripts_should_prefer_manifest": True,
             "fallback_to_legacy_lists_when_missing": True,
@@ -4900,7 +5697,7 @@ def agent_ground_rules(governance_profile: str) -> tuple[str, str]:
             "- Use `.agent/workflow*.json`, `.agent/task-board.json`, `docs/features/`, `.agent/risk-zones.json`, `.agent/review-policy.json`, `.agent/worktrees.json`, and `.agent/role-contracts.json` for task flow, autonomy, isolation, review evidence, and finder-cannot-fix separation.",
             "- Use `.agent/blueprint.json`, `docs/PROJECT_BLUEPRINT.md`, and `scripts/agent_blueprint.py` for the global product/architecture blueprint before feature-level OpenSpec implementation.",
             "- Use `.agent/loop-engineering.json`, `docs/LOOP_ENGINEERING.md`, `.agent/knowledge.json`, `.agent/memory.json`, `.agent/context.json`, `docs/DEV_MAP.md`, and `docs/DOMAIN_GLOSSARY.md` for bounded loops, durable knowledge, memory retrieval, context budgets, navigation, and terminology.",
-            "- Use `.agent/resources.json`, `.agent/runtime-policy.json`, `.agent/model-profiles.json`, `.agent/agent-runtime.json`, `.agent/skill-runtime.json`, and their docs/scripts for resources, Skill-first runtime, model profiles, adapters, and portable Skill/plugin governance.",
+            "- Use `.agent/resources.json`, `.agent/runtime-policy.json`, `.agent/model-profiles.json`, `.agent/agent-runtime.json`, `.agent/skill-runtime.json`, `.agent/skill-optimization.json`, and their docs/scripts for resources, Skill-first runtime, model profiles, adapters, portable Skill/plugin governance, and governed skill self-optimization.",
             "- Use `.agent/capabilities.json`, `.agent/mechanical-checks.json`, `.agent/baselines.json`, `.agent/harness-evolution.json`, `.agent/mcp-policy.json`, `.agent/governance-gc.json`, and `scripts/agent_*` doctors for capability risk, hard checks, incident promotion, integration boundaries, and governance gardening.",
         ]
     if profile_at_least(governance_profile, "full"):
@@ -4941,6 +5738,7 @@ def agent_workflow(governance_profile: str, spec_workflow_step: str) -> tuple[st
             "- Read `docs/DEV_MAP.md` and `.agent/dev-map.json` before broad codebase navigation or module-boundary edits.",
             "- Before resource or runtime work, run resource/runtime match, resolve, doctor, and report commands; keep secrets out of repo files and follow `runtime_adoption.package_plan` or an accepted manual LLM exception.",
             "- For portable Skill/plugin work, confirm `.agent/skill-runtime.json` and `docs/SKILL_RUNTIME.md`; keep canonical Skill behavior separate from thin host adapters.",
+            "- Before any agent-system or production Skill release, run `python3 scripts/agent_skill_opt.py preflight --skill <skill>` and require release-check to validate the existing preflight evidence.",
             "- For non-tiny work, create or update a task-board record with `python3 scripts/agent_task.py` and keep `docs/features/<task-id>/` stage documents current.",
             "- For standard or full work, capture before/after snapshots with `python3 scripts/agent_verify.py snapshot --name <name>` and compare regressions before handoff.",
             "- For bugs, test/build failures, repeated loop failures, or governance failures, record reproduction/root cause and classify harness gaps with `.agent/harness-evolution.json`.",
@@ -4976,6 +5774,7 @@ def harness_commands(governance_profile: str) -> str:
                 "python3 scripts/agent_blueprint.py doctor",
                 "python3 scripts/agent_resources.py doctor",
                 "python3 scripts/agent_runtime.py doctor",
+                "python3 scripts/agent_skill_opt.py doctor",
                 "python3 scripts/agent_skill_hygiene.py doctor",
                 "python3 scripts/agent_project_skills.py doctor",
                 "python3 scripts/agent_task.py doctor",
@@ -5020,6 +5819,8 @@ python3 scripts/agent_resources.py doctor
 python3 scripts/agent_resources.py list --json
 python3 scripts/agent_runtime.py doctor
 python3 scripts/agent_runtime.py report --json
+python3 scripts/agent_skill_opt.py doctor
+python3 scripts/agent_skill_opt.py report --json
 python3 scripts/agent_security.py doctor
 python3 scripts/agent_capabilities.py list --enabled
 python3 scripts/agent_task.py list
@@ -5044,6 +5845,7 @@ python3 scripts/agent_verify.py compare --before .agent/baselines/before-change.
 - Before broad edits, read `docs/DEV_MAP.md` and update it when entry points, ownership, or read-before-edit guidance changes.
 - Before using remote servers, databases, repositories, deployment targets, or compute machines, match and resolve them through `.agent/resources.json` and `scripts/agent_resources.py`; keep raw secrets in ignored local files or external vault/proxy references.
 - Before product runtime work, confirm project target, Skill-first contract, MCP boundary when applicable, model capability flags, adapter rules, `.agent/blueprint.json` `runtime_framework_decision`, and `.agent/agent-runtime.json` `runtime_adoption`; direct LLM orchestration without a mature adapter requires an accepted manual exception.
+- Before agent-system or production Skill release, complete `scripts/agent_skill_opt.py preflight` and keep `skillflows/<skill>/optimization/release-preflight/<release-id>/` evidence current; release-check validates existing evidence only and fails closed when it is missing, stale, or failing.
 - Run review-fix loops for substantial changes.
 - Run spec compliance review before code quality review for delegated or substantial implementation, and re-review after fixes.
 - Keep complexity-only audit findings separate from correctness, security, and spec review findings.
@@ -5126,7 +5928,7 @@ def build_values(root: Path, args: argparse.Namespace) -> dict[str, str]:
         **quality,
         "standard_docs_intro": (
             "Standard governance state lives under `.agent/`; human-readable maps live under `docs/`. Use the relevant generated doctor before relying on any surface.\n"
-            "Key authorities: `.agent/workflow.json`, `.agent/task-board.json`, `.agent/blueprint.json`, `.agent/agent-runtime.json`, `.agent/resources.json`, `.agent/skill-runtime.json`, `.agent/context.json`, `.agent/memory.json`, `.agent/review-policy.json`, `.agent/worktrees.json`, `.agent/role-contracts.json`, `.agent/mechanical-checks.json`, `.agent/harness-evolution.json`, and `.agent/governance-gc.json`.\n"
+            "Key authorities: `.agent/workflow.json`, `.agent/task-board.json`, `.agent/blueprint.json`, `.agent/agent-runtime.json`, `.agent/resources.json`, `.agent/skill-runtime.json`, `.agent/skill-optimization.json`, `.agent/context.json`, `.agent/memory.json`, `.agent/review-policy.json`, `.agent/worktrees.json`, `.agent/role-contracts.json`, `.agent/mechanical-checks.json`, `.agent/harness-evolution.json`, and `.agent/governance-gc.json`.\n"
             "Keep raw transcripts, secrets, private host data, and long diagnostic output out of tracked governance files."
             if profile_at_least(args.governance_profile, "standard")
             else ""
@@ -5142,6 +5944,7 @@ def build_values(root: Path, args: argparse.Namespace) -> dict[str, str]:
             "- [Loop Engineering](LOOP_ENGINEERING.md): loop contracts, iteration budgets, stop conditions, evidence, and escalation rules.\n"
             "- [Project Resources](RESOURCES.md): resource catalog, local secret-material template, matching, resolve, and safe-use rules.\n"
             "- [Skill Runtime Governance](SKILL_RUNTIME.md): canonical Skill cores, thin host adapters, runtime modes, command lanes, review lanes, skill-impact benchmarks, and shortcut/debt ledgers.\n"
+            "- [Skill Optimization Governance](SKILL_OPTIMIZATION.md): skill self-optimization triggers, candidate staging, release preflight, auto-promote limits, and rollback evidence.\n"
             "- [Feature Work](features/INDEX.md): task-board-backed feature-stage documents.\n"
             "- [Tech Debt](tech-debt.md): known debt, cleanup candidates, and follow-up work.\n"
             "- [ADRs](adr/README.md): durable architecture decisions.\n"
@@ -5151,7 +5954,7 @@ def build_values(root: Path, args: argparse.Namespace) -> dict[str, str]:
             else ""
         ),
         "standard_config_updates": (
-            "Update the matching `.agent/*.json` authority and linked `docs/*.md` page when workflow, blueprint, runtime, resource, skill, context, memory, review, worktree, role, baseline, harness-evolution, or governance-gc policy changes."
+            "Update the matching `.agent/*.json` authority and linked `docs/*.md` page when workflow, blueprint, runtime, resource, skill, skill-optimization, context, memory, review, worktree, role, baseline, harness-evolution, or governance-gc policy changes."
             if profile_at_least(args.governance_profile, "standard")
             else ""
         ),
@@ -5268,7 +6071,18 @@ def init_project(args: argparse.Namespace) -> int:
         )
         writer.write(
             ".agent/blueprint.json",
-            json.dumps(blueprint_config(project_name, values["created_at"], architecture_intake, tech_stack, dirs), indent=2) + "\n",
+            json.dumps(
+                blueprint_config(
+                    project_name,
+                    values["created_at"],
+                    architecture_intake,
+                    tech_stack,
+                    dirs,
+                    raw_architecture_intake,
+                ),
+                indent=2,
+            )
+            + "\n",
         )
         writer.write(
             ".agent/workflow.json",
@@ -5333,6 +6147,10 @@ def init_project(args: argparse.Namespace) -> int:
         writer.write(
             ".agent/skill-runtime.json",
             json.dumps(skill_runtime_config(project_name, values["created_at"]), indent=2) + "\n",
+        )
+        writer.write(
+            ".agent/skill-optimization.json",
+            json.dumps(skill_optimization_config(project_name, values["created_at"]), indent=2) + "\n",
         )
         writer.write(
             ".agent/memory.json",
@@ -5472,6 +6290,7 @@ def init_project(args: argparse.Namespace) -> int:
         writer.write("scripts/agent_capabilities.py", template("agent-capabilities.py.tmpl"), executable=True)
         writer.write("scripts/agent_skill_hygiene.py", template("agent-skill-hygiene.py.tmpl"), executable=True)
         writer.write("scripts/agent_project_skills.py", template("agent-project-skills.py.tmpl"), executable=True)
+        writer.write("scripts/agent_skill_opt.py", template("agent-skill-opt.py.tmpl"), executable=True)
         writer.write("scripts/agent_blueprint.py", template("agent-blueprint.py.tmpl"), executable=True)
         writer.write("scripts/agent_runtime.py", template("agent-runtime.py.tmpl"), executable=True)
         writer.write("scripts/agent_task.py", template("agent-task.py.tmpl"), executable=True)
@@ -5497,6 +6316,7 @@ def init_project(args: argparse.Namespace) -> int:
         writer.write("docs/RESOURCES.md", render(template("docs-resources.md.tmpl"), values))
         writer.write("docs/AGENT_RUNTIME_ARCHITECTURE.md", render(template("docs-agent-runtime-architecture.md.tmpl"), values))
         writer.write("docs/SKILL_RUNTIME.md", render(template("docs-skill-runtime.md.tmpl"), values))
+        writer.write("docs/SKILL_OPTIMIZATION.md", render(template("docs-skill-optimization.md.tmpl"), values))
         writer.write("docs/features/INDEX.md", render(template("docs-features-index.md.tmpl"), values))
         writer.write("docs/features/.gitkeep", "")
         writer.write("docs/tech-debt.md", render(template("docs-tech-debt.md.tmpl"), values))

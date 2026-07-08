@@ -12,9 +12,11 @@ Borrow these practices from mature agent workflow projects:
 - Get design or specification approval before implementation for non-trivial changes.
 - Convert approved specs into executable plans with exact files, commands, expected results, and no placeholders.
 - Convert accepted goals into task decomposition before implementation: tiny checklist, bugfix fix chain, or standard/full task graph.
-- Convert iterative work into explicit loop contracts with goals, observation signals, budgets, stop conditions, evidence paths, and escalation rules.
+- Convert iterative work into explicit loop contracts with a selected primitive, goals, observation signals, budgets, stop conditions, evidence paths, and escalation rules.
+- Choose the loop primitive before iteration: `turn_based` for short/manual turns, `goal_based` for verifiable internal convergence, `time_based` for session-local external polling, `scheduled_routine` for durable recurring work, and `scripted_workflow` for script-held orchestration or large multi-agent plans.
 - Classify non-tiny iterative loops by readiness level before continuation: `manual`, `report_only`, `assisted`, or `unattended`.
 - Require unattended loops to have attempt ledger evidence, stable failure signatures, quota/circuit-breaker controls, explicit interrupt points, state persistence, and safe stop behavior before automatic continuation.
+- Separate internal convergence from external polling: a goal loop cannot wait on CI, deployments, queues, issue trackers, PR reviews, monitoring, or third-party systems unless the observed external signal and polling cadence are recorded under `time_based` or `scheduled_routine` governance.
 - Record a compact goal contract for standard/full or otherwise long-running work: objective, user-approved outcome, non-goals, constraints, success evidence, stop conditions, current decision summary, open decisions, task id, and spec id.
 - Surface assumptions, ambiguity, and tradeoffs before implementation when a request has multiple plausible meanings.
 - Run a requirements interview for non-tiny work: one unresolved question at a time, recommended answer plus rationale, shared-understanding confirmation, domain glossary updates, and code/docs cross-checks before design or implementation.
@@ -36,7 +38,7 @@ Borrow these practices from mature agent workflow projects:
 - For portable Skill/plugin work, check `.agent/skill-runtime.json`: keep one canonical Skill core, keep host adapters thin, map native commands to command lanes, verify runtime mode deactivation/persistence, and require adapter parity evidence before release claims.
 - For skill-impact claims, require benchmark evidence with baseline and skill-enabled arms, isolated workspaces or plugin dirs, contamination self-test, correctness/safety gates, preserved artifacts, and limitation notes.
 - For every task profile, run review-fix-review before completion. Tiny tasks use lightweight evidence in the active session, runlog, or `.agent/intake/` when no task-board record exists; bugfix tasks review reproduction/root-cause/regression; standard/full tasks use protected stage exits.
-- For non-tiny work loops, use `.agent/loop-engineering.json` and `docs/LOOP_ENGINEERING.md` to bound plan-act-observe-adjust, review-fix-review, debugging, eval optimization, and session recovery loops.
+- For non-tiny work loops, use `.agent/loop-engineering.json` and `docs/LOOP_ENGINEERING.md` to choose a loop primitive and bound plan-act-observe-adjust, review-fix-review, debugging, eval optimization, session recovery, scheduled routine, and scripted workflow loops.
 - Use safe fallback lanes only when they preserve the unresolved human gate and stay within read-only analysis, test preparation, docs review, planning, or artifact inventory.
 - Archive embedded spec changes as soon as they reach `all_done`; do not leave completed work in `openspec/changes/<name>/`.
 - Require fresh validation evidence before claiming completion, merge readiness, or PR readiness.
@@ -163,6 +165,7 @@ At minimum, standard/full work must pass review-fix-review before exiting `spec`
 
 Use `.agent/loop-engineering.json` for non-tiny work that can repeat. The loop contract should name:
 
+- loop primitive: `turn_based`, `goal_based`, `time_based`, `scheduled_routine`, or `scripted_workflow`
 - loop type: `work_loop`, `review_fix_loop`, `debugging_loop`, `eval_optimization_loop`, or `session_recovery_loop`
 - readiness level: `manual`, `report_only`, `assisted`, or `unattended`
 - goal and owner role
@@ -170,6 +173,12 @@ Use `.agent/loop-engineering.json` for non-tiny work that can repeat. The loop c
 - iteration budget and stop conditions
 - evidence path for each iteration
 - escalation rule when the same failure repeats or the budget is exhausted
+
+For `goal_based`, record one measurable done state, proof method, protected constraints, turn or time cap, evidence path, evaluator boundary, and stop reason. Cap exhaustion alone is not success. If model judgment is part of the proof, state whether the evaluator can read files or run tools and what evidence must be surfaced.
+
+Use `time_based` for session-local external polling. Use `scheduled_routine` only when a durable recurring trigger exists and routine id/name, trigger, cadence/event source, run location, permission mode, resource and credential boundary, per-run stop condition, disable/expiry policy, owner, and evidence path are recorded.
+
+Use `scripted_workflow` when a script or host workflow holds phase state, spawns multiple workers, or coordinates adversarial checks. Record the script artifact, phase plan, role boundaries, concurrency cap, pilot scope, cross-check strategy, resume boundary, save/reuse policy, intermediate result storage, and cost or usage evidence before broad execution.
 
 Do not retry the same patch, prompt, test command, tool sequence, or review round after the same failure repeats without a new hypothesis or strategy change. Record attempts with loop id, iteration id, readiness level, owner role, action summary, evidence paths, result status, failure signature, strategy-change flag, budget usage, and next transition. When the failure reveals a missing rule, script, workflow gate, role boundary, knowledge source, or context budget, classify it in `.agent/harness-evolution.json`; use `loop_gap` when the missing control is the loop contract itself.
 

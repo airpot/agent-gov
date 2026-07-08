@@ -10,7 +10,21 @@ from pathlib import Path
 
 
 CONFIG_PATH = Path(".agent/capabilities.json")
-REQUIRED_FIELDS = {"id", "kind", "capability_class", "provider", "enabled", "risk", "owner", "description", "permissions"}
+RUNLOG_PATH = Path(".agent/runlog.jsonl")
+REQUIRED_FIELDS = {
+    "id",
+    "kind",
+    "capability_class",
+    "provider",
+    "enabled",
+    "risk",
+    "owner",
+    "description",
+    "permissions",
+    "required",
+    "status",
+    "fallback",
+}
 
 
 def load_config() -> dict:
@@ -22,6 +36,39 @@ def load_config() -> dict:
 
 def capabilities(config: dict) -> list[dict]:
     return list(config.get("capabilities", []))
+
+
+def iter_runlog_events() -> list[dict]:
+    if not RUNLOG_PATH.exists():
+        return []
+    rows: list[dict] = []
+    for line in RUNLOG_PATH.read_text(encoding="utf-8", errors="ignore").splitlines():
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if item.get("schema") == "agent-runlog-event-v1":
+            rows.append(item)
+    return rows
+
+
+def has_high_risk_evidence(capability_id: str, item: dict) -> bool:
+    if item.get("last_evidence") or item.get("last_high_risk_evidence"):
+        return True
+    expected_tags = {
+        f"capability:{capability_id}",
+        f"high-risk-capability:{capability_id}",
+    }
+    for event in reversed(iter_runlog_events()):
+        tags = {str(tag) for tag in event.get("tags", [])}
+        if expected_tags & tags:
+            return True
+        summary = str(event.get("summary", ""))
+        if capability_id in summary and "high-risk" in summary:
+            return True
+    return False
 
 
 def cmd_list(args: argparse.Namespace) -> int:
@@ -54,6 +101,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if config.get("schema") != "agent-capabilities-v1":
         errors.append(".agent/capabilities.json schema must be agent-capabilities-v1")
     risk_values = set(config.get("risk_values", ["low", "medium", "high"]))
+    status_values = set(config.get("provider_status_values", ["present", "missing", "unknown", "degraded"]))
+    policy = config.get("policy", {})
+    if policy.get("provider_status_required") is not True:
+        errors.append(".agent/capabilities.json policy must require provider status")
+    if policy.get("required_provider_missing_blocks_readiness") is not True:
+        errors.append(".agent/capabilities.json policy must block readiness for missing required providers")
+    if policy.get("optional_provider_requires_fallback") is not True:
+        errors.append(".agent/capabilities.json policy must require fallback for optional providers")
+    for value in ("present", "missing", "unknown", "degraded"):
+        if value not in status_values:
+            errors.append(f".agent/capabilities.json missing provider status value: {value}")
     capability_classes = set(config.get("capability_classes", {}))
     for class_name in ("instruction", "executable", "integration", "native_adapter"):
         if class_name not in capability_classes:
@@ -73,13 +131,19 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             errors.append(f"{cap_id} has invalid risk: {item.get('risk')}")
         if item.get("capability_class") not in capability_classes:
             errors.append(f"{cap_id} has invalid capability_class: {item.get('capability_class')}")
+        if item.get("status") not in status_values:
+            errors.append(f"{cap_id} has invalid provider status: {item.get('status')}")
+        if item.get("required") is True and item.get("status") != "present":
+            errors.append(f"required capability {cap_id} is not present")
+        if item.get("required") is not True and not str(item.get("fallback", "")).strip():
+            errors.append(f"optional capability {cap_id} must define fallback")
         permissions = item.get("permissions", {})
         if not isinstance(permissions, dict):
             errors.append(f"{cap_id} permissions must be an object")
         if item.get("enabled") and not item.get("validation"):
             warnings.append(f"{cap_id} has no validation command")
-        if item.get("risk") == "high" and item.get("enabled"):
-            warnings.append(f"{cap_id} is high risk; record use in .agent/runlog.jsonl")
+        if item.get("risk") == "high" and item.get("enabled") and not has_high_risk_evidence(str(cap_id), item):
+            warnings.append(f"{cap_id} is high risk; record use or review evidence in .agent/runlog.jsonl")
     if not capabilities(config):
         errors.append(".agent/capabilities.json has no capabilities")
     for warning in warnings:

@@ -1,0 +1,58 @@
+# Skill Optimization Governance
+
+This project uses `.agent/skill-optimization.json` and `scripts/agent_skill_opt.py` to govern skill self-optimization.
+
+## Operating Rules
+
+- Skill optimization is allowed only through configured policy, staged candidate evidence, review gates, and rollback evidence.
+- Candidate edits belong under `skillflows/<skill>/optimization/runs/<run-id>/` until the configured mode permits promotion.
+- Production skill files, publish mirrors, release manifests, package publishing, remote pushes, and signing remain protected release actions.
+- `auto-promote` may apply only passing candidate edits to local production skill files when policy explicitly permits it; it cannot publish, push, sign, or bypass release-check.
+- Target, optimizer, and reviewer roles must be recorded. Reviewer and finder roles report findings and route fixes back; they do not fix their own findings.
+
+## Triggers
+
+- `manual`: maintainer explicitly asks to optimize a skill.
+- `failure-threshold`: repeated failures, corrections, review findings, regression failures, context-budget failures, or release-gate failures reach configured thresholds.
+- `release-gate`: mandatory before an agent-system or production skill release.
+- `scheduled-sleep`: opt-in `scheduled_routine` with cadence or event source, owner, disable or expiry policy, resource and credential boundary, cost boundary, dry-run default, human interrupt points, and fail-closed behavior.
+
+## Release Preflight
+
+Before releasing a production skill or agent system, create preflight evidence:
+
+```bash
+python3 scripts/agent_skill_opt.py preflight --skill <skill>
+```
+
+The release id is derived from skill name, version or date, and current skill source tree identity. To make it explicit:
+
+```bash
+python3 scripts/agent_skill_opt.py release-id --skill <skill>
+python3 scripts/agent_skill_opt.py preflight --skill <skill> --release-id <release-id>
+```
+
+Preflight writes:
+
+```text
+skillflows/<skill>/optimization/release-preflight/<release-id>/
+  signal-scan.md
+  candidate-summary.md
+  gate-report.md
+  rejected-edits.jsonl
+  release-decision.md
+  rollback-plan.md
+  metadata.json
+```
+
+`rejected-edits.jsonl` may be empty when no edits were rejected, but it must exist.
+
+`release-check` validates existing evidence only. If evidence is missing, stale, or failing, it fails and prints the exact preflight command to repair the gate.
+
+## Validation
+
+```bash
+python3 scripts/agent_skill_opt.py doctor
+python3 scripts/agent_skill_opt.py report --json
+python3 scripts/agent_skill_opt.py verify-preflight --skill <skill>
+```

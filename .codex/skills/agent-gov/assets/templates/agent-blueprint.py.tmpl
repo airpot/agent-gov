@@ -25,6 +25,7 @@ REQUIRED_SECTIONS = (
     "System Boundary",
     "Quality Attributes",
     "Runtime And Framework Choices",
+    "Technology Version Decisions",
     "Agent Runtime And Framework Decision",
     "Module / Directory Blueprint",
     "Data And State Ownership",
@@ -173,6 +174,84 @@ def validate_runtime_decision(blueprint: dict[str, Any], runtime: dict[str, Any]
     return errors, warnings, report
 
 
+def version_item_has_constraint(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+    status = str(item.get("status", "")).strip()
+    version = str(item.get("version", "")).strip()
+    constraint = str(item.get("constraint", "")).strip()
+    if version or constraint:
+        return True
+    return status in {"deferred-to-application-lockfile", "accepted-deferred", "managed-service"}
+
+
+def validate_technology_versions(blueprint: dict[str, Any]) -> tuple[list[str], list[str], dict[str, Any]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    decisions = blueprint.get("technology_version_decisions")
+    if not isinstance(decisions, dict):
+        return ["technology_version_decisions is required"], warnings, {}
+    fields = [
+        "languages_and_runtimes",
+        "package_managers",
+        "frameworks_and_libraries",
+        "datastores_and_services",
+        "deployment_targets",
+        "agent_runtime_and_mcp",
+        "lockfile_or_environment_evidence",
+        "open_version_decisions",
+    ]
+    for field in fields:
+        if field not in decisions:
+            errors.append(f"technology_version_decisions missing {field}")
+        elif not isinstance(decisions.get(field), list):
+            errors.append(f"technology_version_decisions.{field} must be a list")
+    if not str(decisions.get("version_policy", "")).strip():
+        errors.append("technology_version_decisions.version_policy is required")
+    constrained_items: list[str] = []
+    open_decisions = decisions.get("open_version_decisions", [])
+    for field in fields[:-2]:
+        value = decisions.get(field, [])
+        if not isinstance(value, list):
+            continue
+        for index, item in enumerate(value):
+            if not isinstance(item, dict):
+                errors.append(f"technology_version_decisions.{field}[{index}] must be an object")
+                continue
+            name = str(item.get("name", "")).strip()
+            if not name:
+                errors.append(f"technology_version_decisions.{field}[{index}] missing name")
+            if version_item_has_constraint(item):
+                constrained_items.append(name or f"{field}[{index}]")
+            elif str(item.get("status", "")).strip() == "unresolved":
+                warnings.append(f"unresolved version decision: {name or field}")
+    package_plan = blueprint.get("runtime_framework_decision", {}).get("package_plan", [])
+    unresolved_package_plans: list[str] = []
+    if isinstance(package_plan, list):
+        for plan in package_plan:
+            if not isinstance(plan, dict):
+                continue
+            status = str(plan.get("version_status", "")).strip()
+            policy = str(plan.get("version_policy", "")).strip()
+            constraints = plan.get("package_version_constraints", {})
+            if status in {"decided", "deferred-to-application-lockfile", "accepted-deferred"} or policy in {"defer-to-lockfile", "application-lockfile", "managed-by-application"}:
+                continue
+            if isinstance(constraints, dict) and any(str(value).strip() for value in constraints.values()):
+                continue
+            unresolved_package_plans.append(str(plan.get("adapter", "<unknown>")))
+    report = {
+        "status": decisions.get("status"),
+        "constrained_item_count": len(constrained_items),
+        "open_decision_count": len(open_decisions) if isinstance(open_decisions, list) else 0,
+        "unresolved_package_plans": unresolved_package_plans,
+    }
+    if not constrained_items and not open_decisions:
+        warnings.append("technology_version_decisions has no version constraints or open decisions")
+    if unresolved_package_plans:
+        warnings.append("runtime package plans need version constraints or lockfile policy: " + ", ".join(unresolved_package_plans))
+    return errors, warnings, report
+
+
 def iter_active_changes() -> list[tuple[Path, dict[str, Any]]]:
     if not CHANGES_ROOT.exists():
         return []
@@ -256,6 +335,9 @@ def validate_all() -> tuple[list[str], list[str], dict[str, Any]]:
     runtime_errors, runtime_warnings, runtime_report = validate_runtime_decision(blueprint, runtime)
     errors.extend(runtime_errors)
     warnings.extend(runtime_warnings)
+    version_errors, version_warnings, version_report = validate_technology_versions(blueprint)
+    errors.extend(version_errors)
+    warnings.extend(version_warnings)
     active_changes: list[dict[str, Any]] = []
     archive_blocks: list[str] = []
     for base, metadata in iter_active_changes():
@@ -280,6 +362,7 @@ def validate_all() -> tuple[list[str], list[str], dict[str, Any]]:
         "blueprint_status": status,
         "known_blueprint_ids": sorted(known_ids),
         "runtime_framework_decision": runtime_report,
+        "technology_version_decisions": version_report,
         "active_changes": active_changes,
         "archive_blocking_reasons": archive_blocks,
         "errors": errors,
@@ -307,6 +390,14 @@ def readiness_findings(errors: list[str], report: dict[str, Any]) -> list[str]:
         for reason in report.get("archive_blocking_reasons", []):
             findings.append(f"blueprint archive-impact gate unresolved: {reason}")
     blueprint = read_json(BLUEPRINT_PATH)
+    version_report = report.get("technology_version_decisions", {})
+    if not isinstance(version_report, dict) or not version_report:
+        findings.append("technology version decisions must be recorded before non-trivial implementation")
+    else:
+        if int(version_report.get("constrained_item_count", 0) or 0) <= 0:
+            findings.append("at least one concrete technology version constraint or defer-to-lockfile policy must be recorded before implementation readiness")
+        for adapter in version_report.get("unresolved_package_plans", []) or []:
+            findings.append(f"runtime package plan missing version constraint or lockfile policy: {adapter}")
     records = blueprint.get("records", []) if isinstance(blueprint, dict) else []
     if isinstance(records, list):
         for index, record in enumerate(records):

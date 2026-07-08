@@ -69,6 +69,7 @@ SCHEMA_JSON_FILES = {
     ".agent/model-profiles.json": "agent-model-profiles-v1",
     ".agent/agent-runtime.json": "agent-runtime-selection-v1",
     ".agent/skill-runtime.json": "agent-skill-runtime-v1",
+    ".agent/skill-optimization.json": "agent-skill-optimization-v1",
     ".agent/tooling.json": "agent-tooling-v1",
     ".agent/security.json": "agent-security-v1",
     ".agent/evals.json": "agent-evals-v1",
@@ -132,6 +133,7 @@ DEFAULT_DIMENSION_WEIGHTS = {
     "resource_catalog": 8,
     "agent_runtime_architecture": 8,
     "skill_runtime": 8,
+    "skill_optimization": 8,
     "harness_evolution": 6,
     "mcp_policy": 4,
     "governance_gc": 6,
@@ -596,6 +598,7 @@ def score_loop_engineering() -> dict:
     policy = config.get("policy", {})
     for key in (
         "loop_contract_required_for_non_tiny_work",
+        "primitive_selection_required_for_non_tiny_loops",
         "readiness_level_required_for_non_tiny_loops",
         "unattended_requires_attempt_ledger",
         "bounded_iterations_required",
@@ -619,6 +622,12 @@ def score_loop_engineering() -> dict:
         "failed_runs_exit_nonzero",
         "failed_runs_record_evidence_paths",
         "failed_optimization_cannot_be_improvement",
+        "goal_based_requires_verifiable_convergence",
+        "external_polling_must_not_be_goal_only",
+        "scheduled_routine_requires_disable_policy",
+        "scripted_workflow_requires_pilot_and_cross_check",
+        "usage_evidence_required_for_expensive_or_autonomous_loops",
+        "host_native_features_are_optional_mappings",
         "dependency_free_control_plane",
     ):
         if policy.get(key) is not True:
@@ -631,6 +640,109 @@ def score_loop_engineering() -> dict:
                 findings.append("loop sources must record source_status")
             if source.get("dependency_policy") != "source_only":
                 findings.append("loop sources must be source_only")
+    source_status_by_url = {
+        str(source.get("url", "")): str(source.get("source_status", ""))
+        for source in config.get("sources", [])
+        if isinstance(source, dict)
+    }
+    for url in (
+        "https://claude.com/blog/getting-started-with-loops",
+        "https://code.claude.com/docs/en/goal",
+        "https://code.claude.com/docs/en/scheduled-tasks",
+        "https://code.claude.com/docs/en/workflows",
+    ):
+        if source_status_by_url.get(url) != "verified":
+            findings.append(f"loop source must be verified: {url}")
+    if source_status_by_url.get("https://x.com/ClaudeDevs/article/2074208949205881033") != "blocked":
+        findings.append("inaccessible X article must be recorded as blocked")
+    selection = config.get("primitive_selection", {})
+    if not isinstance(selection, dict):
+        findings.append("missing primitive_selection")
+        selection = {}
+    if selection.get("required_for_non_tiny_work") is not True:
+        findings.append("primitive selection must be required for non-tiny work")
+    required_selection_fields = {"primitive", "trigger_source", "stop_condition", "task_shape", "evidence_quality", "durability_requirement", "misuse_check"}
+    if not required_selection_fields.issubset(set(selection.get("selection_fields", []))):
+        findings.append("primitive selection missing required fields")
+    primitives = selection.get("primitives", {})
+    required_primitives = {"turn_based", "goal_based", "time_based", "scheduled_routine", "scripted_workflow"}
+    for primitive in required_primitives:
+        spec = primitives.get(primitive, {})
+        if not spec:
+            findings.append(f"missing primitive {primitive}")
+            continue
+        for key in ("trigger_source", "stop_condition", "task_shape", "required_evidence", "misuse_signals"):
+            if not spec.get(key):
+                findings.append(f"{primitive} missing {key}")
+    goal_evidence = set(primitives.get("goal_based", {}).get("required_evidence", []))
+    if not {"measurable_done_state", "proof_method", "protected_constraints", "turn_or_time_cap", "evidence_path", "evaluator_boundary", "stop_reason"}.issubset(goal_evidence):
+        findings.append("goal_based primitive missing proof evidence fields")
+    routine_evidence = set(primitives.get("scheduled_routine", {}).get("required_evidence", []))
+    if "disable_or_expiry_policy" not in routine_evidence:
+        findings.append("scheduled_routine primitive must require disable_or_expiry_policy")
+    scripted_evidence = set(primitives.get("scripted_workflow", {}).get("required_evidence", []))
+    if not {"pilot_scope", "cross_check_strategy", "cost_or_usage_evidence"}.issubset(scripted_evidence):
+        findings.append("scripted_workflow primitive missing pilot/cross-check/cost evidence")
+    external_polling = selection.get("external_polling_policy", {})
+    if set(external_polling.get("allowed_primitives", [])) != {"time_based", "scheduled_routine"}:
+        findings.append("external polling must use time_based or scheduled_routine")
+    if external_polling.get("forbidden_as_goal_only") is not True:
+        findings.append("external polling must not be goal-only")
+    if external_polling.get("requires_observed_signal_and_check_frequency") is not True:
+        findings.append("external polling must record signal and check frequency")
+    host_mapping = selection.get("host_feature_mapping", {})
+    if host_mapping.get("dependency_required") is not False:
+        findings.append("host-native loop features must be optional mappings")
+    goal_contract = config.get("goal_contract", {})
+    if not isinstance(goal_contract, dict):
+        findings.append("missing loop goal_contract")
+        goal_contract = {}
+    if not {"raw_goal", "refined_goal", "measurable_done_state", "proof_method", "protected_constraints", "turn_or_time_cap", "evidence_path", "owner_role", "evaluator_boundary", "stop_reason"}.issubset(set(goal_contract.get("goal_based_required_fields", []))):
+        findings.append("loop goal_contract missing goal-based required fields")
+    if not {"evaluator_type", "can_read_files", "can_run_tools", "evidence_required_for_judgment"}.issubset(set(goal_contract.get("evaluator_boundary_fields", []))):
+        findings.append("loop goal_contract missing evaluator boundary fields")
+    if goal_contract.get("self_approval_forbidden") is not True:
+        findings.append("loop goal_contract must forbid self-approval")
+    if goal_contract.get("cap_exhaustion_is_not_success") is not True:
+        findings.append("loop goal_contract must reject cap exhaustion as success")
+    routine = config.get("scheduled_routine", {})
+    if not isinstance(routine, dict):
+        findings.append("missing scheduled_routine")
+        routine = {}
+    routine_required = {"routine_id_or_name", "trigger_type", "cadence_or_event_source", "run_location", "permission_mode", "target_resources", "credential_boundary", "per_run_stop_condition", "disable_or_expiry_policy", "owner", "evidence_path"}
+    if not routine_required.issubset(set(routine.get("required_fields", []))):
+        findings.append("scheduled_routine missing required metadata fields")
+    if routine.get("session_local_interval_polling_remains") != "time_based":
+        findings.append("session-local interval polling must remain time_based")
+    if routine.get("missing_approval_behavior") != "fail_closed":
+        findings.append("scheduled_routine missing approvals must fail closed")
+    workflow_meta = config.get("scripted_workflow", {})
+    if not isinstance(workflow_meta, dict):
+        findings.append("missing scripted_workflow")
+        workflow_meta = {}
+    scripted_required = {"script_artifact_path_or_source", "phase_plan", "worker_role_boundaries", "concurrency_or_agent_cap", "pilot_scope", "cross_check_or_adversarial_review_strategy", "state_or_resume_boundary", "save_or_reuse_policy", "cost_or_usage_evidence", "intermediate_result_storage"}
+    if not scripted_required.issubset(set(workflow_meta.get("required_fields", []))):
+        findings.append("scripted_workflow missing required metadata fields")
+    if workflow_meta.get("broad_execution_requires_pilot") is not True:
+        findings.append("scripted_workflow must require a pilot")
+    if workflow_meta.get("pilot_exception_requires_review") is not True:
+        findings.append("scripted_workflow pilot exception must require review")
+    if workflow_meta.get("host_runtime_required") is not False:
+        findings.append("scripted_workflow must not require host-specific runtime")
+    usage = config.get("usage_evidence", {})
+    if not isinstance(usage, dict):
+        findings.append("missing usage_evidence")
+        usage = {}
+    if not {"assisted", "unattended", "scheduled_routine", "scripted_workflow"}.issubset(set(usage.get("required_for", []))):
+        findings.append("usage_evidence must apply to assisted, unattended, scheduled_routine, and scripted_workflow")
+    if not {"turn_count", "elapsed_time", "token_or_cost_summary", "agent_or_worker_count", "validation_result", "stop_reason", "human_interrupt_or_approval_evidence"}.issubset(set(usage.get("fields", []))):
+        findings.append("usage_evidence missing required fields")
+    if usage.get("unavailable_metrics_policy") != "record_unavailable_do_not_guess":
+        findings.append("usage evidence must record unavailable metrics instead of guessing")
+    if "cap_exhausted" not in set(usage.get("valid_stop_reasons", [])):
+        findings.append("usage evidence stop reasons must include cap_exhausted")
+    if usage.get("cap_exhaustion_success") is not False:
+        findings.append("cap exhaustion must not count as success")
     readiness = config.get("readiness_levels", {})
     if set(readiness) != {"manual", "report_only", "assisted", "unattended"}:
         findings.append("readiness levels must be manual/report_only/assisted/unattended")
@@ -707,6 +819,7 @@ def score_loop_engineering() -> dict:
     if gate.get("policy") != ".agent/loop-engineering.json":
         findings.append("workflow loop_engineering gate must point to .agent/loop-engineering.json")
     for key in (
+        "primitive_selection_required",
         "loop_contract_required",
         "readiness_level_required",
         "attempt_ledger_required",
@@ -723,6 +836,12 @@ def score_loop_engineering() -> dict:
         "repeat_failures_promote_to_harness_evolution",
         "human_interrupt_for_high_risk_or_destructive",
         "self_approval_forbidden",
+        "goal_based_requires_verifiable_convergence",
+        "external_polling_must_not_be_goal_only",
+        "scheduled_routine_requires_disable_policy",
+        "scripted_workflow_requires_pilot_and_cross_check",
+        "usage_evidence_required_for_expensive_or_autonomous_loops",
+        "host_native_features_optional_mappings",
         "dependency_free_control_plane",
     ):
         if gate.get(key) is not True:
@@ -735,6 +854,7 @@ def score_loop_engineering() -> dict:
     evidence = [
         f"{len(loop_types)} loop type(s)",
         f"{len(readiness)} readiness level(s)",
+        f"{len(primitives)} loop primitive(s)",
         f"{len(required_fields)} attempt ledger field(s)",
     ]
     return dimension("loop_engineering", score, findings, evidence)
@@ -1137,6 +1257,7 @@ def score_mechanical_verification() -> dict:
         "template_rendering",
         "test_baseline",
         "markdown_links",
+        "skill_optimization",
     ):
         if name not in checks:
             findings.append(f"missing mechanical check: {name}")
@@ -1172,6 +1293,7 @@ def score_mechanical_verification() -> dict:
             "role_contracts",
             "governance_configs",
             "template_rendering",
+            "skill_optimization",
         )
         soft_keys = ("broken_local_links",)
         hard_count += sum(int(counts.get(key, 0)) for key in hard_keys)
@@ -1528,6 +1650,64 @@ def score_skill_runtime() -> dict:
         score,
         findings,
         [f"{adapter_count} adapter target(s)", f"{mode_count} mode(s)", f"{len(lanes)} command lane(s)", f"{len(review_lanes)} review lane(s)"],
+    )
+
+
+def score_skill_optimization() -> dict:
+    config = load_json(Path(".agent/skill-optimization.json"))
+    findings: list[str] = []
+    if config.get("schema") != "agent-skill-optimization-v1":
+        findings.append(".agent/skill-optimization.json schema must be agent-skill-optimization-v1")
+    modes = set(config.get("modes", []))
+    for mode in ("manual-only", "auto-candidate", "auto-apply-staged", "auto-promote"):
+        if mode not in modes:
+            findings.append(f"skill optimization mode missing: {mode}")
+    triggers = config.get("triggers", {})
+    trigger_count = len(triggers) if isinstance(triggers, dict) else 0
+    for trigger in ("manual", "failure-threshold", "release-gate", "scheduled-sleep"):
+        if not isinstance(triggers, dict) or trigger not in triggers:
+            findings.append(f"skill optimization trigger missing: {trigger}")
+    default_policy = config.get("default_skill_policy", {})
+    if not isinstance(default_policy, dict) or default_policy.get("mode") not in modes:
+        findings.append("default skill optimization policy must use an allowed mode")
+    release = config.get("release_preflight", {})
+    if not isinstance(release, dict):
+        findings.append("release preflight policy must be an object")
+    else:
+        for key in ("required", "release_check_validates_existing_only", "fail_closed"):
+            if release.get(key) is not True:
+                findings.append(f"release preflight policy must enable {key}")
+        artifacts = set(release.get("artifact_names", []))
+        for artifact in ("signal-scan.md", "candidate-summary.md", "gate-report.md", "rejected-edits.jsonl", "release-decision.md", "rollback-plan.md"):
+            if artifact not in artifacts:
+                findings.append(f"release preflight artifact missing: {artifact}")
+    scheduled = config.get("scheduled_sleep", {})
+    if not isinstance(scheduled, dict) or scheduled.get("primitive") != "scheduled_routine":
+        findings.append("scheduled sleep must be governed as scheduled_routine")
+    else:
+        for key in ("disable_or_expiry_policy", "resource_boundary", "cost_boundary", "evidence_path", "dry_run_default", "human_interrupt_points", "fail_closed"):
+            if key not in scheduled:
+                findings.append(f"scheduled sleep missing {key}")
+    promotion = config.get("promotion", {})
+    if promotion.get("auto_promote_boundary") != "local production skill files only":
+        findings.append("auto-promote boundary must be local production skill files only")
+    forbidden = set(promotion.get("forbidden_auto_promote_actions", []))
+    for action in ("publish package", "push remote", "sign release", "bypass release-check"):
+        if action not in forbidden:
+            findings.append(f"auto-promote forbidden action missing: {action}")
+    roles = config.get("role_boundaries", {})
+    if not isinstance(roles, dict) or roles.get("finder_cannot_fix") is not True:
+        findings.append("role boundaries must enforce finder_cannot_fix")
+    if not Path("scripts/agent_skill_opt.py").exists():
+        findings.append("missing scripts/agent_skill_opt.py")
+    if not Path("docs/SKILL_OPTIMIZATION.md").exists():
+        findings.append("missing docs/SKILL_OPTIMIZATION.md")
+    score = 100 - min(90, len(findings) * 10)
+    return dimension(
+        "skill_optimization",
+        score,
+        findings,
+        [f"{len(modes)} mode(s)", f"{trigger_count} trigger(s)", f"{len(config.get('skills', {})) if isinstance(config.get('skills'), dict) else 0} skill override(s)"],
     )
 
 
@@ -2036,6 +2216,7 @@ def collect_scores(extra_runlog_events: int = 0) -> dict:
         "resource_catalog": score_resource_catalog,
         "agent_runtime_architecture": score_agent_runtime_architecture,
         "skill_runtime": score_skill_runtime,
+        "skill_optimization": score_skill_optimization,
         "harness_evolution": score_harness_evolution,
         "mcp_policy": score_mcp_policy,
         "governance_gc": score_governance_gc,

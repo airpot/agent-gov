@@ -194,6 +194,100 @@ npx @airpot/agent-gov@latest readiness /path/to/repo
 
 安装项目级 skill 后，重启或 reload Codex，让新的 skill 被发现。
 
+## 编程智能体启动提示词
+
+下面的提示词适合直接复制到新项目或已有项目的 Codex / Claude 编程窗口中。它们的作用是让编程智能体先引入 `agent-gov`，完成需求访谈、蓝图、架构/runtime 决策、spec、task-board 和 review-fix 门禁，再进入实现。
+
+### 空白项目从 0 启动
+
+```text
+请先不要直接开始写业务代码。这个项目是空白项目，需要引入 agent-gov 作为项目治理层。
+
+agent-gov 仓库地址：
+https://github.com/airpot/agent-gov.git
+
+请使用 agent-gov skill，并默认按 full profile 初始化项目治理。
+
+启动要求：
+1. 先检查当前仓库状态、技术栈、目录结构、已有 AGENTS.md / .agent / openspec / scripts 等文件。
+2. 这是空白项目，请默认使用 agent-gov full profile，建立完整治理层。
+3. 先和我做第一轮需求访谈：项目目标、核心用户、主要功能边界、非目标、技术栈、部署形态、是否是 agent / MCP server / hybrid / library。
+4. 访谈结束后，先落一个全局项目蓝图，包括产品目标、技术架构、技术栈版本约束、运行时/agent 框架选择、目录布局、数据/状态边界、验证策略。
+5. 技术方案讨论时必须问清版本：语言/runtime、包管理器、框架/库、数据库/服务、部署目标、agent runtime / MCP SDK。可以记录精确版本、支持范围、LTS 线、托管服务版本或 defer-to-lockfile 策略；未知项要进入 open version decisions。
+6. 再基于蓝图建立 embedded spec / task-board / review-fix loop，不要跳过需求分析、任务分拆、review-fix-review。
+7. 如果项目涉及智能体或 LLM 编排，默认优先选择成熟 agent runtime/framework；只有在蓝图中记录人工例外、原因、风险和验证证据后，才允许手写直接 LLM orchestration。
+8. 初始化后运行可用的 doctor / check / readiness 命令，确认治理层可用，再进入具体开发。
+9. 所有长期状态都写入仓库内的 .agent / docs / openspec，不要依赖当前聊天记录。
+```
+
+### 已有项目纳入治理
+
+```text
+请先不要直接改业务代码。这个已有项目需要纳入 agent-gov 治理。
+
+agent-gov 仓库地址：
+https://github.com/airpot/agent-gov.git
+
+请使用 agent-gov skill，先按 existing project 的方式审查仓库，不要覆盖已有文件。
+
+启动要求：
+1. 先检查 pwd、git status --short、AGENTS.md、CLAUDE.md、.agent、openspec、Makefile、scripts、docs 和当前技术栈。
+2. 先 dry-run 初始化，默认按 standard profile；如果项目需要多 agent 协作、runtime 框架治理、native adapter、security/tooling，再建议升级到 full profile。
+3. 把 dry-run 结果分成 would create、unchanged、preserved append-only、conflicts，并说明哪些文件需要人工合并。
+4. 不要用 --force 覆盖已有文件，除非我明确同意。
+5. 初始化前先做需求和架构 intake：项目目标、当前模块边界、真实验证命令、部署形态、风险区、是否涉及 agent / MCP / hybrid / library。
+6. 技术栈 intake 必须读取或询问版本证据：lockfile、manifest、.tool-versions、Dockerfile、CI、部署配置、数据库/服务版本、框架版本、agent runtime / MCP SDK 版本。冲突或缺失项要进入 open version decisions，不要用技术栈名称代替版本约束。
+7. 初始化后补齐 PROJECT_BLUEPRINT、DEV_MAP、harness、task-board、review-fix loop 和 readiness gates。
+8. 后续所有非 tiny 任务都先走 refined goal、需求访谈、任务分拆、spec、review-fix-review 和验证证据。
+```
+
+### 智能体 / LLM 项目启动
+
+```text
+请使用 agent-gov skill 管理这个智能体 / LLM 项目的启动。
+
+agent-gov 仓库地址：
+https://github.com/airpot/agent-gov.git
+
+启动要求：
+1. 先完成需求访谈，不要直接写 LLM 调用代码。
+2. 在 PROJECT_BLUEPRINT 中明确项目目标是 agent、MCP server、hybrid 还是 library。
+3. 在蓝图阶段确定 agent runtime/framework：默认 framework-first，优先考虑成熟 runtime；只有记录 manual_llm_exception 后才允许手写直接 LLM orchestration。
+4. 明确 agent runtime、MCP SDK、模型 provider/client、框架/库、Python/Node 等 runtime 的版本约束或 defer-to-lockfile 策略；未知版本要记录 owner、问题和实施影响。
+5. 明确 model profile、工具/MCP 边界、状态存储、记忆策略、权限边界、资源凭据引用方式和验证命令。
+6. 建立 runtime readiness gate：agent_runtime.py doctor、agent_runtime.py readiness、agent_check.py --strict 或 agent_validate.py readiness --require-configured 必须能作为实施前门禁。
+7. 再进入 OpenSpec 级别的功能拆分和实现。
+```
+
+### 只先安装项目级 skill
+
+```text
+请先只把 agent-gov 安装为这个仓库的项目级 skill，不初始化治理文件。
+
+agent-gov 仓库地址：
+https://github.com/airpot/agent-gov.git
+
+要求：
+1. 使用 project-local .codex/skills/agent-gov，不要安装到全局目录。
+2. 安装后检查 skill 是否可发现，说明需要重启或 reload Codex / Claude。
+3. 不要创建 .agent、openspec、docs 或其他治理文件，除非我后续明确要求初始化。
+4. 安装完成后给出下一步初始化建议和可执行命令。
+```
+
+### 已治理项目的新会话续接
+
+```text
+这是一个已经接入 agent-gov 的项目。请先恢复治理上下文，不要依赖当前聊天记录直接继续写代码。
+
+要求：
+1. 如果 .agent/sessions/active.md 存在，先运行 python3 .agent/tools/agent_session.py bootstrap 并读取输出。
+2. 运行 python3 .agent/tools/agent_session.py doctor，并处理 error；warning 记录到当前 session。
+3. 检查 git status --short、scripts/agent_spec.py list --json、task-board、docs/index.md、DEV_MAP 和相关 feature docs。
+4. 找到当前任务的 refined goal、spec、stage、review gate 和验证证据。
+5. 对非 tiny 工作继续执行需求/设计/任务分拆/实现/验证/review-fix-review，不要跳过完成门禁。
+6. 交付前运行项目配置的 doctor/check/validate/readiness 命令，并 checkpoint 当前 session。
+```
+
 ## 纳入已有项目
 
 已有项目可以直接纳入 `agent-gov`，推荐按“先观察、再初始化、再校准”的顺序执行。

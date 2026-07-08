@@ -40,6 +40,14 @@ This document is the global product and architecture blueprint for this reposito
 - Runtime doctor: `python3 scripts/agent_runtime.py doctor`
 - Runtime readiness: `python3 scripts/agent_runtime.py readiness`
 
+## Technology Version Decisions
+
+- Current status: draft after initialization.
+- Version authority: `.agent/blueprint.json#/technology_version_decisions`
+- Required coverage: languages/runtimes, package managers, frameworks/libraries, datastores/services, deployment targets, agent runtime/MCP SDKs.
+- Accepted forms: exact versions, supported ranges, LTS lines, distro or managed-service versions, and accepted defer-to-lockfile policies.
+- Open version decisions must record owner, question, and implementation impact before design proceeds.
+
 ## Agent Runtime And Framework Decision
 
 - Current status: draft after initialization.

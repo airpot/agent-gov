@@ -105,9 +105,10 @@ def check_baselines(config: dict) -> list[dict]:
         path = item.get("path", "")
         if path and not Path(path).exists():
             results.append(finding("missing_baseline", "warning", "baseline snapshot listed but file is missing", path))
-        age = days_since(item.get("created_at", ""))
+        age_source = item.get("last_reviewed_at") or item.get("reviewed_at") or item.get("created_at", "")
+        age = days_since(age_source)
         if age is not None and age > warn_days:
-            results.append(finding("stale_baseline", "warning", f"baseline snapshot is {age} days old", path))
+            results.append(finding("stale_baseline", "warning", f"baseline snapshot review is {age} days old", path))
     return results
 
 
@@ -126,6 +127,7 @@ def check_config_pointers() -> list[dict]:
             ".agent/harness-evolution.json",
             ".agent/resources.json",
             ".agent/skill-runtime.json",
+            ".agent/skill-optimization.json",
             ".agent/mcp-policy.json",
             ".agent/governance-gc.json",
         }
@@ -151,6 +153,34 @@ def check_config_pointers() -> list[dict]:
     return results
 
 
+def check_component_expiry(config: dict) -> list[dict]:
+    results: list[dict] = []
+    section = config.get("component_expiry", {})
+    policy = section.get("policy", {})
+    components = section.get("components", [])
+    if not isinstance(components, list) or not components:
+        results.append(finding("component_expiry", "warning", "no governed components recorded", ".agent/governance-gc.json"))
+        return results
+    warn_days = int(config.get("policy", {}).get("component_review_warn_after_days", 90))
+    for item in components:
+        component_id = item.get("id", "<missing-id>")
+        target = f".agent/governance-gc.json#{component_id}"
+        if policy.get("owner_required", True) and not item.get("owner"):
+            results.append(finding("component_expiry", "error", f"component {component_id} missing owner", target))
+        if policy.get("purpose_required", True) and not item.get("purpose"):
+            results.append(finding("component_expiry", "error", f"component {component_id} missing purpose", target))
+        if policy.get("load_bearing_requires_validation", True) and item.get("load_bearing") is True and not item.get("validation"):
+            results.append(finding("component_expiry", "error", f"load-bearing component {component_id} missing validation", target))
+        if policy.get("expiry_or_review_cadence_required", True) and not (item.get("expires_at") or item.get("review_cadence")):
+            results.append(finding("component_expiry", "error", f"component {component_id} missing expiry or review cadence", target))
+        if policy.get("renewal_or_removal_path_required", True) and not (item.get("renewal_path") and item.get("removal_path")):
+            results.append(finding("component_expiry", "error", f"component {component_id} missing renewal or removal path", target))
+        age = days_since(item.get("last_reviewed", ""))
+        if age is not None and age > warn_days:
+            results.append(finding("component_expiry", "warning", f"component {component_id} last reviewed {age} days ago", target))
+    return results
+
+
 def collect_report() -> dict:
     config = load_json(CONFIG_PATH)
     findings: list[dict] = []
@@ -162,6 +192,8 @@ def collect_report() -> dict:
         findings.extend(check_tasks(config))
     if checks.get("baseline_age", True):
         findings.extend(check_baselines(config))
+    if checks.get("component_expiry", False):
+        findings.extend(check_component_expiry(config))
     error_count = sum(1 for item in findings if item["severity"] == "error")
     warning_count = sum(1 for item in findings if item["severity"] == "warning")
     return {

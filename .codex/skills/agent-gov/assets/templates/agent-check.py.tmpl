@@ -39,6 +39,7 @@ BASE_REQUIRED = [
     ".agent/project-skills.json",
     ".agent/blueprint.json",
     ".agent/skill-runtime.json",
+    ".agent/skill-optimization.json",
     ".agent/runtime-policy.json",
     ".agent/model-profiles.json",
     ".agent/agent-runtime.json",
@@ -116,6 +117,7 @@ BASE_REQUIRED = [
     "scripts/agent_capabilities.py",
     "scripts/agent_skill_hygiene.py",
     "scripts/agent_project_skills.py",
+    "scripts/agent_skill_opt.py",
     "scripts/agent_runtime.py",
     "scripts/agent_runlog.py",
     "scripts/agent_tooling.py",
@@ -140,6 +142,7 @@ BASE_REQUIRED = [
     "docs/LOOP_ENGINEERING.md",
     "docs/AGENT_RUNTIME_ARCHITECTURE.md",
     "docs/SKILL_RUNTIME.md",
+    "docs/SKILL_OPTIMIZATION.md",
     "docs/features/INDEX.md",
     "docs/features/.gitkeep",
     "docs/tech-debt.md",
@@ -189,6 +192,7 @@ LEGACY_CONFIG_PATH_KEYS = {
     "skill_hygiene",
     "project_skills",
     "skill_runtime",
+    "skill_optimization",
     "runtime_policy",
     "model_profiles",
     "agent_runtime",
@@ -480,6 +484,59 @@ def validate_skill_runtime(root: Path, path: Path) -> list[str]:
     return errors
 
 
+def validate_skill_optimization(root: Path, path: Path) -> list[str]:
+    errors: list[str] = []
+    config = load_json(path, str(path.relative_to(root) if path.is_absolute() else path))
+    if config.get("schema") != "agent-skill-optimization-v1":
+        return [".agent/skill-optimization.json schema must be agent-skill-optimization-v1"]
+    modes = set(config.get("modes", []))
+    for mode in ("manual-only", "auto-candidate", "auto-apply-staged", "auto-promote"):
+        if mode not in modes:
+            errors.append(f".agent/skill-optimization.json modes missing {mode}")
+    triggers = config.get("triggers", {})
+    if not isinstance(triggers, dict):
+        errors.append(".agent/skill-optimization.json triggers must be an object")
+    else:
+        for trigger in ("manual", "failure-threshold", "release-gate", "scheduled-sleep"):
+            if trigger not in triggers:
+                errors.append(f".agent/skill-optimization.json triggers missing {trigger}")
+    default_policy = config.get("default_skill_policy", {})
+    if not isinstance(default_policy, dict):
+        errors.append(".agent/skill-optimization.json default_skill_policy must be an object")
+    elif default_policy.get("mode") not in modes:
+        errors.append(".agent/skill-optimization.json default_skill_policy.mode must be an allowed mode")
+    release = config.get("release_preflight", {})
+    if not isinstance(release, dict):
+        errors.append(".agent/skill-optimization.json release_preflight must be an object")
+    else:
+        if release.get("required") is not True:
+            errors.append(".agent/skill-optimization.json release_preflight.required must be true")
+        if release.get("release_check_validates_existing_only") is not True:
+            errors.append(".agent/skill-optimization.json release_check_validates_existing_only must be true")
+        if release.get("fail_closed") is not True:
+            errors.append(".agent/skill-optimization.json release_preflight.fail_closed must be true")
+        artifacts = set(release.get("artifact_names", []))
+        for artifact in ("signal-scan.md", "candidate-summary.md", "gate-report.md", "rejected-edits.jsonl", "release-decision.md", "rollback-plan.md"):
+            if artifact not in artifacts:
+                errors.append(f".agent/skill-optimization.json release_preflight missing artifact {artifact}")
+    scheduled = config.get("scheduled_sleep", {})
+    if not isinstance(scheduled, dict):
+        errors.append(".agent/skill-optimization.json scheduled_sleep must be an object")
+    else:
+        if scheduled.get("primitive") != "scheduled_routine":
+            errors.append(".agent/skill-optimization.json scheduled_sleep.primitive must be scheduled_routine")
+        for key in ("cadence_or_event_source", "disable_or_expiry_policy", "owner", "run_location", "permission_mode", "resource_boundary", "cost_boundary", "evidence_path", "dry_run_default", "human_interrupt_points", "fail_closed"):
+            if key not in scheduled:
+                errors.append(f".agent/skill-optimization.json scheduled_sleep missing {key}")
+    roles = config.get("role_boundaries", {})
+    if not isinstance(roles, dict) or roles.get("finder_cannot_fix") is not True:
+        errors.append(".agent/skill-optimization.json role_boundaries must enforce finder_cannot_fix")
+    for name in ("scripts/agent_skill_opt.py", "docs/SKILL_OPTIMIZATION.md"):
+        if not (root / name).exists():
+            errors.append(f"missing {name}")
+    return errors
+
+
 def check_session_offload(root: Path) -> list[str]:
     errors: list[str] = []
     index_path = root / ".agent/sessions/index.json"
@@ -508,6 +565,10 @@ def check_session_offload(root: Path) -> list[str]:
     bootstrap_text = (root / ".agent/sessions/bootstrap.md").read_text(encoding="utf-8", errors="ignore") if (root / ".agent/sessions/bootstrap.md").exists() else ""
     if "Truth-First Grounding" not in bootstrap_text or "Offload Index" not in bootstrap_text:
         errors.append(".agent/sessions/bootstrap.md must include grounding and offload sections")
+    forbidden_bootstrap_sections = ("## Handoff Summary", "## Changed Files", "## Validation")
+    for section in forbidden_bootstrap_sections:
+        if section in bootstrap_text:
+            errors.append(f".agent/sessions/bootstrap.md must not inline historical section: {section}")
     runlog_ids = {str(item.get("id")) for item in load_jsonl(root / ".agent/runlog.jsonl", ".agent/runlog.jsonl") if item.get("id")} if (root / ".agent/runlog.jsonl").exists() else set()
     event_ids = {str(item.get("id")) for item in load_jsonl(root / ".agent/sessions/events.jsonl", ".agent/sessions/events.jsonl") if item.get("id")} if (root / ".agent/sessions/events.jsonl").exists() else set()
     for offload_file in (root / ".agent/sessions").glob("*/offload.jsonl"):
@@ -805,6 +866,7 @@ def validate_loop_engineering(loop_config: dict, workflow: dict, harness_evoluti
     policy = loop_config.get("policy", {})
     for key in (
         "loop_contract_required_for_non_tiny_work",
+        "primitive_selection_required_for_non_tiny_loops",
         "readiness_level_required_for_non_tiny_loops",
         "unattended_requires_attempt_ledger",
         "bounded_iterations_required",
@@ -829,6 +891,12 @@ def validate_loop_engineering(loop_config: dict, workflow: dict, harness_evoluti
         "failed_runs_exit_nonzero",
         "failed_runs_record_evidence_paths",
         "failed_optimization_cannot_be_improvement",
+        "goal_based_requires_verifiable_convergence",
+        "external_polling_must_not_be_goal_only",
+        "scheduled_routine_requires_disable_policy",
+        "scripted_workflow_requires_pilot_and_cross_check",
+        "usage_evidence_required_for_expensive_or_autonomous_loops",
+        "host_native_features_are_optional_mappings",
         "dependency_free_control_plane",
     ):
         if policy.get(key) is not True:
@@ -842,6 +910,123 @@ def validate_loop_engineering(loop_config: dict, workflow: dict, harness_evoluti
                 errors.append("error: .agent/loop-engineering.json sources must record source_status")
             if source.get("dependency_policy") != "source_only":
                 errors.append("error: .agent/loop-engineering.json sources must be source_only")
+    source_status_by_url = {
+        str(source.get("url", "")): str(source.get("source_status", ""))
+        for source in loop_config.get("sources", [])
+        if isinstance(source, dict)
+    }
+    for url in (
+        "https://claude.com/blog/getting-started-with-loops",
+        "https://code.claude.com/docs/en/goal",
+        "https://code.claude.com/docs/en/scheduled-tasks",
+        "https://code.claude.com/docs/en/workflows",
+    ):
+        if source_status_by_url.get(url) != "verified":
+            errors.append(f"error: .agent/loop-engineering.json source must be verified: {url}")
+    x_url = "https://x.com/ClaudeDevs/article/2074208949205881033"
+    if source_status_by_url.get(x_url) != "blocked":
+        errors.append("error: .agent/loop-engineering.json must record inaccessible X article as blocked")
+    selection = loop_config.get("primitive_selection", {})
+    if not isinstance(selection, dict):
+        errors.append("error: .agent/loop-engineering.json missing primitive_selection")
+        selection = {}
+    if selection.get("required_for_non_tiny_work") is not True:
+        errors.append("error: primitive_selection must be required for non-tiny work")
+    required_selection_fields = {
+        "primitive",
+        "trigger_source",
+        "stop_condition",
+        "task_shape",
+        "evidence_quality",
+        "durability_requirement",
+        "misuse_check",
+    }
+    if not required_selection_fields.issubset(set(selection.get("selection_fields", []))):
+        errors.append("error: primitive_selection selection_fields missing required fields")
+    primitives = selection.get("primitives", {})
+    required_primitives = {"turn_based", "goal_based", "time_based", "scheduled_routine", "scripted_workflow"}
+    for primitive in required_primitives:
+        spec = primitives.get(primitive)
+        if not isinstance(spec, dict):
+            errors.append(f"error: primitive_selection missing primitive: {primitive}")
+            continue
+        for key in ("trigger_source", "stop_condition", "task_shape", "required_evidence", "misuse_signals"):
+            if not spec.get(key):
+                errors.append(f"error: primitive {primitive} missing {key}")
+    goal_evidence = set(primitives.get("goal_based", {}).get("required_evidence", []))
+    for field in ("measurable_done_state", "proof_method", "protected_constraints", "turn_or_time_cap", "evidence_path", "evaluator_boundary", "stop_reason"):
+        if field not in goal_evidence:
+            errors.append(f"error: goal_based primitive missing evidence field: {field}")
+    routine_evidence = set(primitives.get("scheduled_routine", {}).get("required_evidence", []))
+    if "disable_or_expiry_policy" not in routine_evidence:
+        errors.append("error: scheduled_routine primitive must require disable_or_expiry_policy")
+    scripted_evidence = set(primitives.get("scripted_workflow", {}).get("required_evidence", []))
+    for field in ("pilot_scope", "cross_check_strategy", "cost_or_usage_evidence"):
+        if field not in scripted_evidence:
+            errors.append(f"error: scripted_workflow primitive missing evidence field: {field}")
+    external_polling = selection.get("external_polling_policy", {})
+    if set(external_polling.get("allowed_primitives", [])) != {"time_based", "scheduled_routine"}:
+        errors.append("error: external polling must be limited to time_based or scheduled_routine")
+    if external_polling.get("forbidden_as_goal_only") is not True:
+        errors.append("error: external polling must not be goal-only")
+    if external_polling.get("requires_observed_signal_and_check_frequency") is not True:
+        errors.append("error: external polling must record observed signal and check frequency")
+    host_mapping = selection.get("host_feature_mapping", {})
+    if host_mapping.get("dependency_required") is not False:
+        errors.append("error: host-native loop features must be optional mappings")
+    goal_contract = loop_config.get("goal_contract", {})
+    if not isinstance(goal_contract, dict):
+        errors.append("error: .agent/loop-engineering.json missing goal_contract")
+        goal_contract = {}
+    for field in ("raw_goal", "refined_goal", "measurable_done_state", "proof_method", "protected_constraints", "turn_or_time_cap", "evidence_path", "owner_role", "evaluator_boundary", "stop_reason"):
+        if field not in set(goal_contract.get("goal_based_required_fields", [])):
+            errors.append(f"error: loop goal_contract missing goal_based field: {field}")
+    for field in ("evaluator_type", "can_read_files", "can_run_tools", "evidence_required_for_judgment"):
+        if field not in set(goal_contract.get("evaluator_boundary_fields", [])):
+            errors.append(f"error: loop goal_contract missing evaluator boundary field: {field}")
+    if goal_contract.get("self_approval_forbidden") is not True:
+        errors.append("error: loop goal_contract must forbid self-approval")
+    if goal_contract.get("cap_exhaustion_is_not_success") is not True:
+        errors.append("error: loop goal_contract must reject cap exhaustion as success")
+    routine = loop_config.get("scheduled_routine", {})
+    if not isinstance(routine, dict):
+        errors.append("error: .agent/loop-engineering.json missing scheduled_routine")
+        routine = {}
+    for field in ("routine_id_or_name", "trigger_type", "cadence_or_event_source", "run_location", "permission_mode", "target_resources", "credential_boundary", "per_run_stop_condition", "disable_or_expiry_policy", "owner", "evidence_path"):
+        if field not in set(routine.get("required_fields", [])):
+            errors.append(f"error: scheduled_routine missing required field: {field}")
+    if routine.get("session_local_interval_polling_remains") != "time_based":
+        errors.append("error: session-local interval polling must remain time_based")
+    if routine.get("missing_approval_behavior") != "fail_closed":
+        errors.append("error: scheduled_routine missing approvals must fail closed")
+    workflow_meta = loop_config.get("scripted_workflow", {})
+    if not isinstance(workflow_meta, dict):
+        errors.append("error: .agent/loop-engineering.json missing scripted_workflow")
+        workflow_meta = {}
+    for field in ("script_artifact_path_or_source", "phase_plan", "worker_role_boundaries", "concurrency_or_agent_cap", "pilot_scope", "cross_check_or_adversarial_review_strategy", "state_or_resume_boundary", "save_or_reuse_policy", "cost_or_usage_evidence", "intermediate_result_storage"):
+        if field not in set(workflow_meta.get("required_fields", [])):
+            errors.append(f"error: scripted_workflow missing required field: {field}")
+    if workflow_meta.get("broad_execution_requires_pilot") is not True:
+        errors.append("error: scripted_workflow must require a pilot before broad execution")
+    if workflow_meta.get("pilot_exception_requires_review") is not True:
+        errors.append("error: scripted_workflow pilot exceptions must require review")
+    if workflow_meta.get("host_runtime_required") is not False:
+        errors.append("error: scripted_workflow must not require a host-specific runtime")
+    usage = loop_config.get("usage_evidence", {})
+    if not isinstance(usage, dict):
+        errors.append("error: .agent/loop-engineering.json missing usage_evidence")
+        usage = {}
+    if not {"assisted", "unattended", "scheduled_routine", "scripted_workflow"}.issubset(set(usage.get("required_for", []))):
+        errors.append("error: usage_evidence must apply to assisted, unattended, scheduled_routine, and scripted_workflow")
+    for field in ("turn_count", "elapsed_time", "token_or_cost_summary", "agent_or_worker_count", "validation_result", "stop_reason", "human_interrupt_or_approval_evidence"):
+        if field not in set(usage.get("fields", [])):
+            errors.append(f"error: usage_evidence missing field: {field}")
+    if usage.get("unavailable_metrics_policy") != "record_unavailable_do_not_guess":
+        errors.append("error: usage_evidence unavailable metrics must be recorded as unavailable")
+    if "cap_exhausted" not in set(usage.get("valid_stop_reasons", [])):
+        errors.append("error: usage_evidence valid_stop_reasons must include cap_exhausted")
+    if usage.get("cap_exhaustion_success") is not False:
+        errors.append("error: cap exhaustion alone must not count as success")
     readiness = loop_config.get("readiness_levels", {})
     for level in ("manual", "report_only", "assisted", "unattended"):
         spec = readiness.get(level)
@@ -940,6 +1125,7 @@ def validate_loop_engineering(loop_config: dict, workflow: dict, harness_evoluti
     gates = workflow.get("gates", {}) if isinstance(workflow, dict) else {}
     loop_gate = gates.get("loop_engineering", {})
     for key in (
+        "primitive_selection_required",
         "loop_contract_required",
         "readiness_level_required",
         "attempt_ledger_required",
@@ -956,6 +1142,12 @@ def validate_loop_engineering(loop_config: dict, workflow: dict, harness_evoluti
         "repeat_failures_promote_to_harness_evolution",
         "human_interrupt_for_high_risk_or_destructive",
         "self_approval_forbidden",
+        "goal_based_requires_verifiable_convergence",
+        "external_polling_must_not_be_goal_only",
+        "scheduled_routine_requires_disable_policy",
+        "scripted_workflow_requires_pilot_and_cross_check",
+        "usage_evidence_required_for_expensive_or_autonomous_loops",
+        "host_native_features_optional_mappings",
         "dependency_free_control_plane",
     ):
         if loop_gate.get(key) is not True:
@@ -1091,6 +1283,27 @@ def main() -> int:
         if not manifest.get("required_paths"):
             print("error: .agent/manifest.json missing required_paths")
             return 1
+        presets = manifest.get("governance_presets", {})
+        policy = presets.get("policy", {})
+        for key in ("source_status_required", "version_or_revision_required", "permission_scope_required", "blocked_sources_cannot_apply", "no_automatic_dependency_install"):
+            if policy.get(key) is not True:
+                print(f"error: .agent/manifest.json governance_presets policy missing {key}")
+                return 1
+        selected = presets.get("selected", [])
+        if not isinstance(selected, list) or not selected:
+            print("error: .agent/manifest.json governance_presets.selected must be non-empty")
+            return 1
+        for item in selected:
+            for key in ("id", "source_kind", "source_status", "version", "owner", "permission_scope", "generated_paths", "validation", "conflict_behavior", "dry_run_supported", "auto_install_dependencies"):
+                if key not in item:
+                    print(f"error: governance preset entry missing {key}")
+                    return 1
+            if item.get("source_status") not in {"verified", "partial", "blocked"}:
+                print("error: governance preset source_status must be verified, partial, or blocked")
+                return 1
+            if item.get("auto_install_dependencies") is not False:
+                print("error: governance preset must not auto-install dependencies")
+                return 1
 
     openspec_enabled = bool(config.get("openspec_enabled", config.get("spec_source", "openspec") == "openspec"))
     claude_enabled = bool(config.get("claude_enabled", True))
@@ -1227,6 +1440,7 @@ def main() -> int:
             "review_sequence",
             "stage_review_loop",
             "review_fix_gate",
+            "skill_optimization_preflight",
             "human_review_evidence",
             "completion_verification",
         ):
@@ -1300,6 +1514,16 @@ def main() -> int:
             return 1
         if review_fix.get("fix_requires_next_review_round") is not True:
             print("error: .agent/workflow.json review_fix_gate must require a next review after fixes")
+            return 1
+        skill_preflight = gates.get("skill_optimization_preflight", {})
+        if skill_preflight.get("policy") != ".agent/skill-optimization.json":
+            print("error: .agent/workflow.json skill_optimization_preflight must point to .agent/skill-optimization.json")
+            return 1
+        if skill_preflight.get("release_check_validates_existing_only") is not True:
+            print("error: .agent/workflow.json skill_optimization_preflight must validate existing evidence only")
+            return 1
+        if skill_preflight.get("missing_or_stale_preflight_fails_closed") is not True:
+            print("error: .agent/workflow.json skill_optimization_preflight must fail closed")
             return 1
         completion = gates.get("completion_verification", {})
         if set(completion.get("review_fix_gate_required_for_profiles", [])) != {"tiny", "bugfix", "standard", "full"}:
@@ -1681,6 +1905,12 @@ def main() -> int:
             print(f"error: {error}")
             return 1
 
+    skill_optimization_path = root / ".agent/skill-optimization.json"
+    if skill_optimization_path.exists():
+        for error in validate_skill_optimization(root, skill_optimization_path):
+            print(f"error: {error}")
+            return 1
+
     memory_path = root / ".agent/memory.json"
     if memory_path.exists():
         memory = load_json(memory_path, ".agent/memory.json")
@@ -1755,6 +1985,15 @@ def main() -> int:
             if class_name not in capability_classes:
                 print(f"error: .agent/capabilities.json missing capability class: {class_name}")
                 return 1
+        cap_policy = capability_config.get("policy", {})
+        for key in ("provider_status_required", "required_provider_missing_blocks_readiness", "optional_provider_requires_fallback"):
+            if cap_policy.get(key) is not True:
+                print(f"error: .agent/capabilities.json policy missing {key}")
+                return 1
+        status_values = set(capability_config.get("provider_status_values", []))
+        if not {"present", "missing", "unknown", "degraded"}.issubset(status_values):
+            print("error: .agent/capabilities.json missing provider status values")
+            return 1
         seen: set[str] = set()
         for item in capability_config.get("capabilities", []):
             cap_id = item.get("id")
@@ -1770,6 +2009,15 @@ def main() -> int:
                 return 1
             if item.get("risk") not in capability_config.get("risk_values", ["low", "medium", "high"]):
                 print(f"error: capability {cap_id} has invalid risk")
+                return 1
+            if item.get("status") not in status_values:
+                print(f"error: capability {cap_id} has invalid provider status")
+                return 1
+            if item.get("required") is True and item.get("status") != "present":
+                print(f"error: required capability {cap_id} is not present")
+                return 1
+            if item.get("required") is not True and not str(item.get("fallback", "")).strip():
+                print(f"error: optional capability {cap_id} missing fallback")
                 return 1
         if not seen:
             print("error: .agent/capabilities.json has no capabilities")
@@ -1888,6 +2136,7 @@ def main() -> int:
             "project_skills",
             "project_blueprint",
             "skill_runtime",
+            "skill_optimization",
             "harness_evolution",
             "governance_gc",
             "template_rendering",
@@ -1895,6 +2144,11 @@ def main() -> int:
             "markdown_links",
             "resource_catalog",
             "agent_runtime_architecture",
+            "governance_presets",
+            "capability_providers",
+            "strict_agent_contracts",
+            "regression_criteria",
+            "component_expiry",
         ]
         if (root / ".agent/mcp-policy.json").exists():
             required_mechanical_checks.append("mcp_policy")
@@ -1904,6 +2158,13 @@ def main() -> int:
                 return 1
         if checks.get("role_contracts", {}).get("enforce_finder_cannot_fix") is not True:
             print("error: mechanical role contract check must enforce finder_cannot_fix")
+            return 1
+        session_offload = checks.get("session_offload", {})
+        if session_offload.get("bootstrap_must_not_inline_historical_sections") is not True:
+            print("error: mechanical session_offload check must forbid historical bootstrap inlining")
+            return 1
+        if not checks.get("strict_agent_contracts", {}).get("negative_fixtures"):
+            print("error: mechanical strict_agent_contracts must define negative fixtures")
             return 1
         baseline_policy = mechanical.get("baseline_policy", {})
         if baseline_policy.get("fail_on_new_invalid_json") is not True:
@@ -1919,6 +2180,15 @@ def main() -> int:
         if not baselines.get("snapshot_dir"):
             print("error: .agent/baselines.json missing snapshot_dir")
             return 1
+        criteria = baselines.get("regression_criteria", [])
+        if not isinstance(criteria, list) or not criteria:
+            print("error: .agent/baselines.json must define regression_criteria")
+            return 1
+        for item in criteria:
+            for key in ("id", "baseline_behavior", "expected_behavior", "validation", "protected_invariants", "rejected_regressions"):
+                if key not in item:
+                    print(f"error: regression criteria entry missing {key}")
+                    return 1
 
     evolution_path = root / ".agent/harness-evolution.json"
     if evolution_path.exists():
@@ -1964,10 +2234,20 @@ def main() -> int:
         if gc_config.get("schema") != "agent-governance-gc-v1":
             print("error: .agent/governance-gc.json schema must be agent-governance-gc-v1")
             return 1
-        for key in ("knowledge_owners", "stale_docs", "task_board_stale_active_items", "baseline_age", "config_pointer_consistency", "dev_map_presence", "resource_catalog_schema", "mcp_policy_disabled_or_audited"):
+        for key in ("knowledge_owners", "stale_docs", "task_board_stale_active_items", "baseline_age", "config_pointer_consistency", "dev_map_presence", "resource_catalog_schema", "mcp_policy_disabled_or_audited", "component_expiry"):
             if key not in gc_config.get("checks", {}):
                 print(f"error: .agent/governance-gc.json missing check: {key}")
                 return 1
+        expiry = gc_config.get("component_expiry", {})
+        components = expiry.get("components", [])
+        if not isinstance(components, list) or not components:
+            print("error: .agent/governance-gc.json component_expiry.components must be non-empty")
+            return 1
+        for item in components:
+            for key in ("id", "kind", "owner", "purpose", "load_bearing", "last_reviewed", "review_cadence", "validation", "renewal_path", "removal_path"):
+                if key not in item:
+                    print(f"error: component_expiry entry missing {key}")
+                    return 1
 
     evals_path = root / ".agent/evals.json"
     if evals_path.exists():

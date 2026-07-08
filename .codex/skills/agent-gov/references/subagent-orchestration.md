@@ -16,6 +16,7 @@ Borrow these practices:
 - Explicit worker states for complete, complete with concerns, needs context, and blocked outcomes.
 - Fast cleanup of completed delegated work.
 - Session handoff records that preserve accepted subagent results.
+- Script-held orchestration for large multi-agent work only when it is governed as `scripted_workflow` in `.agent/loop-engineering.json` with a pilot, worker boundaries, concurrency cap, cross-check strategy, resume boundary, and cost or usage evidence.
 
 Do not adopt these as absolute project rules:
 
@@ -80,7 +81,10 @@ Roles are descriptive, not a license to bypass platform limits. Use the role nam
 11. Record accepted worker, verifier, or reviewer snapshots in `.agent/runlog.jsonl` when they materially affect validation, risk, or handoff.
 12. Run post-integration validation locally; do not trust a subagent completion report as final evidence.
 13. For external-source research, require searchers to label each source `verified`, `partial`, or `blocked`, and to separate direct facts from inference.
-14. For complexity audits, use a reviewer or quality reviewer pass that only reports delete/reuse/stdlib/native/dependency findings; route correctness, security, and spec findings to the normal review roles.
+14. Treat role/tool ACLs as contract-testable behavior: reviewers and verifiers may report findings but must not patch their own findings; workers must stay inside declared write boundaries; missing `===SNAPSHOT===` status, unauthorized tool class use, or protected actions without approval evidence are review findings.
+15. For complexity audits, use a reviewer or quality reviewer pass that only reports delete/reuse/stdlib/native/dependency findings; route correctness, security, and spec findings to the normal review roles.
+16. For generated workflow scripts, dynamic workflows, or large multi-agent batches, record the `scripted_workflow` metadata before broad execution: script artifact/source, phase plan, worker boundaries, concurrency cap, pilot scope, cross-check or adversarial review, state/resume boundary, save/reuse policy, intermediate result storage, and cost/usage evidence.
+17. Do not use a pool of subagents as a substitute for a loop contract; the parent coordinator still owns primitive selection, budget, stop reason, usage evidence, and post-integration validation.
 
 ## Snapshot Contract
 
@@ -145,6 +149,7 @@ For reviews, one line per finding is preferred unless security or architecture r
 - For implementation, run `spec_reviewer` and resolve findings before `quality_reviewer`.
 - Enforce finder-cannot-fix: verifier, spec reviewer, quality reviewer, and risk reviewer roles report findings and route fixes back to a coordinator or worker. They do not modify implementation files to resolve their own findings.
 - Keep complexity-only audit snapshots separate from correctness/security review snapshots so line-count or dependency reduction does not mask safety regressions.
+- For scripted workflows or multi-worker batches, confirm pilot result, cross-check evidence, worker count, cost/usage evidence, stop reason, and any human interrupt or approval evidence before accepting the snapshot set.
 - Run relevant harness commands after integrating worker changes.
 - Add a checkpoint that records the accepted snapshots, rejected snapshots, validation, and remaining risks.
 - Add runlog evidence for accepted high-risk snapshots and any skipped post-integration validation.

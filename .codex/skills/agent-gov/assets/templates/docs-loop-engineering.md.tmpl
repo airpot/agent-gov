@@ -1,12 +1,17 @@
 # Loop Engineering
 
-Use this document when non-tiny agent work may repeat: implementation attempts, review-fix-review, debugging, eval optimization, or session recovery.
+Use this document when non-tiny agent work may repeat: implementation attempts, review-fix-review, debugging, eval optimization, session recovery, scheduled routines, or scripted workflows.
 
 The machine-readable policy lives in `.agent/loop-engineering.json`.
 
 ## Rules
 
-- Start each non-tiny loop with a loop contract: loop type, goal, observation signal, iteration budget, stop conditions, owner role, and evidence path.
+- Start each non-tiny loop with a loop contract: primitive, loop type, goal, observation signal, iteration budget, stop conditions, owner role, evaluator boundary when applicable, stop reason, and evidence path.
+- Choose the loop primitive before repeating: `turn_based`, `goal_based`, `time_based`, `scheduled_routine`, or `scripted_workflow`.
+- Use `goal_based` only for verifiable internal convergence. Do not use it to wait on CI, deployment, queues, issue trackers, PR review, monitoring, or third-party systems.
+- Use `time_based` for session-local external polling with a recorded external signal and check cadence.
+- Use `scheduled_routine` only for durable recurring work with routine id/name, trigger/cadence, run location, permission mode, resource and credential boundary, per-run stop condition, disable/expiry policy, owner, and evidence path.
+- Use `scripted_workflow` only when a script or host workflow holds phase state or coordinates many workers; record script artifact/source, phase plan, worker boundaries, concurrency cap, pilot scope, cross-check strategy, state/resume boundary, save/reuse policy, intermediate result storage, and cost or usage evidence.
 - Classify each non-tiny loop before it runs: `manual`, `report_only`, `assisted`, or `unattended`.
 - Use `unattended` only when attempt ledger evidence, failure signatures, quotas, circuit breakers, explicit human interrupt points, state persistence, and non-empty stop conditions are present.
 - Treat the configured loop budget as a guardrail. Budget exhaustion means stop, summarize evidence, and re-plan instead of trying the same action again.
@@ -21,6 +26,22 @@ The machine-readable policy lives in `.agent/loop-engineering.json`.
 - Do not use self-approval, reassuring language, or subjective confidence as release evidence.
 - Prevalidate inputs before expensive profile, benchmark, optimization, migration, or pipeline work.
 - Failed profile, benchmark, optimization, migration, or pipeline runs must exit non-zero, record evidence paths where available, and cannot be counted as improvements.
+
+## Primitive Selection
+
+- `turn_based`: user or reviewer starts the next turn; use for short/manual tasks and open-question handling.
+- `goal_based`: previous turn or host goal mechanism starts the next iteration; stop only when measurable proof passes or a cap forces replan/block/fail/exception.
+- `time_based`: interval or event check starts the next run; use for external state polling and record the observed signal.
+- `scheduled_routine`: durable schedule or recurring event starts independent runs; protected actions require approval and fail closed when approval is missing.
+- `scripted_workflow`: script/runtime holds plan and intermediate state; broad execution requires pilot evidence, cross-check/adversarial review, worker/concurrency caps, resume boundary, and cost/usage evidence.
+
+Host-native loop features such as `/goal`, `/loop`, `/schedule`, routines, dynamic workflows, background agents, or stop hooks are optional mappings to this repo-local contract. Do not require them for correctness in hosts that lack those features.
+
+## Goal Proof
+
+For `goal_based` loops, record one measurable done state, proof method, protected constraints, turn or time cap, evidence path, owner role, evaluator boundary, and stop reason. If a model, reviewer, script, command, or host feature evaluates the goal, record whether it can read files, run tools, and what evidence must be surfaced for judgment.
+
+Cap exhaustion, missing approval, or subjective model confidence is not successful completion.
 
 ## Readiness Levels
 
@@ -48,6 +69,8 @@ Use the smallest durable artifact that proves the iteration happened:
 - `.agent/evals/latest.md` and `.agent/baselines/*.json` for score or regression loops.
 
 Prefer existing runlog, session, and feature artifacts for attempt ledgers. Add `.agent/loop-runs.jsonl` only when review shows those stores cannot represent iterations unambiguously.
+
+For assisted, unattended, scheduled routine, or scripted workflow loops, also record available turn count, elapsed time, token/cost summary, agent/worker count, validation result, stop reason, and any human interrupt or approval evidence. If host metrics are unavailable, write `unavailable`; do not guess.
 
 ## State Transitions
 

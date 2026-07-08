@@ -27,12 +27,22 @@ After requirements interview and before non-trivial implementation:
 
 1. Confirm product purpose, users/operators, non-goals, and core workflows.
 2. Confirm technical architecture, module/directory boundary, and data/state ownership.
-3. Confirm external resources, MCP boundary, security/risk boundary, and validation strategy.
-4. Confirm agent runtime/framework strategy in `.agent/blueprint.json#/runtime_framework_decision`.
-5. Run `python3 scripts/agent_blueprint.py doctor`; before implementation, run `python3 scripts/agent_blueprint.py readiness`.
-6. Create or continue the feature-level OpenSpec change and fill `.agent-spec.json#/blueprint_impact`.
+3. Confirm technology version constraints for languages/runtimes, package managers, frameworks/libraries, datastores/services, deployment targets, and agent runtime/MCP SDKs; record exact versions, supported ranges, LTS lines, managed-service versions, or accepted defer-to-lockfile policies.
+4. Confirm external resources, MCP boundary, security/risk boundary, and validation strategy.
+5. Confirm agent runtime/framework strategy in `.agent/blueprint.json#/runtime_framework_decision`.
+6. Run `python3 scripts/agent_blueprint.py doctor`; before implementation, run `python3 scripts/agent_blueprint.py readiness`.
+7. Create or continue the feature-level OpenSpec change and fill `.agent-spec.json#/blueprint_impact`.
 
 Record unresolved choices in the blueprint `open_decisions` list instead of implementing around them silently.
+Record unresolved version choices in `.agent/blueprint.json#/technology_version_decisions.open_version_decisions`; these are valid draft evidence but do not satisfy implementation readiness until a concrete version/range or accepted lockfile policy is recorded.
+
+## Technology Version Rules
+
+- Technology stack names without version constraints are incomplete intake for non-tiny design.
+- Acceptable constraints include exact versions, semantic ranges, LTS lines, distro package versions, managed-service versions, and explicit defer-to-application-lockfile policies.
+- Existing projects should use evidence from lockfiles, manifests, `.tool-versions`, Dockerfiles, CI config, package-manager metadata, and deployment config before asking the user to restate known versions.
+- Agent runtime package plans must record package version constraints or an accepted application lockfile policy before readiness.
+- Do not auto-install, silently pin, or auto-upgrade dependencies from agent-gov. Dependency execution remains application-owned and review-before-execution.
 
 ## Runtime Framework Rules
 
@@ -76,6 +86,7 @@ Review blueprint work before implementation and during release readiness:
 - `docs/PROJECT_BLUEPRINT.md` has all required sections.
 - `.agent/blueprint.json` has unique stable IDs.
 - `.agent/blueprint.json` and required blueprint records are marked `reviewed`.
+- `.agent/blueprint.json#/technology_version_decisions` records concrete version constraints or accepted lockfile policy; open version decisions alone block implementation readiness.
 - Runtime decision agrees with `.agent/agent-runtime.json`.
 - Active OpenSpec changes have valid `blueprint_impact`.
 - Archive blocking reasons are either resolved or explicitly accepted with owner, date, and residual risk.

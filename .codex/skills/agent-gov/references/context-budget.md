@@ -122,6 +122,7 @@ python3 .agent/tools/agent_context.py validate-pair <original> <compressed>
 - Session compact refreshes `.agent/context/latest.md`.
 - Bootstrap includes the latest context digest.
 - Session rollover should prefer `offload-index.md` plus `offload-recall` commands over copying long histories into bootstrap.
+- Session bootstrap must not re-inline historical handoff, changes, validation, grounding, memory, context, archived spec, or old dirty-status bodies. It should provide current recovery state plus evidence handles.
 - Goal contracts should stay compact and current; store the latest decision state, not the full history of every discussion.
 - Knowledge promotion bundles should store source handles, source status, target surface, authority level, review reference, and decision status; keep source bodies and long logs behind referenced artifacts.
 - Review-fix gates check whether governance files exceed budgets or duplicate instructions.

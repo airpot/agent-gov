@@ -1,0 +1,710 @@
+#!/usr/bin/env python3
+"""Govern skill self-optimization runs and release preflight evidence."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+CONFIG_PATH = Path(".agent/skill-optimization.json")
+MANIFEST_PATH = Path("skills.manifest.json")
+REQUIRED_PREFLIGHT_ARTIFACTS = [
+    "signal-scan.md",
+    "candidate-summary.md",
+    "gate-report.md",
+    "rejected-edits.jsonl",
+    "release-decision.md",
+    "rollback-plan.md",
+]
+ALLOWED_MODES = {"manual-only", "auto-candidate", "auto-apply-staged", "auto-promote"}
+ALLOWED_TRIGGERS = {"manual", "failure-threshold", "release-gate", "scheduled-sleep"}
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def today() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%d")
+
+
+def load_json(path: Path, fallback: dict[str, Any] | None = None) -> dict[str, Any]:
+    if not path.exists():
+        if fallback is not None:
+            return fallback
+        raise SystemExit(f"error: missing {path}")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"error: invalid JSON in {path}: {exc}") from exc
+    if not isinstance(data, dict):
+        raise SystemExit(f"error: {path} must contain a JSON object")
+    return data
+
+
+def write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def write_json(path: Path, data: dict[str, Any]) -> None:
+    write_text(path, json.dumps(data, indent=2) + "\n")
+
+
+def safe_skill_name(value: str) -> str:
+    name = value.strip()
+    if not name:
+        raise SystemExit("error: --skill is required")
+    allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+    if any(ch not in allowed for ch in name) or name in {".", ".."}:
+        raise SystemExit(f"error: unsafe skill name: {value!r}")
+    return name
+
+
+def manifest_skill_config(skill: str) -> dict[str, Any]:
+    manifest = load_json(MANIFEST_PATH, {}) if MANIFEST_PATH.exists() else {}
+    skills = manifest.get("skills", {})
+    if isinstance(skills, dict) and isinstance(skills.get(skill), dict):
+        return skills[skill]
+    return {}
+
+
+def skill_source_path(skill: str) -> Path:
+    config = manifest_skill_config(skill)
+    source = config.get("source") if isinstance(config, dict) else ""
+    if isinstance(source, str) and source:
+        return Path(source)
+    fallback = Path(".codex/skills") / skill
+    return fallback if fallback.exists() else Path(skill)
+
+
+def package_version(skill: str) -> str:
+    config = manifest_skill_config(skill)
+    candidates: list[Path] = []
+    publish = config.get("publish") if isinstance(config, dict) else ""
+    if isinstance(publish, str) and publish:
+        candidates.append(Path(publish) / "package.json")
+    candidates.append(Path("package.json"))
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        version = data.get("version")
+        if isinstance(version, str) and version.strip():
+            return version.strip()
+    return today()
+
+
+def iter_tree_files(root: Path) -> list[Path]:
+    if not root.exists():
+        return []
+    if root.is_file():
+        return [root]
+    ignored_dirs = {".git", "__pycache__", "node_modules", ".mypy_cache", ".pytest_cache"}
+    files: list[Path] = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        if any(part in ignored_dirs for part in path.parts):
+            continue
+        if path.suffix in {".pyc", ".pyo"}:
+            continue
+        files.append(path)
+    return sorted(files)
+
+
+def tree_identity(path: Path) -> str:
+    digest = hashlib.sha256()
+    files = iter_tree_files(path)
+    if not files:
+        digest.update(f"missing:{path.as_posix()}".encode("utf-8"))
+        return digest.hexdigest()[:12]
+    base = path if path.is_dir() else path.parent
+    for file_path in files:
+        rel = file_path.relative_to(base).as_posix() if base.exists() else file_path.as_posix()
+        digest.update(rel.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(file_path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()[:12]
+
+
+def resolve_release_id(skill: str) -> str:
+    return f"{skill}-{package_version(skill)}-{tree_identity(skill_source_path(skill))}"
+
+
+def policy_for_skill(config: dict[str, Any], skill: str) -> dict[str, Any]:
+    default_policy = config.get("default_skill_policy", {})
+    if not isinstance(default_policy, dict):
+        default_policy = {}
+    skills = config.get("skills", {})
+    skill_policy = skills.get(skill, {}) if isinstance(skills, dict) else {}
+    if not isinstance(skill_policy, dict):
+        skill_policy = {}
+    merged = dict(default_policy)
+    merged.update(skill_policy)
+    return merged
+
+
+def optimization_root(config: dict[str, Any], skill: str) -> Path:
+    evidence_root = config.get("evidence_root", "skillflows")
+    if not isinstance(evidence_root, str) or not evidence_root:
+        evidence_root = "skillflows"
+    return Path(evidence_root) / safe_skill_name(skill) / "optimization"
+
+
+def preflight_dir(config: dict[str, Any], skill: str, release_id: str) -> Path:
+    return optimization_root(config, skill) / "release-preflight" / release_id
+
+
+def load_jsonl(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
+    rows: list[dict[str, Any]] = []
+    errors: list[str] = []
+    if not path.exists():
+        return rows, errors
+    for index, line in enumerate(path.read_text(encoding="utf-8", errors="ignore").splitlines(), start=1):
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError as exc:
+            errors.append(f"{path}:{index}: {exc}")
+            continue
+        if isinstance(item, dict):
+            rows.append(item)
+        else:
+            errors.append(f"{path}:{index}: row must be an object")
+    return rows, errors
+
+
+def status_is_untriaged(config: dict[str, Any], status: str) -> bool:
+    configured = config.get("signals", {}).get("untriaged_statuses", [])
+    statuses = {str(item).strip().lower() for item in configured if str(item).strip()}
+    if not statuses:
+        statuses = {"new", "open", "untriaged", "needs-triage"}
+    return status.strip().lower() in statuses
+
+
+def object_mentions_skill(item: dict[str, Any], skill: str) -> bool:
+    haystack: list[str] = []
+    for key in ("id", "kind", "summary", "command", "source", "outcome"):
+        value = item.get(key)
+        if value is not None:
+            haystack.append(str(value))
+    for key in ("tags", "artifacts"):
+        value = item.get(key, [])
+        if isinstance(value, list):
+            haystack.extend(str(part) for part in value)
+    return skill.lower() in " ".join(haystack).lower()
+
+
+def runlog_scan(config: dict[str, Any], skill: str) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+    path = Path(".agent/runlog.jsonl")
+    rows, errors = load_jsonl(path)
+    tagged_signals: list[dict[str, Any]] = []
+    observations: list[str] = []
+    if not path.exists():
+        return tagged_signals, [".agent/runlog.jsonl: missing"], errors
+
+    fail_count = 0
+    warn_count = 0
+    release_gate_failures = 0
+    context_budget_failures = 0
+    review_events = 0
+    for item in rows:
+        if not object_mentions_skill(item, skill):
+            continue
+        outcome = str(item.get("outcome", "")).strip().lower()
+        kind = str(item.get("kind", "")).strip().lower()
+        command = str(item.get("command", "")).strip().lower()
+        summary = str(item.get("summary", "")).strip().lower()
+        raw_tags = item.get("tags", [])
+        tags = {str(tag).strip().lower() for tag in raw_tags if str(tag).strip()} if isinstance(raw_tags, list) else set()
+        if outcome == "fail":
+            fail_count += 1
+        if outcome == "warn":
+            warn_count += 1
+        if outcome in {"fail", "warn"} and ("release" in kind or "release-check" in command or "release-check" in summary):
+            release_gate_failures += 1
+        if outcome in {"fail", "warn"} and ("context" in command or "context-budget" in tags or "context budget" in summary):
+            context_budget_failures += 1
+        if kind == "review" or "review" in tags:
+            review_events += 1
+        if tags & {"skill-optimization-signal", "optimization-signal"}:
+            tagged_signals.append(
+                {
+                    "id": item.get("id", item.get("trace_id", "runlog-signal")),
+                    "source": ".agent/runlog.jsonl",
+                    "kind": item.get("kind", "runlog"),
+                    "summary": item.get("summary", ""),
+                    "status": item.get("optimization_status", item.get("status", "untriaged")),
+                    "evidence": item.get("id", item.get("trace_id", "")),
+                }
+            )
+
+    observations.extend(
+        [
+            f".agent/runlog.jsonl: skill-related fail events={fail_count}",
+            f".agent/runlog.jsonl: skill-related warn events={warn_count}",
+            f".agent/runlog.jsonl: release-gate failures={release_gate_failures}",
+            f".agent/runlog.jsonl: context-budget failures={context_budget_failures}",
+            f".agent/runlog.jsonl: review events={review_events}",
+        ]
+    )
+    thresholds = config.get("triggers", {}).get("failure-threshold", {}).get("thresholds", {})
+    if isinstance(thresholds, dict):
+        repeated_failures = int(thresholds.get("repeated_failures", 0) or 0)
+        release_failures = int(thresholds.get("release_gate_failures", 0) or 0)
+        context_failures = int(thresholds.get("context_budget_failures", 0) or 0)
+        if repeated_failures and fail_count >= repeated_failures:
+            observations.append(f"threshold met: repeated_failures={fail_count}/{repeated_failures}")
+        if release_failures and release_gate_failures >= release_failures:
+            observations.append(f"threshold met: release_gate_failures={release_gate_failures}/{release_failures}")
+        if context_failures and context_budget_failures >= context_failures:
+            observations.append(f"threshold met: context_budget_failures={context_budget_failures}/{context_failures}")
+    return tagged_signals, observations, errors
+
+
+def latest_review_scan(skill: str) -> tuple[list[str], list[str]]:
+    review_dir = Path("skillflows") / safe_skill_name(skill) / "reviews"
+    if not review_dir.exists():
+        return [f"{review_dir.as_posix()}: missing"], []
+    reviews = sorted(review_dir.glob("*-review.md"))
+    if not reviews:
+        return [f"{review_dir.as_posix()}: no review files"], []
+    latest = reviews[-1]
+    text = latest.read_text(encoding="utf-8", errors="ignore").lower()
+    observations = [f"{latest.as_posix()}: latest review inspected"]
+    blockers: list[str] = []
+    if "status: pass" not in text:
+        blockers.append(f"latest review is not pass: {latest.as_posix()}")
+    for heading in ("### blocker", "### major", "### minor"):
+        index = text.find(heading)
+        if index == -1:
+            continue
+        next_index = text.find("\n### ", index + 1)
+        section = text[index : next_index if next_index != -1 else len(text)]
+        if "- none found." not in section and "- none." not in section:
+            blockers.append(f"latest review has open {heading.replace('### ', '')} finding: {latest.as_posix()}")
+    return observations, blockers
+
+
+def context_eval_scan() -> list[str]:
+    observations: list[str] = []
+    context_path = Path(".agent/context/latest.md")
+    if context_path.exists():
+        text = context_path.read_text(encoding="utf-8", errors="ignore").lower()
+        observations.append(".agent/context/latest.md: inspected")
+        warnings = text.split("## warnings", 1)[1] if "## warnings" in text else ""
+        if warnings and "- none" not in warnings:
+            observations.append(".agent/context/latest.md: warnings present")
+    else:
+        observations.append(".agent/context/latest.md: missing")
+    eval_path = Path(".agent/evals/latest.md")
+    if eval_path.exists():
+        text = eval_path.read_text(encoding="utf-8", errors="ignore").lower()
+        observations.append(".agent/evals/latest.md: inspected")
+        if "(fail)" in text or ("score:" in text and "fail" in text):
+            observations.append(".agent/evals/latest.md: failing score signal present")
+    else:
+        observations.append(".agent/evals/latest.md: missing")
+    return observations
+
+
+def signal_scan(config: dict[str, Any], skill: str) -> tuple[list[dict[str, Any]], list[str], list[str], list[str]]:
+    root = optimization_root(config, skill)
+    signals, parse_errors = load_jsonl(root / "signals.jsonl")
+    runlog_signals, runlog_observations, runlog_errors = runlog_scan(config, skill)
+    review_observations, review_blockers = latest_review_scan(skill)
+    observations = runlog_observations + review_observations + context_eval_scan()
+    signals.extend(runlog_signals)
+    parse_errors.extend(runlog_errors)
+    untriaged: list[str] = []
+    for item in signals:
+        status = str(item.get("status", item.get("triage_status", "untriaged"))).strip().lower()
+        if status_is_untriaged(config, status):
+            signal_id = str(item.get("id", item.get("source", "<missing-id>")))
+            untriaged.append(signal_id)
+    untriaged.extend(review_blockers)
+    return signals, parse_errors, untriaged, observations
+
+
+def candidate_runs(config: dict[str, Any], skill: str) -> list[dict[str, str]]:
+    runs_dir = optimization_root(config, skill) / "runs"
+    runs: list[dict[str, str]] = []
+    if not runs_dir.exists():
+        return runs
+    for run_dir in sorted(path for path in runs_dir.iterdir() if path.is_dir()):
+        gate = run_dir / "gate-report.md"
+        status = "unknown"
+        if gate.exists():
+            text = gate.read_text(encoding="utf-8", errors="ignore").lower()
+            if "status: pass" in text or "status: passed" in text:
+                status = "pass"
+            elif "status: fail" in text or "status: failed" in text:
+                status = "fail"
+        runs.append({"run_id": run_dir.name, "path": run_dir.as_posix(), "gate_status": status})
+    return runs
+
+
+def rejected_rows(config: dict[str, Any], skill: str) -> list[str]:
+    source = optimization_root(config, skill) / "rejected-edits.jsonl"
+    if not source.exists():
+        return []
+    return source.read_text(encoding="utf-8", errors="ignore").splitlines()
+
+
+def validate_config(config: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    if config.get("schema") != "agent-skill-optimization-v1":
+        errors.append(".agent/skill-optimization.json schema must be agent-skill-optimization-v1")
+    modes = set(config.get("modes", []))
+    if not ALLOWED_MODES.issubset(modes):
+        errors.append(".agent/skill-optimization.json modes must include all supported optimization modes")
+    triggers = set(config.get("triggers", {}).keys()) if isinstance(config.get("triggers"), dict) else set()
+    if not ALLOWED_TRIGGERS.issubset(triggers):
+        errors.append(".agent/skill-optimization.json triggers must include manual, failure-threshold, release-gate, and scheduled-sleep")
+    default_policy = config.get("default_skill_policy", {})
+    if not isinstance(default_policy, dict):
+        errors.append(".agent/skill-optimization.json default_skill_policy must be an object")
+    elif default_policy.get("mode") not in ALLOWED_MODES:
+        errors.append(".agent/skill-optimization.json default_skill_policy.mode is invalid")
+    release = config.get("release_preflight", {})
+    if not isinstance(release, dict):
+        errors.append(".agent/skill-optimization.json release_preflight must be an object")
+    else:
+        if release.get("required") is not True:
+            errors.append(".agent/skill-optimization.json release_preflight.required must be true")
+        if release.get("release_check_validates_existing_only") is not True:
+            errors.append(".agent/skill-optimization.json release_check_validates_existing_only must be true")
+        if release.get("fail_closed") is not True:
+            errors.append(".agent/skill-optimization.json release_preflight.fail_closed must be true")
+        artifact_names = release.get("artifact_names", [])
+        for name in REQUIRED_PREFLIGHT_ARTIFACTS:
+            if name not in artifact_names:
+                errors.append(f".agent/skill-optimization.json release_preflight missing artifact: {name}")
+    scheduled = config.get("scheduled_sleep", {})
+    if not isinstance(scheduled, dict):
+        errors.append(".agent/skill-optimization.json scheduled_sleep must be an object")
+    else:
+        if scheduled.get("primitive") != "scheduled_routine":
+            errors.append(".agent/skill-optimization.json scheduled_sleep.primitive must be scheduled_routine")
+        for key in (
+            "cadence_or_event_source",
+            "disable_or_expiry_policy",
+            "owner",
+            "run_location",
+            "permission_mode",
+            "resource_boundary",
+            "cost_boundary",
+            "evidence_path",
+            "dry_run_default",
+            "human_interrupt_points",
+            "fail_closed",
+        ):
+            if key not in scheduled:
+                errors.append(f".agent/skill-optimization.json scheduled_sleep missing {key}")
+    roles = config.get("role_boundaries", {})
+    if not isinstance(roles, dict):
+        errors.append(".agent/skill-optimization.json role_boundaries must be an object")
+    else:
+        for role in ("target", "optimizer", "reviewer"):
+            if role not in roles:
+                errors.append(f".agent/skill-optimization.json role_boundaries missing {role}")
+        if roles.get("finder_cannot_fix") is not True:
+            errors.append(".agent/skill-optimization.json role_boundaries.finder_cannot_fix must be true")
+    if not Path("scripts/agent_skill_opt.py").exists():
+        errors.append("missing scripts/agent_skill_opt.py")
+    if not Path("docs/SKILL_OPTIMIZATION.md").exists():
+        errors.append("missing docs/SKILL_OPTIMIZATION.md")
+    return errors
+
+
+def repair_command(skill: str, release_id: str) -> str:
+    return f"python3 scripts/agent_skill_opt.py preflight --skill {skill} --release-id {release_id}"
+
+
+def write_preflight(config: dict[str, Any], skill: str, release_id: str) -> tuple[Path, list[str]]:
+    skill = safe_skill_name(skill)
+    release_id = release_id.strip() or resolve_release_id(skill)
+    target = preflight_dir(config, skill, release_id)
+    policy = policy_for_skill(config, skill)
+    source = skill_source_path(skill)
+    tree_id = tree_identity(source)
+    signals, parse_errors, untriaged, observations = signal_scan(config, skill)
+    runs = candidate_runs(config, skill)
+    failed_runs = [item["run_id"] for item in runs if item.get("gate_status") == "fail"]
+    unknown_runs = [item["run_id"] for item in runs if item.get("gate_status") == "unknown"]
+    blockers = list(parse_errors) + [f"untriaged signal: {item}" for item in untriaged]
+    blockers.extend(f"candidate gate failed: {item}" for item in failed_runs)
+    blockers.extend(f"candidate gate missing: {item}" for item in unknown_runs)
+    status = "fail" if blockers else "pass"
+    decision = "blocked" if blockers else "no actionable signals" if not signals and not runs else "pass"
+    metadata = {
+        "schema": "agent-skill-optimization-preflight-v1",
+        "created_at": utc_now(),
+        "skill": skill,
+        "release_id": release_id,
+        "skill_source": source.as_posix(),
+        "skill_tree_id": tree_id,
+        "mode": policy.get("mode", "manual-only"),
+        "risk_class": policy.get("risk_class", "medium"),
+        "status": status,
+        "decision": decision,
+        "blockers": blockers,
+        "observations": observations,
+    }
+    write_json(target / "metadata.json", metadata)
+    write_text(
+        target / "signal-scan.md",
+        "\n".join(
+            [
+                "# Signal Scan",
+                "",
+                f"- Skill: {skill}",
+                f"- Release ID: {release_id}",
+                f"- Signals: {len(signals)}",
+                f"- Untriaged signals: {len(untriaged)}",
+                f"- Parse errors: {len(parse_errors)}",
+                "",
+                "## Evidence Stores",
+                *(f"- {item}" for item in observations),
+                "" if observations else "- None",
+                "",
+                "## Blockers",
+                *(f"- {item}" for item in blockers),
+                "" if blockers else "- None",
+                "",
+            ]
+        ),
+    )
+    write_text(
+        target / "candidate-summary.md",
+        "\n".join(
+            [
+                "# Candidate Summary",
+                "",
+                f"- Candidate runs: {len(runs)}",
+                f"- Failed gates: {len(failed_runs)}",
+                f"- Missing gates: {len(unknown_runs)}",
+                "",
+                "## Runs",
+                *(f"- {item['run_id']}: {item['gate_status']} ({item['path']})" for item in runs),
+                "" if runs else "- None",
+                "",
+            ]
+        ),
+    )
+    write_text(
+        target / "gate-report.md",
+        "\n".join(
+            [
+                "# Gate Report",
+                "",
+                f"status: {status}",
+                f"release_id: {release_id}",
+                f"blockers: {len(blockers)}",
+                "",
+                "## Required Gates",
+                "- signal triage",
+                "- candidate gate evidence",
+                "- rejected edit evidence",
+                "- rollback or no-promotion statement",
+                "",
+            ]
+        ),
+    )
+    rejected = rejected_rows(config, skill)
+    write_text(target / "rejected-edits.jsonl", "\n".join(rejected) + ("\n" if rejected else ""))
+    write_text(
+        target / "release-decision.md",
+        "\n".join(
+            [
+                "# Release Decision",
+                "",
+                f"status: {status}",
+                f"decision: {decision}",
+                f"release_id: {release_id}",
+                f"generated_at: {metadata['created_at']}",
+                "",
+                "Release may continue only when status is pass and the normal release path also passes.",
+                "",
+            ]
+        ),
+    )
+    rollback_lines = [
+        "# Rollback Plan",
+        "",
+        f"- Skill: {skill}",
+        f"- Release ID: {release_id}",
+        f"- Prior identity: {tree_id}",
+        "- Promotion: no production skill edits were applied by this preflight.",
+        "- Rollback path: revert any later promoted candidate with git or restore the recorded prior skill tree identity.",
+        "- Rollback trigger: release regression, failed release-check, failed review, or user rejection.",
+        "- Validation window: rerun release-check and skill lifecycle checks after rollback.",
+        "",
+    ]
+    if policy.get("mode") == "auto-promote":
+        rollback_lines.insert(5, "- Auto-promote boundary: local production skill files only; no publish, push, signing, or release-check bypass.")
+    write_text(target / "rollback-plan.md", "\n".join(rollback_lines))
+    return target, blockers
+
+
+def verify_preflight(config: dict[str, Any], skill: str, release_id: str) -> list[str]:
+    skill = safe_skill_name(skill)
+    release_id = release_id.strip() or resolve_release_id(skill)
+    target = preflight_dir(config, skill, release_id)
+    errors: list[str] = []
+    for name in REQUIRED_PREFLIGHT_ARTIFACTS:
+        if not (target / name).exists():
+            errors.append(f"missing preflight artifact: {target / name}")
+    metadata_path = target / "metadata.json"
+    if not metadata_path.exists():
+        errors.append(f"missing preflight artifact: {metadata_path}")
+    else:
+        metadata = load_json(metadata_path, {})
+        if metadata.get("schema") != "agent-skill-optimization-preflight-v1":
+            errors.append(f"{metadata_path} schema must be agent-skill-optimization-preflight-v1")
+        if metadata.get("skill") != skill:
+            errors.append(f"{metadata_path} skill mismatch")
+        if metadata.get("release_id") != release_id:
+            errors.append(f"{metadata_path} release_id mismatch")
+        current_tree = tree_identity(skill_source_path(skill))
+        if metadata.get("skill_tree_id") != current_tree:
+            errors.append(f"stale preflight: {metadata_path} skill_tree_id differs from current source tree")
+        if metadata.get("status") != "pass":
+            errors.append(f"preflight status is not pass: {metadata.get('status')}")
+    gate = target / "gate-report.md"
+    if gate.exists() and "status: pass" not in gate.read_text(encoding="utf-8", errors="ignore").lower():
+        errors.append(f"{gate} does not record status: pass")
+    decision = target / "release-decision.md"
+    if decision.exists():
+        text = decision.read_text(encoding="utf-8", errors="ignore").lower()
+        if "status: pass" not in text:
+            errors.append(f"{decision} does not record status: pass")
+    return errors
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    config = load_json(CONFIG_PATH)
+    errors = validate_config(config)
+    if args.json:
+        print(json.dumps({"schema": "agent-skill-optimization-doctor-v1", "status": "fail" if errors else "pass", "errors": errors}, indent=2))
+    else:
+        for error in errors:
+            print(f"error: {error}", file=sys.stderr)
+        print("agent skill optimization doctor " + ("failed" if errors else "passed"))
+    return 1 if errors else 0
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    config = load_json(CONFIG_PATH)
+    skills = sorted((config.get("skills") or {}).keys()) if isinstance(config.get("skills"), dict) else []
+    report = {
+        "schema": "agent-skill-optimization-report-v1",
+        "created_at": utc_now(),
+        "status": "pass" if not validate_config(config) else "fail",
+        "modes": config.get("modes", []),
+        "triggers": sorted((config.get("triggers") or {}).keys()) if isinstance(config.get("triggers"), dict) else [],
+        "skills": skills,
+        "release_preflight_required": config.get("release_preflight", {}).get("required") is True,
+    }
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(f"status: {report['status']}")
+        print(f"modes: {', '.join(report['modes'])}")
+        print(f"triggers: {', '.join(report['triggers'])}")
+        print(f"skills: {', '.join(skills) if skills else '<default-policy-only>'}")
+    return 0 if report["status"] == "pass" else 1
+
+
+def cmd_preflight(args: argparse.Namespace) -> int:
+    config = load_json(CONFIG_PATH)
+    errors = validate_config(config)
+    if errors:
+        for error in errors:
+            print(f"error: {error}", file=sys.stderr)
+        return 1
+    skill = safe_skill_name(args.skill)
+    release_id = args.release_id or resolve_release_id(skill)
+    target, blockers = write_preflight(config, skill, release_id)
+    print(f"wrote skill optimization preflight: {target}")
+    if blockers:
+        print("preflight blockers:")
+        for item in blockers:
+            print(f"- {item}")
+        return 1
+    return 0
+
+
+def cmd_verify_preflight(args: argparse.Namespace) -> int:
+    config = load_json(CONFIG_PATH)
+    config_errors = validate_config(config)
+    skill = safe_skill_name(args.skill)
+    release_id = args.release_id or resolve_release_id(skill)
+    errors = config_errors + verify_preflight(config, skill, release_id)
+    if args.json:
+        print(json.dumps({"schema": "agent-skill-optimization-preflight-check-v1", "status": "fail" if errors else "pass", "skill": skill, "release_id": release_id, "errors": errors}, indent=2))
+    else:
+        for error in errors:
+            print(f"error: {error}", file=sys.stderr)
+        if errors:
+            print(f"repair: {repair_command(skill, release_id)}", file=sys.stderr)
+        else:
+            print(f"skill optimization preflight passed: {skill} {release_id}")
+    return 1 if errors else 0
+
+
+def cmd_release_id(args: argparse.Namespace) -> int:
+    print(resolve_release_id(safe_skill_name(args.skill)))
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    doctor = subparsers.add_parser("doctor", help="Validate skill optimization policy")
+    doctor.add_argument("--json", action="store_true")
+    doctor.set_defaults(func=cmd_doctor)
+
+    report = subparsers.add_parser("report", help="Report skill optimization policy")
+    report.add_argument("--json", action="store_true")
+    report.set_defaults(func=cmd_report)
+
+    preflight = subparsers.add_parser("preflight", help="Create release preflight evidence")
+    preflight.add_argument("--skill", required=True)
+    preflight.add_argument("--release-id", default="")
+    preflight.set_defaults(func=cmd_preflight)
+
+    verify = subparsers.add_parser("verify-preflight", help="Validate existing release preflight evidence")
+    verify.add_argument("--skill", required=True)
+    verify.add_argument("--release-id", default="")
+    verify.add_argument("--json", action="store_true")
+    verify.set_defaults(func=cmd_verify_preflight)
+
+    release_id = subparsers.add_parser("release-id", help="Resolve the current release id for a skill")
+    release_id.add_argument("--skill", required=True)
+    release_id.set_defaults(func=cmd_release_id)
+
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

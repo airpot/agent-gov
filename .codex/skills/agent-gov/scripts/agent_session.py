@@ -450,6 +450,13 @@ def refresh_git_status_snapshot(session_id: str, git_status: str | None = None) 
 def render_grounding(session_id: str, note: str | None = None, checked: list[str] | None = None) -> str:
     artifacts = artifacts_for(session_id)
     git_status = git_status_short()
+    snapshot = refresh_git_status_snapshot(session_id, git_status)
+    git_status_lines = git_status.splitlines()
+    if len(git_status_lines) > 25:
+        git_status_summary = "\n".join(git_status_lines[:25])
+        git_status_summary += f"\n... {len(git_status_lines) - 25} more line(s); full snapshot: `{snapshot.as_posix()}`"
+    else:
+        git_status_summary = git_status or "clean or unavailable"
     checked_lines = [f"- {item}" for item in checked or []] or ["- Not recorded yet."]
     note_lines = [f"- {note}"] if note else ["- None."]
     return "\n".join(
@@ -467,7 +474,7 @@ def render_grounding(session_id: str, note: str | None = None, checked: list[str
             "## Git Status",
             "",
             "```text",
-            git_status or "clean or unavailable",
+            git_status_summary,
             "```",
             "",
             "## Active Task State",
@@ -604,11 +611,58 @@ def limited_text_block(text: str, limit: int) -> list[str]:
     return lines[:limit] + [f"... {hidden} more line(s); inspect session `refs/git-status-short.txt` or run `git status --short` for the full current state."]
 
 
+def active_spec_summaries(limit: int = 8) -> list[str]:
+    changes_root = Path("openspec/changes")
+    if not changes_root.exists():
+        return ["- No embedded spec changes directory found."]
+    rows: list[str] = []
+    for path in sorted(changes_root.iterdir()):
+        if not path.is_dir() or path.name == "archive":
+            continue
+        meta_path = path / ".agent-spec.json"
+        summary = ""
+        status = "active"
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                summary = str(meta.get("summary") or "").strip()
+                status = str(meta.get("status") or status).strip() or status
+            except json.JSONDecodeError:
+                summary = "invalid .agent-spec.json"
+                status = "invalid"
+        row = f"- `{path.name}` ({status})"
+        if summary:
+            row += f": {summary}"
+        rows.append(row)
+    if not rows:
+        return ["- No active embedded spec changes."]
+    if len(rows) > limit:
+        hidden = len(rows) - limit
+        return rows[:limit] + [f"- ... {hidden} more active change(s); run `python3 scripts/agent_spec.py list --json`."]
+    return rows
+
+
 def artifacts_for(session_id: str) -> dict:
     path = session_dir(session_id) / "artifacts.json"
     if path.exists():
         return json.loads(path.read_text(encoding="utf-8"))
     return {}
+
+
+def bootstrap_evidence_lines(session_id: str) -> list[str]:
+    lines = [
+        f"- Handoff: `.agent/sessions/{session_id}/handoff.md`",
+        f"- Changes: `.agent/sessions/{session_id}/changes.md`",
+        f"- Validation: `.agent/sessions/{session_id}/validation.md`",
+        f"- Grounding: `.agent/sessions/{session_id}/grounding.md`",
+        f"- Offload index: `.agent/sessions/{session_id}/offload-index.md`",
+        "- Runlog: `.agent/runlog.jsonl`",
+    ]
+    if Path(".agent/tools/agent_memory.py").exists():
+        lines.append("- Memory timeline: `python3 .agent/tools/agent_memory.py timeline --limit 10`")
+    if Path(".agent/tools/agent_context.py").exists():
+        lines.append("- Context scan: `python3 .agent/tools/agent_context.py scan --limit 10`")
+    return lines
 
 
 def write_bootstrap(session_id: str) -> Path:
@@ -620,10 +674,10 @@ def write_bootstrap(session_id: str) -> Path:
     goal = artifacts.get("goal", "unknown")
     git_status = git_status_short()
     git_status_snapshot = refresh_git_status_snapshot(session_id, git_status)
-    git_status_lines = limited_text_block(git_status, 40)
+    git_status_lines = limited_text_block(git_status, 28)
     start_steps = [
         f"`cd {workspace}`",
-        "Read this file fully.",
+        "Read `.agent/sessions/active.md` and this compact bootstrap.",
         f"Run `git status --short` and compare with `.agent/sessions/{session_id}/refs/git-status-short.txt`; the inline block below may be truncated.",
     ]
     if Path(".agent/workflow.json").exists() and Path(".agent/worktrees.json").exists():
@@ -645,11 +699,16 @@ def write_bootstrap(session_id: str) -> Path:
         "",
         "## Session",
         "",
-        f"- Goal: {goal}",
-        f"- Spec change: {openspec_change}",
+        f"- Recorded goal: {goal}",
+        f"- Recorded spec change: {openspec_change}",
         f"- Workspace: {workspace}",
         f"- Git branch: {artifacts.get('git_branch', 'unknown')}",
         f"- Git commit at start: {artifacts.get('git_commit', 'unknown')}",
+        "- Repository truth overrides recorded session metadata when they disagree.",
+        "",
+        "## Active Spec State",
+        "",
+        *active_spec_summaries(),
         "",
         "## Current Git Status Snapshot",
         "",
@@ -658,45 +717,50 @@ def write_bootstrap(session_id: str) -> Path:
         "```",
         f"Full status snapshot: `{git_status_snapshot}`.",
         "",
-        "## Handoff Summary",
+        "## Evidence Handles",
         "",
-        *first_nonempty_lines(directory / "handoff.md", 55),
-        "",
-        "## Changed Files",
-        "",
-        *first_nonempty_lines(directory / "changes.md", 35),
-        "",
-        "## Validation",
-        "",
-        *first_nonempty_lines(directory / "validation.md", 45),
+        *bootstrap_evidence_lines(session_id),
         "",
         "## Truth-First Grounding",
         "",
-        *first_nonempty_lines(grounding_path(session_id), 45),
+        "Current repository files, configs, specs, task-board state, git status, and validation command output override memory summaries and historical handoff text.",
+        f"Read `.agent/sessions/{session_id}/grounding.md` for the latest grounding artifact.",
         "",
         "## Offload Index",
         "",
-        *first_nonempty_lines(offload_index_path(session_id), 35),
+        f"Read `.agent/sessions/{session_id}/offload-index.md` before using `offload-recall`; verify recalled facts against repository truth.",
         "",
         "## Recent Session Events",
         "",
         *format_recent_events(session_id, 5),
         "",
-        "## Memory Digest",
-        "",
-        *first_nonempty_lines(Path(".agent/memory/latest.md"), 18),
-        "",
-        "## Context Budget",
-        "",
-        *first_nonempty_lines(Path(".agent/context/latest.md"), 18),
-        "",
         "## Resume Prompt",
         "",
         f"See `.agent/sessions/{session_id}/resume-prompt.md`.",
         "",
+        "## Guardrail",
+        "",
+        "Do not inline long historical handoff, changes, validation, grounding, archived spec, memory, context, or dirty-status bodies in bootstrap. Use evidence handles instead.",
+        "",
         "Do not rely on prior chat history, VS Code tabs, selected text, or terminal scrollback.",
         "",
     ]
+    if Path(".agent/tools/agent_memory.py").exists():
+        insert_at = sections.index("## Resume Prompt")
+        sections[insert_at:insert_at] = [
+            "## Memory Digest",
+            "",
+            "Use `python3 .agent/tools/agent_memory.py timeline --limit 10`, then `search`, then `detail <id>` only for selected records.",
+            "",
+        ]
+    if Path(".agent/tools/agent_context.py").exists():
+        insert_at = sections.index("## Resume Prompt")
+        sections[insert_at:insert_at] = [
+            "## Context Budget",
+            "",
+            "Use `python3 .agent/tools/agent_context.py scan --limit 10`; keep bootstrap below `.agent/context.json` budgets.",
+            "",
+        ]
     bootstrap = "\n".join(sections)
     session_bootstrap = directory / "bootstrap.md"
     write(session_bootstrap, bootstrap)

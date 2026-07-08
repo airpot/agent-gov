@@ -75,6 +75,7 @@ def assert_no_missing_doc_refs(target: Path) -> None:
         ".agent/context.json": [target / ".agent" / "context.json"],
         ".agent/dev-map.json": [target / ".agent" / "dev-map.json"],
         ".agent/skill-hygiene.json": [target / ".agent" / "skill-hygiene.json"],
+        ".agent/skill-optimization.json": [target / ".agent" / "skill-optimization.json"],
         ".agent/capabilities.json": [target / ".agent" / "capabilities.json"],
         ".agent/tooling.json": [target / ".agent" / "tooling.json"],
         ".agent/security.json": [target / ".agent" / "security.json"],
@@ -87,10 +88,12 @@ def assert_no_missing_doc_refs(target: Path) -> None:
         "docs/DEV_MAP.md": [target / "docs" / "DEV_MAP.md"],
         "docs/AI_CODING_GLOSSARY.md": [target / "docs" / "AI_CODING_GLOSSARY.md"],
         "docs/DOMAIN_GLOSSARY.md": [target / "docs" / "DOMAIN_GLOSSARY.md"],
+        "docs/SKILL_OPTIMIZATION.md": [target / "docs" / "SKILL_OPTIMIZATION.md"],
         "agent_memory.py": [target / ".agent" / "tools" / "agent_memory.py"],
         "agent_context.py": [target / ".agent" / "tools" / "agent_context.py"],
         "agent_capabilities.py": [target / "scripts" / "agent_capabilities.py"],
         "agent_skill_hygiene.py": [target / "scripts" / "agent_skill_hygiene.py"],
+        "agent_skill_opt.py": [target / "scripts" / "agent_skill_opt.py"],
         "agent_tooling.py": [target / "scripts" / "agent_tooling.py"],
         "agent_security.py": [target / "scripts" / "agent_security.py"],
         "agent_task.py": [target / "scripts" / "agent_task.py"],
@@ -217,7 +220,84 @@ def write_intake(path: Path, data: dict) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
-def mark_blueprint_reviewed(target: Path) -> None:
+def add_version_decisions(target: Path) -> None:
+    blueprint_path = target / ".agent" / "blueprint.json"
+    blueprint = json.loads(blueprint_path.read_text(encoding="utf-8"))
+    runtime = blueprint.get("runtime_framework_decision", {})
+    version_decisions = blueprint.setdefault("technology_version_decisions", {})
+    version_decisions.update(
+        {
+            "status": "review-ready",
+            "source": "npm-regression",
+            "version_policy": "Regression fixture records LTS lines or application lockfile policy before implementation.",
+            "languages_and_runtimes": [
+                {
+                    "name": "python",
+                    "version": "3.12",
+                    "constraint": ">=3.12,<3.13",
+                    "source": "npm regression fixture",
+                    "owner": "regression",
+                    "status": "decided",
+                }
+            ],
+            "package_managers": [
+                {
+                    "name": "pip",
+                    "version": "",
+                    "constraint": "defer-to-application-lockfile",
+                    "source": "npm regression fixture",
+                    "owner": "regression",
+                    "status": "deferred-to-application-lockfile",
+                }
+            ],
+            "frameworks_and_libraries": [
+                {
+                    "name": "strands-agents",
+                    "version": "",
+                    "constraint": "defer-to-application-lockfile",
+                    "source": "npm regression fixture",
+                    "owner": "regression",
+                    "status": "deferred-to-application-lockfile",
+                }
+            ],
+            "datastores_and_services": [],
+            "deployment_targets": [],
+            "agent_runtime_and_mcp": [
+                {
+                    "name": str(runtime.get("primary_adapter", "strands") or "strands"),
+                    "version": "",
+                    "constraint": "defer-to-application-lockfile",
+                    "source": "npm regression fixture",
+                    "owner": "regression",
+                    "status": "deferred-to-application-lockfile",
+                }
+            ],
+            "lockfile_or_environment_evidence": [
+                {
+                    "name": "fixture",
+                    "version": "",
+                    "constraint": "application-owned lockfile policy",
+                    "source": "npm regression fixture",
+                    "owner": "regression",
+                    "status": "decided",
+                }
+            ],
+            "open_version_decisions": [],
+        }
+    )
+    for plan in runtime.get("package_plan", []):
+        if isinstance(plan, dict):
+            plan["version_status"] = "deferred-to-application-lockfile"
+            plan["version_policy"] = "defer-to-lockfile"
+            constraints = plan.setdefault("package_version_constraints", {})
+            for package in plan.get("packages", []):
+                constraints[package] = "defer-to-application-lockfile"
+    blueprint_path.write_text(json.dumps(blueprint, indent=2) + "\n", encoding="utf-8")
+
+
+def mark_blueprint_reviewed(target: Path, *, with_versions: bool = True) -> None:
+    if with_versions:
+        add_version_decisions(target)
     blueprint_path = target / ".agent" / "blueprint.json"
     blueprint = json.loads(blueprint_path.read_text(encoding="utf-8"))
     blueprint["status"] = "reviewed"
@@ -257,7 +337,10 @@ def assert_agent_development_readiness(temp_root: Path, python: str) -> None:
     run([python, "scripts/agent_runtime.py", "doctor"], cwd=blank)
     strict_blank = run([python, "scripts/agent_check.py", "--strict"], cwd=blank, expect_ok=False)
     strict_output = strict_blank.stdout + strict_blank.stderr
-    if "blueprint status must be reviewed" not in strict_output or "selection_status must be confirmed" not in strict_output:
+    if (
+        "blueprint status must be reviewed" not in strict_output
+        or "selection_status must be confirmed" not in strict_output
+    ):
         print("strict readiness did not fail on draft blueprint and unconfirmed runtime", file=sys.stderr)
         print(strict_output, file=sys.stderr)
         raise SystemExit(1)
@@ -345,8 +428,111 @@ def assert_agent_development_readiness(temp_root: Path, python: str) -> None:
             ],
             cwd=PACKAGE_ROOT,
         )
-        mark_blueprint_reviewed(target)
+        mark_blueprint_reviewed(target, with_versions=False)
+        version_missing = run([python, "scripts/agent_blueprint.py", "readiness"], cwd=target, expect_ok=False)
+        if "technology version" not in (version_missing.stdout + version_missing.stderr) and "runtime package plan missing version constraint" not in (version_missing.stdout + version_missing.stderr):
+            print("blueprint readiness did not fail when version constraints were missing", file=sys.stderr)
+            print(version_missing.stdout + version_missing.stderr, file=sys.stderr)
+            raise SystemExit(1)
+        add_version_decisions(target)
         assert_readiness_passes(target, python)
+
+
+def assert_nested_technology_version_intake(temp_root: Path, python: str) -> None:
+    intake_path = temp_root / "nested-technology-version-intake.json"
+    write_intake(
+        intake_path,
+        {
+            "project_target": "agent",
+            "selection_status": "confirmed",
+            "language_preference": ["python", "node"],
+            "default_runtime_adapter": "strands",
+            "optional_runtime_adapters": ["pydantic-ai", "mcp-server"],
+            "technology_versions": {
+                "version_policy": "Record LTS lines, semver ranges, and accepted application lockfile policies.",
+                "dependency_version_policy": "defer-to-lockfile",
+                "version_constraints": {
+                    "python": ">=3.12,<3.13",
+                    "node": ">=22,<23",
+                    "strands-agents": ">=0.1,<1",
+                    "pydantic-ai": ">=0.4,<1",
+                    "mcp": ">=1,<2",
+                },
+                "languages_and_runtimes": [
+                    {"name": "python", "constraint": ">=3.12,<3.13", "source": ".python-version", "status": "decided"},
+                    {"name": "node", "constraint": ">=22,<23", "source": ".nvmrc", "status": "decided"},
+                ],
+                "package_managers": [
+                    {"name": "uv", "constraint": ">=0.7,<1", "source": "pyproject.toml", "status": "decided"},
+                    {"name": "npm", "constraint": ">=10,<11", "source": "package-lock.json", "status": "decided"},
+                ],
+                "frameworks_and_libraries": [
+                    {"name": "fastapi", "constraint": ">=0.115,<1", "source": "pyproject.toml", "status": "decided"}
+                ],
+                "datastores_and_services": [
+                    {"name": "postgres", "constraint": "16.x managed service", "source": "deployment config", "status": "decided"}
+                ],
+                "deployment_targets": [
+                    {"name": "docker", "constraint": "compose spec v2", "source": "compose.yaml", "status": "decided"}
+                ],
+                "agent_runtime_and_mcp": [
+                    {"name": "strands", "constraint": "defer-to-application-lockfile", "source": "runtime plan", "status": "deferred-to-application-lockfile"},
+                    {"name": "mcp-sdk", "constraint": ">=1,<2", "source": "runtime plan", "status": "decided"},
+                ],
+                "lockfile_or_environment_evidence": [
+                    {"name": "package-lock.json", "constraint": "application-owned lockfile", "source": "repository", "status": "decided"}
+                ],
+                "open_version_decisions": [],
+            },
+        },
+    )
+    target = temp_root / "nested-technology-version-intake"
+    target.mkdir(parents=True, exist_ok=True)
+    run(
+        [
+            python,
+            str(INIT_SCRIPT),
+            str(target),
+            "--tech-stack",
+            "python,node",
+            "--layout",
+            "minimal",
+            "--remote-kind",
+            "local",
+            "--governance-profile",
+            "standard",
+            "--architecture-intake",
+            str(intake_path),
+        ],
+        cwd=PACKAGE_ROOT,
+    )
+    blueprint = json.loads((target / ".agent" / "blueprint.json").read_text(encoding="utf-8"))
+    decisions = blueprint.get("technology_version_decisions", {})
+    expected = {
+        "languages_and_runtimes": {"python", "node"},
+        "package_managers": {"uv", "npm"},
+        "frameworks_and_libraries": {"fastapi"},
+        "datastores_and_services": {"postgres"},
+        "deployment_targets": {"docker"},
+        "agent_runtime_and_mcp": {"strands", "mcp-sdk", "pydantic-ai", "mcp-server"},
+        "lockfile_or_environment_evidence": {"package-lock.json"},
+    }
+    for field, names in expected.items():
+        actual = {str(item.get("name", "")) for item in decisions.get(field, []) if isinstance(item, dict)}
+        missing = names - actual
+        if missing:
+            print(f"nested technology_versions did not populate {field}: {sorted(missing)}", file=sys.stderr)
+            print(json.dumps(decisions, indent=2), file=sys.stderr)
+            raise SystemExit(1)
+    runtime = blueprint.get("runtime_framework_decision", {})
+    for plan in runtime.get("package_plan", []):
+        constraints = plan.get("package_version_constraints", {})
+        if plan.get("version_status") == "unresolved" or not (constraints or plan.get("version_policy") in {"defer-to-lockfile", "application-lockfile", "managed-by-application"}):
+            print("nested technology_versions did not resolve package plan version policy", file=sys.stderr)
+            print(json.dumps(runtime.get("package_plan", []), indent=2), file=sys.stderr)
+            raise SystemExit(1)
+    mark_blueprint_reviewed(target, with_versions=False)
+    assert_readiness_passes(target, python)
 
 
 def assert_runtime_adoption_defaults(temp_root: Path, python: str) -> None:
@@ -736,6 +922,113 @@ def assert_workflow_stage_closure(target: Path) -> None:
             if stage not in workflow_stages:
                 print(f"workflow profile {name} references unknown stage: {stage}", file=sys.stderr)
                 raise SystemExit(1)
+
+
+def assert_loop_primitive_governance(target: Path, python: str) -> None:
+    loop_path = target / ".agent" / "loop-engineering.json"
+    workflow_path = target / ".agent" / "workflow.json"
+    if not loop_path.exists():
+        print("standard/full profile did not generate .agent/loop-engineering.json", file=sys.stderr)
+        raise SystemExit(1)
+    loop_config = json.loads(loop_path.read_text(encoding="utf-8"))
+    workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+
+    required_primitives = {"turn_based", "goal_based", "time_based", "scheduled_routine", "scripted_workflow"}
+    selection = loop_config.get("primitive_selection", {})
+    primitives = selection.get("primitives", {})
+    if set(primitives) != required_primitives:
+        print("loop primitive matrix did not contain the required five primitives", file=sys.stderr)
+        print(json.dumps(selection, indent=2), file=sys.stderr)
+        raise SystemExit(1)
+    if set(selection.get("external_polling_policy", {}).get("allowed_primitives", [])) != {"time_based", "scheduled_routine"}:
+        print("external polling policy did not route to time_based/scheduled_routine", file=sys.stderr)
+        raise SystemExit(1)
+
+    source_status = {
+        item.get("url"): item.get("source_status")
+        for item in loop_config.get("sources", [])
+        if isinstance(item, dict)
+    }
+    for url in (
+        "https://claude.com/blog/getting-started-with-loops",
+        "https://code.claude.com/docs/en/goal",
+        "https://code.claude.com/docs/en/scheduled-tasks",
+        "https://code.claude.com/docs/en/workflows",
+    ):
+        if source_status.get(url) != "verified":
+            print(f"official loop source was not recorded as verified: {url}", file=sys.stderr)
+            raise SystemExit(1)
+    if source_status.get("https://x.com/ClaudeDevs/article/2074208949205881033") != "blocked":
+        print("inaccessible X article was not recorded as blocked", file=sys.stderr)
+        raise SystemExit(1)
+
+    gate = workflow.get("gates", {}).get("loop_engineering", {})
+    for key in (
+        "primitive_selection_required",
+        "goal_based_requires_verifiable_convergence",
+        "external_polling_must_not_be_goal_only",
+        "scheduled_routine_requires_disable_policy",
+        "scripted_workflow_requires_pilot_and_cross_check",
+        "usage_evidence_required_for_expensive_or_autonomous_loops",
+        "host_native_features_optional_mappings",
+    ):
+        if gate.get(key) is not True:
+            print(f"workflow loop_engineering gate missing {key}", file=sys.stderr)
+            raise SystemExit(1)
+
+    original_text = loop_path.read_text(encoding="utf-8")
+
+    def expect_loop_failure(mutator, expected: str, *, use_score: bool = False) -> None:
+        mutated = json.loads(original_text)
+        mutator(mutated)
+        loop_path.write_text(json.dumps(mutated, indent=2) + "\n", encoding="utf-8")
+        try:
+            if use_score:
+                result = run([python, "scripts/agent_score.py", "score", "--json"], cwd=target)
+            else:
+                result = run([python, "scripts/agent_check.py"], cwd=target, expect_ok=False)
+            output = result.stdout + result.stderr
+            if expected not in output:
+                print(f"loop primitive regression did not report expected text: {expected}", file=sys.stderr)
+                print(output, file=sys.stderr)
+                raise SystemExit(1)
+        finally:
+            loop_path.write_text(original_text, encoding="utf-8")
+            run([python, "scripts/agent_check.py"], cwd=target)
+
+    expect_loop_failure(
+        lambda data: data.get("primitive_selection", {}).get("primitives", {}).pop("scripted_workflow", None),
+        "scripted_workflow",
+        use_score=True,
+    )
+    expect_loop_failure(
+        lambda data: data.get("primitive_selection", {}).get("primitives", {}).get("goal_based", {}).setdefault("required_evidence", []).remove("proof_method"),
+        "proof_method",
+    )
+    expect_loop_failure(
+        lambda data: data.get("primitive_selection", {}).get("external_polling_policy", {}).update({"allowed_primitives": ["goal_based"]}),
+        "external polling",
+    )
+    expect_loop_failure(
+        lambda data: data.get("scheduled_routine", {}).setdefault("required_fields", []).remove("disable_or_expiry_policy"),
+        "disable_or_expiry_policy",
+    )
+    expect_loop_failure(
+        lambda data: data.get("scripted_workflow", {}).setdefault("required_fields", []).remove("pilot_scope"),
+        "pilot_scope",
+    )
+    expect_loop_failure(
+        lambda data: data.get("usage_evidence", {}).setdefault("fields", []).remove("token_or_cost_summary"),
+        "token_or_cost_summary",
+    )
+    expect_loop_failure(
+        lambda data: [
+            item.update({"source_status": "verified"})
+            for item in data.get("sources", [])
+            if isinstance(item, dict) and item.get("url") == "https://x.com/ClaudeDevs/article/2074208949205881033"
+        ],
+        "X article",
+    )
 
 
 def assert_global_skill_governance(target: Path, python: str, temp_root: Path) -> None:
@@ -1790,6 +2083,11 @@ def assert_session_offload_protocol(target: Path, python: str) -> None:
         print("rollover did not include grounding/offload sections", file=sys.stderr)
         print(rollover, file=sys.stderr)
         raise SystemExit(1)
+    for forbidden in ("## Handoff Summary", "## Changed Files", "## Validation"):
+        if forbidden in rollover:
+            print(f"rollover bootstrap inlined forbidden historical section: {forbidden}", file=sys.stderr)
+            print(rollover, file=sys.stderr)
+            raise SystemExit(1)
     run([python, ".agent/tools/agent_session.py", "doctor"], cwd=target)
     run([python, "scripts/agent_check.py"], cwd=target)
     run([python, "scripts/agent_verify.py", "doctor"], cwd=target)
@@ -1849,6 +2147,59 @@ def assert_session_offload_protocol(target: Path, python: str) -> None:
     run([python, "scripts/agent_verify.py", "doctor"], cwd=target)
 
 
+def assert_contract_control_surfaces(target: Path, python: str) -> None:
+    manifest = json.loads((target / ".agent" / "manifest.json").read_text(encoding="utf-8"))
+    presets = manifest.get("governance_presets", {})
+    if not presets.get("selected"):
+        print("manifest missing governance_presets.selected", file=sys.stderr)
+        raise SystemExit(1)
+    preset = presets["selected"][0]
+    for key in ("source_kind", "source_status", "version", "permission_scope", "generated_paths", "validation", "conflict_behavior"):
+        if not preset.get(key):
+            print(f"governance preset missing {key}", file=sys.stderr)
+            raise SystemExit(1)
+    if preset.get("auto_install_dependencies") is not False:
+        print("governance preset should not auto-install dependencies", file=sys.stderr)
+        raise SystemExit(1)
+
+    capabilities = json.loads((target / ".agent" / "capabilities.json").read_text(encoding="utf-8"))
+    if set(capabilities.get("provider_status_values", [])) != {"present", "missing", "unknown", "degraded"}:
+        print("capabilities missing provider status values", file=sys.stderr)
+        raise SystemExit(1)
+    for item in capabilities.get("capabilities", []):
+        for key in ("required", "status", "fallback"):
+            if key not in item:
+                print(f"capability {item.get('id')} missing {key}", file=sys.stderr)
+                raise SystemExit(1)
+    run([python, "scripts/agent_capabilities.py", "doctor"], cwd=target)
+
+    mechanical = json.loads((target / ".agent" / "mechanical-checks.json").read_text(encoding="utf-8"))
+    for key in ("governance_presets", "capability_providers", "strict_agent_contracts", "regression_criteria", "component_expiry"):
+        if key not in mechanical.get("checks", {}):
+            print(f"mechanical checks missing {key}", file=sys.stderr)
+            raise SystemExit(1)
+    if "bootstrap-inline-history" not in mechanical["checks"]["strict_agent_contracts"].get("negative_fixtures", []):
+        print("strict agent contract fixtures missing bootstrap-inline-history", file=sys.stderr)
+        raise SystemExit(1)
+
+    baselines = json.loads((target / ".agent" / "baselines.json").read_text(encoding="utf-8"))
+    if not baselines.get("regression_criteria"):
+        print("baselines missing regression_criteria", file=sys.stderr)
+        raise SystemExit(1)
+
+    gc_config = json.loads((target / ".agent" / "governance-gc.json").read_text(encoding="utf-8"))
+    if gc_config.get("checks", {}).get("component_expiry") is not True:
+        print("governance-gc missing component_expiry check", file=sys.stderr)
+        raise SystemExit(1)
+    if not gc_config.get("component_expiry", {}).get("components"):
+        print("governance-gc missing component expiry components", file=sys.stderr)
+        raise SystemExit(1)
+
+    run([python, "scripts/agent_check.py"], cwd=target)
+    run([python, "scripts/agent_verify.py", "doctor"], cwd=target)
+    run([python, "scripts/agent_gc.py", "doctor", "--fail-on-warning"], cwd=target)
+
+
 def main() -> int:
     python = sys.executable
     temp_root = Path(tempfile.mkdtemp(prefix="agent-gov-regression-"))
@@ -1859,6 +2210,7 @@ def main() -> int:
         assert_runtime_adoption_defaults(temp_root, python)
         assert_project_blueprint_governance(temp_root, python)
         assert_agent_development_readiness(temp_root, python)
+        assert_nested_technology_version_intake(temp_root, python)
         assert_session_doctor_handles_long_git_status(temp_root, python)
         if sys.platform.startswith("win"):
             target = temp_root / "agent-gov"
@@ -1884,6 +2236,7 @@ def main() -> int:
         )
 
         assert_native_hook_json_contract(target, python)
+        assert_contract_control_surfaces(target, python)
 
         config_path = target / ".agent" / "config.json"
         config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -1904,6 +2257,7 @@ def main() -> int:
             ".agent/baselines.json": "agent-baselines-v1",
             ".agent/dev-map.json": "agent-dev-map-v1",
             ".agent/skill-hygiene.json": "agent-skill-hygiene-v1",
+            ".agent/skill-optimization.json": "agent-skill-optimization-v1",
             ".agent/harness-evolution.json": "agent-harness-evolution-v1",
             ".agent/mcp-policy.json": "agent-mcp-policy-v1",
             ".agent/governance-gc.json": "agent-governance-gc-v1",
@@ -1952,15 +2306,41 @@ def main() -> int:
         if not (target / "docs" / "DEV_MAP.md").exists():
             print("docs/DEV_MAP.md was not created", file=sys.stderr)
             return 1
+        if not (target / "docs" / "SKILL_OPTIMIZATION.md").exists():
+            print("docs/SKILL_OPTIMIZATION.md was not created", file=sys.stderr)
+            return 1
+        if not (target / "scripts" / "agent_skill_opt.py").exists():
+            print("scripts/agent_skill_opt.py was not created", file=sys.stderr)
+            return 1
 
         assert_no_missing_doc_refs(target)
         assert_workflow_stage_closure(target)
+        assert_loop_primitive_governance(target, python)
         assert_resource_catalog_guards(target, python)
         assert_spec_archive_gate(target, python)
         run([python, "scripts/agent_check.py"], cwd=target)
         run([python, "scripts/agent_migrate.py", "doctor"], cwd=target)
         assert_session_offload_protocol(target, python)
         run([python, "scripts/agent_gc.py", "doctor", "--fail-on-warning"], cwd=target)
+        run([python, "scripts/agent_skill_opt.py", "doctor"], cwd=target)
+        preflight_missing = run([python, "scripts/agent_skill_opt.py", "verify-preflight", "--skill", "demo-skill"], cwd=target, expect_ok=False)
+        if "repair:" not in preflight_missing.stderr:
+            print("agent_skill_opt.py missing preflight check did not print repair command", file=sys.stderr)
+            print(preflight_missing.stderr, file=sys.stderr)
+            return 1
+        demo_skill = target / ".codex" / "skills" / "demo-skill"
+        demo_skill.mkdir(parents=True, exist_ok=True)
+        (demo_skill / "SKILL.md").write_text("---\nname: demo-skill\ndescription: Demo skill.\n---\n\n# Demo\n", encoding="utf-8")
+        release_id = run([python, "scripts/agent_skill_opt.py", "release-id", "--skill", "demo-skill"], cwd=target).stdout.strip()
+        run([python, "scripts/agent_skill_opt.py", "preflight", "--skill", "demo-skill", "--release-id", release_id], cwd=target)
+        run([python, "scripts/agent_skill_opt.py", "verify-preflight", "--skill", "demo-skill", "--release-id", release_id], cwd=target)
+        signal_scan = target / "skillflows" / "demo-skill" / "optimization" / "release-preflight" / release_id / "signal-scan.md"
+        signal_scan_text = signal_scan.read_text(encoding="utf-8")
+        for expected in (".agent/runlog.jsonl", ".agent/context/latest.md", ".agent/evals/latest.md"):
+            if expected not in signal_scan_text:
+                print(f"agent_skill_opt.py preflight did not scan {expected}", file=sys.stderr)
+                print(signal_scan_text, file=sys.stderr)
+                return 1
         run([python, "scripts/agent_skill_hygiene.py", "doctor"], cwd=target)
         hygiene_report = json.loads(run([python, "scripts/agent_skill_hygiene.py", "report", "--json"], cwd=target).stdout)
         if hygiene_report.get("schema") != "agent-skill-hygiene-report-v1":

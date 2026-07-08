@@ -20,6 +20,42 @@
 - Current decision summary:
 - Open decisions:
 
+## Loop Contract
+
+- Applies: yes | no
+- Primitive: turn_based | goal_based | time_based | scheduled_routine | scripted_workflow
+- Loop type: work_loop | review_fix_loop | debugging_loop | eval_optimization_loop | session_recovery_loop
+- Readiness level: manual | report_only | assisted | unattended
+- Trigger source:
+- Observation signal:
+- Iteration or run budget:
+- Stop conditions:
+- Evidence path:
+- Owner role:
+- Evaluator boundary:
+- Stop reason:
+- Misuse check:
+
+### Goal-Based Proof
+
+- Measurable done state:
+- Proof method:
+- Protected constraints:
+- Turn or time cap:
+- Evidence required for judgment:
+
+### External Polling, Routine, Or Workflow Metadata
+
+- External signal and check cadence:
+- Routine id/name, trigger/cadence, run location, permission mode:
+- Resource and credential boundary:
+- Disable or expiry policy:
+- Script artifact/source, phase plan, worker boundaries, concurrency cap:
+- Pilot scope and result:
+- Cross-check or adversarial review strategy:
+- State/resume boundary and intermediate result storage:
+- Cost or usage evidence:
+
 ## Plan Quality Gate
 
 - Exact files are listed before tasks.
@@ -118,6 +154,7 @@ Expected:
 - [ ] Run narrow validation.
 - [ ] Run relevant broader validation.
 - [ ] Record validation evidence in `.agent/runlog.jsonl` or the active session.
+- [ ] Record loop usage evidence if the task used assisted, unattended, scheduled routine, or scripted workflow execution.
 - [ ] Request spec review, then quality review, if this task was delegated or substantial.
 
 ## Completion Gate

@@ -180,6 +180,10 @@ def check_session_offload(config: dict) -> list[str]:
         if spec.get("bootstrap_must_include_grounding_and_offload", True):
             if "Truth-First Grounding" not in bootstrap_text or "Offload Index" not in bootstrap_text:
                 errors.append(".agent/sessions/bootstrap.md missing grounding/offload sections")
+        if spec.get("bootstrap_must_not_inline_historical_sections", False):
+            for section in spec.get("forbidden_bootstrap_sections", ["Handoff Summary", "Changed Files", "Validation"]):
+                if f"## {section}" in bootstrap_text:
+                    errors.append(f".agent/sessions/bootstrap.md inlines forbidden historical section: {section}")
         grounding_text = (active_dir / "grounding.md").read_text(encoding="utf-8", errors="ignore") if (active_dir / "grounding.md").exists() else ""
         if grounding_text and "override memory summaries" not in grounding_text:
             errors.append(f"{active_dir / 'grounding.md'} missing truth-first memory boundary")
@@ -685,6 +689,56 @@ def check_skill_runtime(config: dict) -> list[str]:
     return errors
 
 
+def check_skill_optimization(config: dict) -> list[str]:
+    spec = config.get("checks", {}).get("skill_optimization", {})
+    path = Path(spec.get("path", ".agent/skill-optimization.json"))
+    errors: list[str] = []
+    if not path.exists():
+        return [f"missing {path}"]
+    data = load_json(path, {})
+    if data.get("schema") != spec.get("schema", "agent-skill-optimization-v1"):
+        return [f"{path} schema must be {spec.get('schema', 'agent-skill-optimization-v1')}"]
+    modes = set(data.get("modes", []))
+    for mode in ("manual-only", "auto-candidate", "auto-apply-staged", "auto-promote"):
+        if mode not in modes:
+            errors.append(f"{path} modes missing {mode}")
+    triggers = data.get("triggers", {})
+    for trigger in ("manual", "failure-threshold", "release-gate", "scheduled-sleep"):
+        if not isinstance(triggers, dict) or trigger not in triggers:
+            errors.append(f"{path} triggers missing {trigger}")
+    default_policy = data.get("default_skill_policy", {})
+    if not isinstance(default_policy, dict) or default_policy.get("mode") not in modes:
+        errors.append(f"{path} default_skill_policy.mode must be an allowed mode")
+    release = data.get("release_preflight", {})
+    if not isinstance(release, dict):
+        errors.append(f"{path} release_preflight must be an object")
+    else:
+        for key in ("required", "release_check_validates_existing_only", "fail_closed"):
+            if release.get(key) is not True:
+                errors.append(f"{path} release_preflight must enable {key}")
+        artifacts = set(release.get("artifact_names", []))
+        for artifact in ("signal-scan.md", "candidate-summary.md", "gate-report.md", "rejected-edits.jsonl", "release-decision.md", "rollback-plan.md"):
+            if artifact not in artifacts:
+                errors.append(f"{path} release_preflight missing artifact {artifact}")
+    scheduled = data.get("scheduled_sleep", {})
+    if not isinstance(scheduled, dict) or scheduled.get("primitive") != "scheduled_routine":
+        errors.append(f"{path} scheduled_sleep must be governed as scheduled_routine")
+    else:
+        for key in ("cadence_or_event_source", "disable_or_expiry_policy", "owner", "run_location", "permission_mode", "resource_boundary", "cost_boundary", "evidence_path", "dry_run_default", "human_interrupt_points", "fail_closed"):
+            if key not in scheduled:
+                errors.append(f"{path} scheduled_sleep missing {key}")
+    roles = data.get("role_boundaries", {})
+    if not isinstance(roles, dict) or roles.get("finder_cannot_fix") is not True:
+        errors.append(f"{path} role_boundaries must enforce finder_cannot_fix")
+    script = Path(spec.get("script", "scripts/agent_skill_opt.py"))
+    if not script.exists():
+        errors.append(f"missing {script}")
+    doc = Path(spec.get("doc", "docs/SKILL_OPTIMIZATION.md"))
+    if not doc.exists():
+        errors.append(f"missing {doc}")
+    return errors
+
+
 def check_knowledge_governance(config: dict) -> list[str]:
     spec = config.get("checks", {}).get("knowledge_governance", {})
     path = Path(spec.get("path", ".agent/knowledge.json"))
@@ -720,6 +774,7 @@ def check_governance_configs(config: dict) -> list[str]:
             ".agent/loop-engineering.json",
             ".agent/harness-evolution.json",
             ".agent/skill-runtime.json",
+            ".agent/skill-optimization.json",
             ".agent/mcp-policy.json",
             ".agent/governance-gc.json",
             ".agent/resources.json",
@@ -752,6 +807,7 @@ def check_governance_configs(config: dict) -> list[str]:
     workflow_stages = set(workflow.get("stages", []))
     gates = workflow.get("gates", {})
     review_fix = gates.get("review_fix_gate", {})
+    skill_preflight = gates.get("skill_optimization_preflight", {})
     stage_loop = gates.get("stage_review_loop", {})
     loop_gate = gates.get("loop_engineering", {})
     goal_refinement = gates.get("goal_refinement", {})
@@ -783,6 +839,12 @@ def check_governance_configs(config: dict) -> list[str]:
         errors.append("workflow review_fix_gate must require empty open findings")
     if review_fix.get("applies_to_stage_review_loop") is not True:
         errors.append("workflow review_fix_gate must apply to stage review loops")
+    if skill_preflight.get("policy") != ".agent/skill-optimization.json":
+        errors.append("workflow skill_optimization_preflight must point to .agent/skill-optimization.json")
+    if skill_preflight.get("release_check_validates_existing_only") is not True:
+        errors.append("workflow skill_optimization_preflight must validate existing evidence only")
+    if skill_preflight.get("missing_or_stale_preflight_fails_closed") is not True:
+        errors.append("workflow skill_optimization_preflight must fail closed")
     completion = gates.get("completion_verification", {})
     if set(completion.get("review_fix_gate_required_for_profiles", [])) != {"tiny", "bugfix", "standard", "full"}:
         errors.append("workflow completion gate must require review_fix_gate for all profiles")
@@ -914,6 +976,75 @@ def check_governance_configs(config: dict) -> list[str]:
     return errors
 
 
+def check_contract_control_surfaces(config: dict) -> list[str]:
+    errors: list[str] = []
+    checks = config.get("checks", {})
+    for name in ("governance_presets", "capability_providers", "strict_agent_contracts", "regression_criteria", "component_expiry"):
+        if name not in checks:
+            errors.append(f".agent/mechanical-checks.json missing check {name}")
+    fixtures = checks.get("strict_agent_contracts", {}).get("negative_fixtures", [])
+    if not isinstance(fixtures, list) or not fixtures:
+        errors.append(".agent/mechanical-checks.json strict_agent_contracts must define negative_fixtures")
+
+    manifest = load_json(Path(".agent/manifest.json"), {})
+    presets = manifest.get("governance_presets", {})
+    preset_policy = presets.get("policy", {})
+    for key in ("source_status_required", "version_or_revision_required", "permission_scope_required", "blocked_sources_cannot_apply", "no_automatic_dependency_install"):
+        if preset_policy.get(key) is not True:
+            errors.append(f".agent/manifest.json governance_presets policy missing {key}")
+    if not presets.get("selected"):
+        errors.append(".agent/manifest.json governance_presets.selected must be non-empty")
+    for item in presets.get("selected", []):
+        for key in ("id", "source_kind", "source_status", "version", "owner", "permission_scope", "generated_paths", "validation", "conflict_behavior", "dry_run_supported", "auto_install_dependencies"):
+            if key not in item:
+                errors.append(f"governance preset entry missing {key}")
+        if item.get("source_status") not in {"verified", "partial", "blocked"}:
+            errors.append("governance preset source_status must be verified, partial, or blocked")
+        if item.get("auto_install_dependencies") is not False:
+            errors.append("governance preset must not auto-install dependencies")
+
+    capabilities = load_json(Path(".agent/capabilities.json"), {})
+    status_values = set(capabilities.get("provider_status_values", []))
+    if not {"present", "missing", "unknown", "degraded"}.issubset(status_values):
+        errors.append(".agent/capabilities.json missing provider status values")
+    policy = capabilities.get("policy", {})
+    for key in ("provider_status_required", "required_provider_missing_blocks_readiness", "optional_provider_requires_fallback"):
+        if policy.get(key) is not True:
+            errors.append(f".agent/capabilities.json policy missing {key}")
+    for item in capabilities.get("capabilities", []):
+        cap_id = item.get("id", "<missing-id>")
+        for key in ("required", "status", "fallback"):
+            if key not in item:
+                errors.append(f"capability {cap_id} missing {key}")
+        if item.get("status") not in status_values:
+            errors.append(f"capability {cap_id} has invalid status")
+        if item.get("required") is True and item.get("status") != "present":
+            errors.append(f"required capability {cap_id} is not present")
+        if item.get("required") is not True and not str(item.get("fallback", "")).strip():
+            errors.append(f"optional capability {cap_id} missing fallback")
+
+    baselines = load_json(Path(".agent/baselines.json"), {})
+    criteria = baselines.get("regression_criteria", [])
+    if not isinstance(criteria, list) or not criteria:
+        errors.append(".agent/baselines.json must define regression_criteria")
+    for item in criteria:
+        for key in ("id", "baseline_behavior", "expected_behavior", "validation", "protected_invariants", "rejected_regressions"):
+            if key not in item:
+                errors.append(f"regression criteria entry missing {key}")
+
+    gc_config = load_json(Path(".agent/governance-gc.json"), {})
+    if gc_config.get("checks", {}).get("component_expiry") is not True:
+        errors.append(".agent/governance-gc.json checks must enable component_expiry")
+    components = gc_config.get("component_expiry", {}).get("components", [])
+    if not isinstance(components, list) or not components:
+        errors.append(".agent/governance-gc.json component_expiry.components must be non-empty")
+    for item in components:
+        for key in ("id", "kind", "owner", "purpose", "load_bearing", "last_reviewed", "review_cadence", "validation", "renewal_path", "removal_path"):
+            if key not in item:
+                errors.append(f"component_expiry entry missing {key}")
+    return errors
+
+
 def iter_markdown_roots(roots: list[str]) -> list[Path]:
     files: list[Path] = []
     for root in roots:
@@ -999,8 +1130,10 @@ def collect_snapshot() -> dict:
     task_board_errors = check_task_board() if check_enabled(config, "task_board") else []
     role_contract_errors = check_role_contracts() if check_enabled(config, "role_contracts") else []
     governance_config_errors = check_governance_configs(config) if check_enabled(config, "manifest") else []
+    contract_surface_errors = check_contract_control_surfaces(config)
     knowledge_governance_errors = check_knowledge_governance(config) if check_enabled(config, "knowledge_governance") else []
     skill_runtime_errors = check_skill_runtime(config) if check_enabled(config, "skill_runtime") else []
+    skill_optimization_errors = check_skill_optimization(config) if check_enabled(config, "skill_optimization") else []
     session_offload_errors = check_session_offload(config) if check_enabled(config, "session_offload") else []
     template_errors = render_json_template_errors(config) if check_enabled(config, "template_rendering") else []
     broken_links = check_markdown_links(config) if check_enabled(config, "markdown_links") else []
@@ -1013,8 +1146,10 @@ def collect_snapshot() -> dict:
         "task_board": task_board_errors,
         "role_contracts": role_contract_errors,
         "governance_configs": governance_config_errors,
+        "agent_contract_surfaces": contract_surface_errors,
         "knowledge_governance": knowledge_governance_errors,
         "skill_runtime": skill_runtime_errors,
+        "skill_optimization": skill_optimization_errors,
         "session_offload": session_offload_errors,
         "template_rendering": template_errors,
         "broken_local_links": broken_links,
@@ -1039,8 +1174,10 @@ def snapshot_has_hard_fail(snapshot: dict) -> bool:
         "task_board",
         "role_contracts",
         "governance_configs",
+        "agent_contract_surfaces",
         "knowledge_governance",
         "skill_runtime",
+        "skill_optimization",
         "session_offload",
         "template_rendering",
     ]
