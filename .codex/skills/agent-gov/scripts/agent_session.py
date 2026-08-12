@@ -665,15 +665,16 @@ def bootstrap_evidence_lines(session_id: str) -> list[str]:
     return lines
 
 
-def write_bootstrap(session_id: str) -> Path:
+def write_bootstrap(session_id: str, *, record: bool = True) -> Path | str:
     directory = session_dir(session_id)
-    ensure_session_offload_files(session_id)
+    if record:
+        ensure_session_offload_files(session_id)
     artifacts = artifacts_for(session_id)
     workspace = artifacts.get("workspace_path", str(Path.cwd()))
     openspec_change = artifacts.get("openspec_change", "none")
     goal = artifacts.get("goal", "unknown")
     git_status = git_status_short()
-    git_status_snapshot = refresh_git_status_snapshot(session_id, git_status)
+    git_status_snapshot = git_status_snapshot_path(session_id)
     git_status_lines = limited_text_block(git_status, 28)
     start_steps = [
         f"`cd {workspace}`",
@@ -763,6 +764,8 @@ def write_bootstrap(session_id: str) -> Path:
         ]
     bootstrap = "\n".join(sections)
     session_bootstrap = directory / "bootstrap.md"
+    if not record:
+        return bootstrap
     write(session_bootstrap, bootstrap)
     write(BOOTSTRAP_PATH, bootstrap)
     final_snapshot = refresh_git_status_snapshot(session_id)
@@ -1096,6 +1099,9 @@ def cmd_resume(args: argparse.Namespace) -> int:
 
 def cmd_bootstrap(args: argparse.Namespace) -> int:
     session_id = args.session_id or require_active()
+    if not args.record:
+        print(write_bootstrap(session_id, record=False))
+        return 0
     emit_session_event(
         event_type="bootstrap",
         session_id=session_id,
@@ -1164,13 +1170,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if not session_id:
         warnings.append("no active session")
         if not BOOTSTRAP_PATH.exists():
-            write(
-                BOOTSTRAP_PATH,
-                "# Session Bootstrap\n\nNo active session yet.\n\nStart one with `python3 .agent/tools/agent_session.py start <name> --goal \"<goal>\"`.\n",
-            )
+            warnings.append(f"missing optional bootstrap pointer {BOOTSTRAP_PATH}")
+            if args.record:
+                write(
+                    BOOTSTRAP_PATH,
+                    "# Session Bootstrap\n\nNo active session yet.\n\nStart one with `python3 .agent/tools/agent_session.py start <name> --goal \"<goal>\"`.\n",
+                )
     else:
         directory = session_dir(session_id)
-        ensure_session_offload_files(session_id)
+        if args.record:
+            ensure_session_offload_files(session_id)
         for name in (
             "session.md",
             "context.md",
@@ -1205,13 +1214,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         if validation.strip() in {f"# Validation: {session_id}", f"# Validation: {session_id}\n"} or not validation_entries:
             warnings.append("validation.md has no recorded validation")
 
-        refresh_resume_prompt(session_id)
-        if not grounding_path(session_id).exists():
-            write(grounding_path(session_id), render_grounding(session_id))
-        refresh_offload_artifacts(session_id)
-        write_bootstrap(session_id)
         git_status = git_status_short()
-        git_status_snapshot = refresh_git_status_snapshot(session_id, git_status)
+        if args.record:
+            refresh_resume_prompt(session_id)
+            if not grounding_path(session_id).exists():
+                write(grounding_path(session_id), render_grounding(session_id))
+            refresh_offload_artifacts(session_id)
+            write_bootstrap(session_id)
+        git_status_snapshot = git_status_snapshot_path(session_id)
         if git_status and read(git_status_snapshot).rstrip("\n") != git_status.rstrip("\n"):
             warnings.append(f"worktree has changes not reflected in {git_status_snapshot}")
 
@@ -1499,8 +1509,13 @@ def build_parser() -> argparse.ArgumentParser:
     resume.add_argument("session_id", nargs="?")
     resume.set_defaults(func=cmd_resume)
 
-    bootstrap = subparsers.add_parser("bootstrap", help="Print the active session bootstrap packet")
+    bootstrap = subparsers.add_parser("bootstrap", help="Print the active session bootstrap packet without writing by default")
     bootstrap.add_argument("session_id", nargs="?")
+    bootstrap.add_argument(
+        "--record",
+        action="store_true",
+        help="Refresh bootstrap.md, refs/git-status-short.txt, and append a bootstrap event before printing",
+    )
     bootstrap.set_defaults(func=cmd_bootstrap)
 
     compact = subparsers.add_parser("compact", help="Refresh handoff, bootstrap, and resume artifacts")
@@ -1555,7 +1570,12 @@ def build_parser() -> argparse.ArgumentParser:
     rollover.add_argument("--refresh-grounding", action="store_true")
     rollover.set_defaults(func=cmd_rollover)
 
-    doctor = subparsers.add_parser("doctor", help="Check active session continuity health")
+    doctor = subparsers.add_parser("doctor", help="Check active session continuity health without writing by default")
+    doctor.add_argument(
+        "--record",
+        action="store_true",
+        help="Repair/refresh bootstrap, resume, offload, grounding, and git-status artifacts while checking",
+    )
     doctor.set_defaults(func=cmd_doctor)
 
     archive = subparsers.add_parser("archive", help="Archive a session")

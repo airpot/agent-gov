@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from datetime import datetime, timezone
@@ -33,6 +34,25 @@ def write_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def confined_repo_file(value: object) -> Path | None:
+    if not isinstance(value, str) or not value or Path(value).is_absolute():
+        return None
+    try:
+        resolved = Path(value).resolve(strict=True)
+        resolved.relative_to(Path.cwd().resolve())
+    except (OSError, ValueError):
+        return None
+    return resolved if resolved.is_file() else None
+
+
 def parse_date(value: str) -> datetime | None:
     for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%SZ"):
         try:
@@ -47,6 +67,15 @@ def days_since(value: str) -> int | None:
     if parsed is None:
         return None
     return (datetime.now(timezone.utc) - parsed).days
+
+
+def date_error(value: object, field: str) -> str:
+    parsed = parse_date(value) if isinstance(value, str) else None
+    if parsed is None:
+        return f"{field} is invalid"
+    if parsed > datetime.now(timezone.utc):
+        return f"{field} must not be in the future"
+    return ""
 
 
 def finding(kind: str, severity: str, summary: str, path: str = "") -> dict:
@@ -101,13 +130,67 @@ def check_baselines(config: dict) -> list[dict]:
     results: list[dict] = []
     baselines = load_json(Path(".agent/baselines.json"), {})
     warn_days = int(config.get("policy", {}).get("baseline_warn_after_days", 30))
-    for item in baselines.get("snapshots", []):
+    snapshots = baselines.get("snapshots", [])
+    if not isinstance(snapshots, list):
+        return [finding("baseline_index", "error", "baseline snapshots must be a list", ".agent/baselines.json")]
+    for item in snapshots:
+        if not isinstance(item, dict):
+            results.append(finding("baseline_index", "error", "baseline snapshot entry must be an object", ".agent/baselines.json"))
+            continue
         path = item.get("path", "")
-        if path and not Path(path).exists():
-            results.append(finding("missing_baseline", "warning", "baseline snapshot listed but file is missing", path))
+        if not isinstance(path, str) or not path:
+            results.append(finding("missing_baseline", "error", "baseline snapshot path is missing"))
+            continue
+        snapshot_path = confined_repo_file(path)
+        if snapshot_path is None:
+            results.append(finding("missing_baseline", "error", "baseline snapshot must be an existing repository-local file", path))
+            continue
+        created_at_error = date_error(item.get("created_at", ""), "baseline created_at")
+        if created_at_error:
+            results.append(finding("baseline_date", "error", created_at_error, path))
+        for field in ("last_reviewed_at", "reviewed_at"):
+            if field in item and item.get(field) not in {None, ""}:
+                review_date_error = date_error(item.get(field), f"baseline {field}")
+                if review_date_error:
+                    results.append(finding("baseline_date", "error", review_date_error, path))
         age_source = item.get("last_reviewed_at") or item.get("reviewed_at") or item.get("created_at", "")
         age = days_since(age_source)
-        if age is not None and age > warn_days:
+        expected_hash = item.get("sha256")
+        if not isinstance(expected_hash, str) or len(expected_hash) != 64:
+            results.append(finding("baseline_integrity", "error", "baseline snapshot requires SHA-256", path))
+        else:
+            try:
+                actual_hash = sha256_file(snapshot_path)
+            except OSError as exc:
+                results.append(finding("baseline_integrity", "error", f"unable to hash baseline: {exc}", path))
+            else:
+                if actual_hash != expected_hash:
+                    results.append(finding("baseline_integrity", "error", "baseline snapshot SHA-256 does not match the retention index", path))
+        lifecycle = item.get("lifecycle", "active")
+        if lifecycle not in {"active", "historical", "superseded", "retained"}:
+            results.append(finding("baseline_lifecycle", "error", f"baseline snapshot has invalid lifecycle {lifecycle!r}", path))
+            continue
+        if lifecycle != "active":
+            review = item.get("retention_review")
+            if not isinstance(review, dict):
+                results.append(finding("baseline_retention", "error", "historical baseline requires structured retention_review", path))
+                continue
+            reviewed_at = review.get("reviewed_at", "")
+            reviewed_at_error = date_error(reviewed_at, "retention_review reviewed_at")
+            if reviewed_at_error:
+                results.append(finding("baseline_retention", "error", reviewed_at_error, path))
+            if review.get("decision") not in {"retain", "supersede"}:
+                results.append(finding("baseline_retention", "error", "retention_review decision must be retain or supersede", path))
+            if not isinstance(review.get("rationale"), str) or not review.get("rationale", "").strip():
+                results.append(finding("baseline_retention", "error", "retention_review rationale is missing", path))
+            evidence = review.get("evidence", "")
+            if confined_repo_file(evidence) is None:
+                results.append(finding("baseline_retention", "error", "retention_review evidence must be an existing repository-local file", path))
+            if lifecycle == "superseded" and review.get("decision") != "supersede":
+                results.append(finding("baseline_retention", "error", "superseded baseline requires a supersede decision", path))
+            if lifecycle in {"historical", "retained"} and review.get("decision") != "retain":
+                results.append(finding("baseline_retention", "error", f"{lifecycle} baseline requires a retain decision", path))
+        if age is not None and age > warn_days and lifecycle == "active":
             results.append(finding("stale_baseline", "warning", f"baseline snapshot review is {age} days old", path))
     return results
 
@@ -215,7 +298,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         print(f"agent governance gc {report['status']}: {report['counts']['errors']} error(s), {report['counts']['warnings']} warning(s)")
     if report["counts"]["errors"]:
         return 1
-    if args.fail_on_warning and report["counts"]["warnings"]:
+    configured_fail_on_warning = load_json(CONFIG_PATH, {}).get("policy", {}).get("fail_on_warning") is True
+    if (args.fail_on_warning or configured_fail_on_warning) and report["counts"]["warnings"]:
         return 1
     return 0
 

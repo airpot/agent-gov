@@ -27,15 +27,20 @@ MCP_TRANSPORTS = {"stdio", "http", "sse", "streamable-http", "websocket", "custo
 SAFE_SECRET_POLICY_VALUES = {"references-only", "outside-repo", "vault-or-proxy"}
 MANUAL_EXCEPTION_FIELDS = ("rationale", "owner", "review_evidence", "validation_evidence", "residual_risk")
 SAFE_NON_SECRET_STRING_KEYS = {
+    "adapter",
     "default_posture",
     "dependency_execution",
     "execution_policy",
+    "language",
     "manual_llm_development",
+    "manager",
     "project_name",
     "review_evidence",
     "silent_dependency_install",
     "status",
     "validation_evidence",
+    "version_policy",
+    "version_status",
 }
 
 

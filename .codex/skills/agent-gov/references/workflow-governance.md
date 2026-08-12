@@ -127,7 +127,7 @@ For `bugfix`, `standard`, and `full` tasks, the requirements interview gate must
 For task-board-backed `tiny`, `bugfix`, `standard`, and `full` tasks, `state=done` requires a passing review gate:
 
 - `review_gate.status` is `pass`
-- `review_gate.latest_review` points to an existing review document
+- `review_gate.latest_review` points to an existing repository-local regular file; absolute paths, repository escapes, directories, and external symlink targets are invalid
 - `review_gate.open_findings` is empty
 - the delivery conclusion is recorded
 
@@ -233,7 +233,7 @@ Use `.agent/review-policy.json` for traceability:
 - Incidental lines should be removed or recorded as an exception.
 - Risky lines require risk review and, for high or critical risk, human review evidence.
 
-Human review evidence must name reviewer, review type, diff range, files reviewed, high-risk paths checked, and conclusion. Agent summaries and automated reviews can inform this process but do not replace required tests or human review.
+Human review evidence must set `reviewer_type=human` and name reviewer, review type, diff range, files reviewed, high-risk paths checked, conclusion, and an existing repository-local regular review file. Derive this gate from high/critical task risk before verification, handoff, finish, done, or archived boundaries; an ordinary stage review does not satisfy it. Existing repositories may record bounded legacy exemptions only for tasks already terminal before `human_review_enforcement_started_at`; each entry needs a reason and repo-local evidence, and it never upgrades automated evidence to human evidence. Agent summaries and automated reviews can inform this process but do not replace required tests or human review.
 
 ## TDD And Debugging Evidence
 

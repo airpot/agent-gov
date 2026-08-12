@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import hashlib
 import json
 import re
 import subprocess
@@ -61,6 +62,36 @@ GOAL_CONTRACT_REQUIRED_FIELDS = (
 GOAL_CONTRACT_LIST_FIELDS = {"non_goals", "constraints", "success_evidence", "stop_conditions", "open_decisions"}
 GOAL_CONTRACT_NONEMPTY_LIST_FIELDS = {"non_goals", "constraints", "success_evidence", "stop_conditions"}
 TASK_DECOMPOSITION_EVIDENCE_FIELDS = ("summary", "next_task", "evidence_path")
+RISK_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+DEFAULT_HUMAN_REVIEW_FIELDS = (
+    "reviewer_type",
+    "reviewer",
+    "review_type",
+    "diff_range",
+    "files_reviewed",
+    "high_risk_paths_checked",
+    "conclusion",
+)
+
+
+def existing_repo_file(value: str, root: Path = Path(".")) -> bool:
+    candidate = Path(value)
+    if not value or candidate.is_absolute():
+        return False
+    repository = root.resolve()
+    try:
+        resolved = (repository / candidate).resolve(strict=True)
+        resolved.relative_to(repository)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return resolved.is_file()
+
+
+def parse_utc(value: object) -> datetime | None:
+    try:
+        return datetime.strptime(str(value), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
 
 
 def utc_now() -> str:
@@ -81,6 +112,14 @@ def load_json(path: Path, fallback: dict | None = None) -> dict:
 def write_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def check_json(paths: list[str]) -> list[str]:
@@ -432,8 +471,8 @@ def review_gate_errors(task_id: str, item: dict, profile: dict, policy: dict) ->
         latest_review = str(gate.get("latest_review", "")).strip()
         if not latest_review:
             errors.append(f"{task_id} done without review_gate latest_review")
-        elif policy.get("review_gate_latest_review_must_exist") is True and not Path(latest_review).exists():
-            errors.append(f"{task_id} review_gate latest_review path missing: {latest_review}")
+        elif policy.get("review_gate_latest_review_must_exist") is True and not existing_repo_file(latest_review):
+            errors.append(f"{task_id} review_gate latest_review must be an existing repository-local file: {latest_review}")
     return errors
 
 
@@ -492,8 +531,61 @@ def stage_review_errors(task_id: str, item: dict, profile: dict, policy: dict) -
         latest_review = str(review.get("latest_review", "")).strip()
         if not latest_review:
             errors.append(f"{task_id} stage review {stage} missing latest_review")
-        elif policy.get("review_gate_latest_review_must_exist") is True and not Path(latest_review).exists():
-            errors.append(f"{task_id} stage review {stage} latest_review path missing: {latest_review}")
+        elif policy.get("review_gate_latest_review_must_exist") is True and not existing_repo_file(latest_review):
+            errors.append(f"{task_id} stage review {stage} latest_review must be an existing repository-local file: {latest_review}")
+    return errors
+
+
+def task_risk_errors(task_id: str, item: dict, profile: dict) -> list[str]:
+    risk = str(item.get("risk", ""))
+    max_risk = str(profile.get("max_risk", ""))
+    if risk not in RISK_ORDER:
+        return [f"{task_id} invalid risk: {risk}"]
+    if max_risk not in RISK_ORDER:
+        return [f"{task_id} profile invalid max_risk: {max_risk}"]
+    if RISK_ORDER[risk] > RISK_ORDER[max_risk]:
+        return [f"{task_id} risk {risk} exceeds profile {item.get('profile')} max_risk {max_risk}"]
+    return []
+
+
+def human_review_errors(task_id: str, item: dict, policy: dict) -> list[str]:
+    if str(item.get("risk", "")) not in set(policy.get("human_review_required_for_risks", ["high", "critical"])):
+        return []
+    legacy = policy.get("human_review_legacy_exemptions", [])
+    exemption = next((entry for entry in legacy if isinstance(entry, dict) and entry.get("task_id") == task_id), None)
+    enforcement_started = parse_utc(policy.get("human_review_enforcement_started_at"))
+    completed_at = parse_utc(item.get("updated_at"))
+    if exemption is not None and item.get("state") in {"done", "archived"} and completed_at and enforcement_started and completed_at < enforcement_started:
+        return []
+    protected_states = set(policy.get("human_review_required_before_states", ["done", "archived"]))
+    protected_stages = set(policy.get("human_review_required_before_stages", ["verification", "handoff", "finish"]))
+    if item.get("state") not in protected_states and item.get("current_stage") not in protected_stages:
+        return []
+    review = stage_reviews(item).get("human_review")
+    if not isinstance(review, dict):
+        return [f"{task_id} requires human_review evidence for risk {item.get('risk')}"]
+    errors: list[str] = []
+    if review.get("status") != policy.get("review_gate_pass_status", "pass"):
+        errors.append(f"{task_id} human_review must be pass")
+    if any(str(finding).strip() for finding in review.get("open_findings", [])):
+        errors.append(f"{task_id} human_review has open findings")
+    latest_review = str(review.get("latest_review", "")).strip()
+    if not latest_review:
+        errors.append(f"{task_id} human_review missing latest_review")
+    elif policy.get("review_gate_latest_review_must_exist") is True and not existing_repo_file(latest_review):
+        errors.append(f"{task_id} human_review latest_review must be an existing repository-local file: {latest_review}")
+    evidence = review.get("evidence")
+    if not isinstance(evidence, dict):
+        return errors + [f"{task_id} human_review evidence must be an object"]
+    for field in policy.get("human_review_required_fields") or DEFAULT_HUMAN_REVIEW_FIELDS:
+        value = evidence.get(field)
+        if field in {"files_reviewed", "high_risk_paths_checked"}:
+            if not isinstance(value, list) or not any(str(entry).strip() for entry in value):
+                errors.append(f"{task_id} human_review evidence missing {field}")
+        elif not str(value or "").strip():
+            errors.append(f"{task_id} human_review evidence missing {field}")
+    if evidence.get("reviewer_type") != "human":
+        errors.append(f"{task_id} human_review reviewer_type must be human")
     return errors
 
 
@@ -529,6 +621,41 @@ def check_task_board() -> list[str]:
         errors.append("task board must require review-fix loops at stage exit")
     if set(policy.get("stage_review_loop_required_for_profiles", [])) != {"standard", "full"}:
         errors.append("task board must require stage review loops for standard and full profiles")
+    if set(policy.get("human_review_required_for_risks", [])) != {"high", "critical"}:
+        errors.append("task board must require human review for high and critical risks")
+    if set(policy.get("human_review_required_before_states", [])) != {"done", "archived"}:
+        errors.append("task board human review protected states must be done and archived")
+    if set(policy.get("human_review_required_before_stages", [])) != {"verification", "handoff", "finish"}:
+        errors.append("task board human review protected stages must be verification, handoff, and finish")
+    if set(policy.get("human_review_required_fields", [])) != set(DEFAULT_HUMAN_REVIEW_FIELDS):
+        errors.append("task board human review required fields must match generated policy")
+    legacy = policy.get("human_review_legacy_exemptions", [])
+    if not isinstance(legacy, list):
+        errors.append("task board human_review_legacy_exemptions must be a list")
+        legacy = []
+    items_by_id = {str(item.get("id", "")): item for item in board.get("items", []) if isinstance(item, dict)}
+    enforcement_started = parse_utc(policy.get("human_review_enforcement_started_at"))
+    if enforcement_started is None or enforcement_started > datetime.now(timezone.utc):
+        errors.append("task board human_review_enforcement_started_at must be a valid non-future UTC timestamp")
+    legacy_ids: set[str] = set()
+    for entry in legacy:
+        if not isinstance(entry, dict):
+            errors.append("task board human review legacy exemption must be an object")
+            continue
+        task_id = str(entry.get("task_id", ""))
+        if not task_id or task_id in legacy_ids:
+            errors.append(f"task board human review legacy exemption has missing or duplicate task_id: {task_id}")
+            continue
+        legacy_ids.add(task_id)
+        task = items_by_id.get(task_id)
+        if not task or task.get("state") not in {"done", "archived"}:
+            errors.append(f"task board human review legacy exemption must reference a terminal task: {task_id}")
+        elif enforcement_started is None or parse_utc(task.get("updated_at")) is None or parse_utc(task.get("updated_at")) >= enforcement_started:
+            errors.append(f"task board human review legacy exemption must predate policy enforcement: {task_id}")
+        if not str(entry.get("reason", "")).strip():
+            errors.append(f"task board human review legacy exemption missing reason: {task_id}")
+        if not existing_repo_file(str(entry.get("evidence", "")).strip()):
+            errors.append(f"task board human review legacy exemption evidence must be an existing repository-local file: {task_id}")
     for item in board.get("items", []):
         task_id = item.get("id")
         if not task_id:
@@ -549,6 +676,7 @@ def check_task_board() -> list[str]:
         allowed_stages = set(profile.get("stages", []))
         if allowed_stages and item.get("current_stage") not in allowed_stages:
             errors.append(f"{task_id} invalid current_stage for profile {item.get('profile')}: {item.get('current_stage')}")
+        errors.extend(task_risk_errors(task_id, item, profile))
         if item.get("state") == "done" and policy.get("done_requires_delivery_conclusion") is True:
             if not str(item.get("delivery_conclusion", "")).strip():
                 errors.append(f"{task_id} done without delivery_conclusion")
@@ -557,6 +685,7 @@ def check_task_board() -> list[str]:
         errors.extend(goal_contract_errors(task_id, item, policy))
         errors.extend(review_gate_errors(task_id, item, profile, policy))
         errors.extend(stage_review_errors(task_id, item, profile, policy))
+        errors.extend(human_review_errors(task_id, item, policy))
         docs_path = item.get("docs_path")
         if profile.get("feature_doc_templates") and (not docs_path or not Path(docs_path).exists()):
             errors.append(f"{task_id} docs_path missing or absent: {docs_path}")
@@ -779,6 +908,7 @@ def check_governance_configs(config: dict) -> list[str]:
             ".agent/governance-gc.json",
             ".agent/resources.json",
             ".agent/blueprint.json",
+            ".agent/frontend.json",
         }
     }
     expected.setdefault(".agent/manifest.json", "agent-governance-manifest-v1")
@@ -973,6 +1103,24 @@ def check_governance_configs(config: dict) -> list[str]:
             if result.returncode != 0:
                 output = (result.stdout + result.stderr).strip()
                 errors.append(f"project blueprint doctor failed: {output}")
+    if check_enabled(config, "frontend_governance"):
+        frontend_check = config.get("checks", {}).get("frontend_governance", {})
+        frontend_path = Path(frontend_check.get("path", ".agent/frontend.json"))
+        frontend = load_json(frontend_path, {})
+        if frontend.get("schema") != "agent-frontend-governance-v1":
+            errors.append(f"{frontend_path} schema must be agent-frontend-governance-v1")
+        for name in (
+            frontend_check.get("doc", "docs/FRONTEND_GOVERNANCE.md"),
+            frontend_check.get("script", "scripts/agent_frontend.py"),
+        ):
+            if not Path(name).exists():
+                errors.append(f"missing {name}")
+        script = frontend_check.get("script", "scripts/agent_frontend.py")
+        if Path(script).exists():
+            result = subprocess.run([sys.executable, script, "doctor"], text=True, capture_output=True, check=False)
+            if result.returncode != 0:
+                output = (result.stdout + result.stderr).strip()
+                errors.append(f"frontend governance doctor failed: {output}")
     return errors
 
 
@@ -1031,10 +1179,21 @@ def check_contract_control_surfaces(config: dict) -> list[str]:
         for key in ("id", "baseline_behavior", "expected_behavior", "validation", "protected_invariants", "rejected_regressions"):
             if key not in item:
                 errors.append(f"regression criteria entry missing {key}")
+    baseline_policy = baselines.get("policy", {})
+    if baseline_policy.get("snapshot_content_is_immutable") is not True:
+        errors.append(".agent/baselines.json must make snapshot content immutable")
+    if set(baseline_policy.get("snapshot_lifecycle_values", [])) != {"active", "historical", "superseded", "retained"}:
+        errors.append(".agent/baselines.json snapshot lifecycle values are invalid")
+    if baseline_policy.get("historical_retention_review_required") is not True or baseline_policy.get("snapshot_sha256_required") is not True:
+        errors.append(".agent/baselines.json historical retention review and SHA-256 must be required")
 
     gc_config = load_json(Path(".agent/governance-gc.json"), {})
     if gc_config.get("checks", {}).get("component_expiry") is not True:
         errors.append(".agent/governance-gc.json checks must enable component_expiry")
+    if gc_config.get("policy", {}).get("report_warnings_without_failing_by_default") is not True:
+        errors.append(".agent/governance-gc.json must report warnings without failing by default")
+    if not isinstance(gc_config.get("policy", {}).get("fail_on_warning"), bool):
+        errors.append(".agent/governance-gc.json fail_on_warning must be boolean")
     components = gc_config.get("component_expiry", {}).get("components", [])
     if not isinstance(components, list) or not components:
         errors.append(".agent/governance-gc.json component_expiry.components must be non-empty")
@@ -1192,11 +1351,22 @@ def write_snapshot(name: str, snapshot: dict) -> Path:
     if not re.match(r"^[a-zA-Z0-9._-]{1,80}$", name):
         raise SystemExit("error: snapshot name must be alphanumeric with dot, underscore, or hyphen")
     baselines = load_json(BASELINES_PATH, {"schema": "agent-baselines-v1", "snapshots": []})
+    entries = baselines.get("snapshots", [])
+    if not isinstance(entries, list):
+        raise SystemExit("error: baseline snapshots must be a list")
     snapshot_dir = Path(baselines.get("snapshot_dir", ".agent/baselines"))
+    if snapshot_dir.is_absolute():
+        raise SystemExit("error: baseline snapshot_dir must be repository-relative")
     path = snapshot_dir / f"{name}.json"
+    try:
+        path.resolve(strict=False).relative_to(Path.cwd().resolve())
+    except ValueError:
+        raise SystemExit("error: baseline snapshot path escapes the repository") from None
+    if path.exists() or any(entry.get("name") == name for entry in entries if isinstance(entry, dict)):
+        raise SystemExit(f"error: baseline snapshot already exists: {name}; use a new immutable snapshot name")
     write_json(path, snapshot)
-    item = {"name": name, "path": str(path), "created_at": snapshot["created_at"]}
-    existing = [entry for entry in baselines.get("snapshots", []) if entry.get("name") != name]
+    item = {"name": name, "path": str(path), "created_at": snapshot["created_at"], "lifecycle": "active", "sha256": sha256_file(path)}
+    existing = list(entries)
     existing.append(item)
     baselines["snapshots"] = existing
     baselines["latest_snapshot"] = str(path)

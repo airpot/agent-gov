@@ -34,6 +34,8 @@ LEGACY_CONFIG_PATH_KEYS = {
     "project_skills",
     "project_blueprint",
     "project_blueprint_doc",
+    "frontend_governance",
+    "frontend_governance_doc",
     "skill_runtime",
     "runtime_policy",
     "model_profiles",
@@ -302,6 +304,14 @@ def collect_plan() -> dict:
 
     if profile in PROFILES:
         floor = profile_floor_paths(profile)
+        if Path(".agent/frontend.json").exists():
+            floor.update(
+                {
+                    ".agent/frontend.json",
+                    "scripts/agent_frontend.py",
+                    "docs/FRONTEND_GOVERNANCE.md",
+                }
+            )
         missing_from_harness = sorted(path for path in floor if path not in required)
         if missing_from_harness:
             warnings.append(f"{len(missing_from_harness)} expected {profile} path(s) are not listed in harness required_paths")
@@ -354,6 +364,28 @@ def collect_plan() -> dict:
                 continue
             if schema and data.get("schema") != schema:
                 errors.append(f"{path} schema must be {schema}")
+
+    frontend_path = Path(".agent/frontend.json")
+    if frontend_path.exists():
+        frontend, error = read_json(frontend_path)
+        if error:
+            errors.append(error)
+        elif frontend.get("schema") != "agent-frontend-governance-v1":
+            errors.append(".agent/frontend.json schema must be agent-frontend-governance-v1")
+        expected_frontend_paths = {
+            "frontend_governance": ".agent/frontend.json",
+            "frontend_governance_doc": "docs/FRONTEND_GOVERNANCE.md",
+        }
+        config_paths = config_path_pointers(config)
+        for key, path in expected_frontend_paths.items():
+            if config_paths.get(key) != path:
+                errors.append(f".agent/config.json paths.{key} must be {path} when frontend governance is enabled")
+        frontend_harness = harness.get("frontend", {})
+        if frontend_harness.get("authority") != ".agent/frontend.json":
+            errors.append(".agent/harness.json frontend.authority must be .agent/frontend.json")
+        readiness = harness.get("validation", {}).get("readiness", [])
+        if "python3 scripts/agent_frontend.py readiness" not in readiness:
+            errors.append(".agent/harness.json must include frontend readiness when frontend governance is enabled")
 
     status = "fail" if errors else "warn" if warnings or actions else "pass"
     return {

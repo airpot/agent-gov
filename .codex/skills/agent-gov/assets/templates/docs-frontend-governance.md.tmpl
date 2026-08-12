@@ -1,0 +1,48 @@
+# Frontend Web Governance
+
+This project enables the optional `frontend-web` governance extension.
+
+## Authorities
+
+- Architecture summary: `.agent/blueprint.json#/frontend_stack_decision`
+- Detailed policy: `.agent/frontend.json`
+- Structural health: `python3 scripts/agent_frontend.py doctor`
+- Implementation/release readiness: `python3 scripts/agent_frontend.py readiness`
+- Review report: `python3 scripts/agent_frontend.py report --json`
+- Lane runner: `python3 scripts/agent_frontend.py run-lane <lane>`
+- Browser runner: `python3 scripts/agent_frontend.py run-browser`
+
+## Stack Decision
+
+Read the generated authorities before frontend implementation. Preserve existing package manifests and lockfiles. Greenfield client-rendered applications default to React, TypeScript strict mode, Vite, and React Router. Next.js requires a normalized SEO, SSR/SSG, streaming, React Server Components, integrated server runtime, or deployment constraint. Any other reason requires `nextjs_reviewed_exception` with rationale, owner, and an existing repository-relative review-evidence file.
+
+Agent-gov does not migrate frontend frameworks or install application dependencies.
+
+## Acceptance
+
+Static, component, E2E, visual, accessibility, performance, security, and release lanes live in `.agent/frontend.json`. Commands are application-owned. A lane marked `required` needs a command and repository-relative evidence path, then must be executed through `run-lane` so the runner records the exact command, run id, timestamps, outcome, and producer.
+
+Final completion requires current evidence from a real browser rendering the application. Configure the browser command, evidence path, viewports, and browser families, then use `run-browser`. The command receives runner environment variables and writes the browser record; the runner binds it to a sidecar receipt with command, run id, execution window, and SHA-256. Lint, typecheck, build, source review, static HTML inspection, and non-browser screenshots are prechecks only.
+
+Config pass fields, empty files, manually written uncorrelated records, and stale or repository-external evidence do not satisfy readiness. Runner correlation is an auditable execution boundary, not a cryptographic trust root for project-owned commands or human identity.
+
+## Accessibility And Performance
+
+Use the project's recorded WCAG target and supported viewports. Combine automated checks with keyboard, focus, semantics, contrast, reflow, reduced motion, and interaction review. When Core Web Vitals are enabled, default good p75 thresholds are LCP <= 2.5 s, INP <= 200 ms, and CLS <= 0.1, assessed separately for mobile and desktop where applicable. Alternative thresholds require `threshold_policy: reviewed-alternative` plus a rationale, owner, and existing repository-relative review-evidence path in `alternative_policy`.
+
+## Visualization
+
+Apache ECharts is recommended only when visualization is enabled. If selected, require modular imports, stable dimensions, resize/dispose lifecycle handling, an explicit SVG-or-Canvas decision, ARIA registration and enablement, text/table alternatives, non-color encoding, all data states, untrusted-content rules, and an SSR/export policy. Canvas also requires an existing repository-relative measurement evidence file.
+
+## Release Gate
+
+Before a frontend handoff or release claim:
+
+```bash
+python3 scripts/agent_frontend.py doctor
+python3 scripts/agent_frontend.py readiness
+python3 scripts/agent_frontend.py report --json
+python3 scripts/agent_check.py --strict
+```
+
+Do not replace missing browser evidence with a narrative assertion or fabricated result.

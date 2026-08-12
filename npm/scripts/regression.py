@@ -4,12 +4,14 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import traceback
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -112,6 +114,77 @@ def assert_no_missing_doc_refs(target: Path) -> None:
                 raise SystemExit(1)
 
 
+def assert_packed_artifact(temp_root: Path, python: str) -> None:
+    pack_dir = temp_root / "packed-artifact"
+    pack_dir.mkdir(parents=True, exist_ok=True)
+    packed = run(["npm", "pack", "--silent", "--pack-destination", str(pack_dir)], cwd=PACKAGE_ROOT)
+    tarball_name = packed.stdout.strip().splitlines()[-1]
+    tarball = pack_dir / tarball_name
+    if not tarball.is_file():
+        print("npm pack did not create the reported tarball", file=sys.stderr)
+        print(packed.stdout + packed.stderr, file=sys.stderr)
+        raise SystemExit(1)
+
+    install_root = temp_root / "packed-install"
+    install_root.mkdir(parents=True, exist_ok=True)
+    run(
+        [
+            "npm",
+            "install",
+            "--ignore-scripts",
+            "--no-audit",
+            "--no-fund",
+            "--prefix",
+            str(install_root),
+            str(tarball),
+        ],
+        cwd=PACKAGE_ROOT,
+    )
+    installed_package = install_root / "node_modules" / "@airpot" / "agent-gov"
+    installed_bin = installed_package / "npm" / "bin" / "agent-gov.mjs"
+    if not installed_bin.is_file():
+        print("packed npm install is missing the agent-gov executable", file=sys.stderr)
+        raise SystemExit(1)
+    expected_version = json.loads((installed_package / "package.json").read_text(encoding="utf-8"))["version"]
+    actual_version = run(["node", str(installed_bin), "--version"], cwd=install_root).stdout.strip()
+    if actual_version != expected_version:
+        print(f"packed CLI version mismatch: expected {expected_version}, got {actual_version}", file=sys.stderr)
+        raise SystemExit(1)
+    readme = (installed_package / "README.md").read_text(encoding="utf-8")
+    if f"`{expected_version}`" not in readme or "npm view @airpot/agent-gov version" not in readme:
+        print("packed README does not identify the candidate version and registry verification command", file=sys.stderr)
+        raise SystemExit(1)
+
+    help_target = temp_root / "packed-help-target"
+    run(["node", str(installed_bin), "init", str(help_target), "--help"], cwd=install_root)
+    if help_target.exists():
+        print("packed init --help created a target", file=sys.stderr)
+        raise SystemExit(1)
+
+    target = temp_root / "packed-init-target"
+    target.mkdir(parents=True, exist_ok=True)
+    run(
+        [
+            "node",
+            str(installed_bin),
+            "init",
+            str(target),
+            "--layout",
+            "minimal",
+            "--governance-profile",
+            "standard",
+        ],
+        cwd=install_root,
+    )
+    run(["node", str(installed_bin), "doctor", str(target)], cwd=install_root)
+    registry = json.loads((target / ".agent" / "project-skills.json").read_text(encoding="utf-8"))
+    if registry.get("skills", {}).get("agent-gov", {}).get("source", {}).get("ref") != expected_version:
+        print("packed init did not register its package version", file=sys.stderr)
+        print(json.dumps(registry, indent=2), file=sys.stderr)
+        raise SystemExit(1)
+    run([python, "scripts/agent_project_skills.py", "doctor"], cwd=target)
+
+
 def assert_install_skill_scope(temp_root: Path) -> None:
     project = temp_root / "install-scope-project"
     project.mkdir(parents=True, exist_ok=True)
@@ -159,6 +232,323 @@ def assert_doctor_requires_target_skill(temp_root: Path) -> None:
         print("doctor did not report the installed target agent-gov skill", file=sys.stderr)
         print(installed_output, file=sys.stderr)
         raise SystemExit(1)
+
+
+def assert_npm_install_safety_and_preflight(temp_root: Path, python: str) -> None:
+    help_target = temp_root / "init-help-no-side-effects"
+    run(["node", str(NPM_BIN), "init", str(help_target), "--help"], cwd=PACKAGE_ROOT)
+    if help_target.exists():
+        print("init --help created or modified its target", file=sys.stderr)
+        raise SystemExit(1)
+
+    invalid_args_target = temp_root / "invalid-init-args"
+    invalid_args_target.mkdir(parents=True, exist_ok=True)
+    run(
+        ["node", str(NPM_BIN), "init", str(invalid_args_target), "--not-a-real-initializer-option"],
+        cwd=PACKAGE_ROOT,
+        expect_ok=False,
+    )
+    if (invalid_args_target / ".codex").exists() or (invalid_args_target / ".agent").exists():
+        print("invalid initializer arguments modified the target before preflight failed", file=sys.stderr)
+        raise SystemExit(1)
+
+    skip_target = temp_root / "skip-skill-install"
+    skip_target.mkdir(parents=True, exist_ok=True)
+    run(
+        [
+            "node",
+            str(NPM_BIN),
+            "init",
+            str(skip_target),
+            "--layout",
+            "minimal",
+            "--governance-profile",
+            "standard",
+            "--skip-skill-install",
+        ],
+        cwd=PACKAGE_ROOT,
+    )
+    skip_registry = json.loads((skip_target / ".agent" / "project-skills.json").read_text(encoding="utf-8"))
+    if "agent-gov" in skip_registry.get("skills", {}) or (skip_target / ".codex" / "skills" / "agent-gov").exists():
+        print("--skip-skill-install installed or registered the bundled skill", file=sys.stderr)
+        print(json.dumps(skip_registry, indent=2), file=sys.stderr)
+        raise SystemExit(1)
+
+    invalid_python_target = temp_root / "invalid-python-override"
+    invalid_python_target.mkdir(parents=True, exist_ok=True)
+    invalid_env = dict(os.environ)
+    invalid_env["AGENT_GOV_PYTHON"] = "/bin/true" if not sys.platform.startswith("win") else "cmd"
+    invalid_python = run(
+        ["node", str(NPM_BIN), "init", str(invalid_python_target), "--layout", "minimal"],
+        cwd=PACKAGE_ROOT,
+        expect_ok=False,
+        env=invalid_env,
+    )
+    if "Python 3" not in (invalid_python.stdout + invalid_python.stderr):
+        print("invalid AGENT_GOV_PYTHON did not produce an actionable Python 3 error", file=sys.stderr)
+        print(invalid_python.stdout + invalid_python.stderr, file=sys.stderr)
+        raise SystemExit(1)
+    if (invalid_python_target / ".codex" / "skills" / "agent-gov").exists():
+        print("invalid Python preflight left an installed skill behind", file=sys.stderr)
+        raise SystemExit(1)
+
+    if not sys.platform.startswith("win"):
+        external = temp_root / "symlink-external"
+        external.mkdir(parents=True, exist_ok=True)
+        symlink_target = temp_root / "symlink-target"
+        skill_parent = symlink_target / ".codex" / "skills"
+        skill_parent.mkdir(parents=True, exist_ok=True)
+        (skill_parent / "agent-gov").symlink_to(external, target_is_directory=True)
+        escaped = run(
+            ["node", str(NPM_BIN), "install-skill", str(symlink_target)],
+            cwd=PACKAGE_ROOT,
+            expect_ok=False,
+        )
+        if "symlink" not in (escaped.stdout + escaped.stderr).lower():
+            print("symlink destination rejection did not explain the boundary failure", file=sys.stderr)
+            print(escaped.stdout + escaped.stderr, file=sys.stderr)
+            raise SystemExit(1)
+        if any(external.iterdir()):
+            print("project skill install wrote through a symlink outside the target", file=sys.stderr)
+            raise SystemExit(1)
+
+    conflict_target = temp_root / "existing-skill-conflict"
+    conflict_skill = conflict_target / ".codex" / "skills" / "agent-gov"
+    conflict_skill.mkdir(parents=True, exist_ok=True)
+    old_skill = "---\nname: agent-gov\ndescription: Existing reviewed local version.\n---\n\n# Existing\n"
+    (conflict_skill / "SKILL.md").write_text(old_skill, encoding="utf-8")
+    conflict = run(
+        ["node", str(NPM_BIN), "install-skill", str(conflict_target)],
+        cwd=PACKAGE_ROOT,
+        expect_ok=False,
+    )
+    if "conflict" not in (conflict.stdout + conflict.stderr).lower():
+        print("existing unmanifested skill rejection did not explain the conflict", file=sys.stderr)
+        print(conflict.stdout + conflict.stderr, file=sys.stderr)
+        raise SystemExit(1)
+    if (conflict_skill / "SKILL.md").read_text(encoding="utf-8") != old_skill:
+        print("conflicting existing skill was modified without force", file=sys.stderr)
+        raise SystemExit(1)
+    if len([path for path in conflict_skill.rglob("*") if path.is_file()]) != 1:
+        print("conflicting existing skill was partially merged with bundled files", file=sys.stderr)
+        raise SystemExit(1)
+
+    identity_target = temp_root / "install-identity"
+    identity_target.mkdir(parents=True, exist_ok=True)
+    run(["node", str(NPM_BIN), "install-skill", str(identity_target)], cwd=PACKAGE_ROOT)
+    installed_skill = identity_target / ".codex" / "skills" / "agent-gov"
+    install_manifest = installed_skill / ".agent-gov-install.json"
+    if not install_manifest.exists():
+        print("fresh skill install did not write an install identity manifest", file=sys.stderr)
+        raise SystemExit(1)
+    manifest = json.loads(install_manifest.read_text(encoding="utf-8"))
+    package_version = json.loads((PACKAGE_ROOT / "package.json").read_text(encoding="utf-8"))["version"]
+    if manifest.get("schema") != "agent-gov-install-v1" or manifest.get("package_version") != package_version:
+        print("skill install identity manifest has wrong schema or package version", file=sys.stderr)
+        print(json.dumps(manifest, indent=2), file=sys.stderr)
+        raise SystemExit(1)
+    run(["node", str(NPM_BIN), "doctor", str(identity_target)], cwd=PACKAGE_ROOT)
+    with (installed_skill / "SKILL.md").open("a", encoding="utf-8") as handle:
+        handle.write("\nlocal drift\n")
+    drifted = run(["node", str(NPM_BIN), "doctor", str(identity_target)], cwd=PACKAGE_ROOT, expect_ok=False)
+    if "identity" not in (drifted.stdout + drifted.stderr).lower() and "digest" not in (drifted.stdout + drifted.stderr).lower():
+        print("doctor did not identify installed skill content drift", file=sys.stderr)
+        print(drifted.stdout + drifted.stderr, file=sys.stderr)
+        raise SystemExit(1)
+
+    if not sys.platform.startswith("win"):
+        rollback_target = temp_root / "initializer-failure-rollback"
+        rollback_target.mkdir(parents=True, exist_ok=True)
+        counter_path = temp_root / "python-wrapper-count"
+        python_wrapper = temp_root / "python-wrapper.sh"
+        python_wrapper.write_text(
+            "#!/bin/sh\n"
+            f"counter='{counter_path}'\n"
+            "count=0\n"
+            "if [ -f \"$counter\" ]; then count=$(cat \"$counter\"); fi\n"
+            "count=$((count + 1))\n"
+            "printf '%s' \"$count\" > \"$counter\"\n"
+            "if [ \"$count\" -ge 3 ]; then exit 42; fi\n"
+            f"exec '{python}' \"$@\"\n",
+            encoding="utf-8",
+        )
+        python_wrapper.chmod(0o755)
+        rollback_env = dict(os.environ)
+        rollback_env["AGENT_GOV_PYTHON"] = str(python_wrapper)
+        run(
+            ["node", str(NPM_BIN), "init", str(rollback_target), "--layout", "minimal"],
+            cwd=PACKAGE_ROOT,
+            expect_ok=False,
+            env=rollback_env,
+        )
+        if (rollback_target / ".codex" / "skills" / "agent-gov").exists():
+            print("failed initializer did not roll back the skill installed by that invocation", file=sys.stderr)
+            raise SystemExit(1)
+
+        replacement_target = temp_root / "initializer-failure-restores-existing"
+        replacement_skill = replacement_target / ".codex" / "skills" / "agent-gov"
+        replacement_skill.mkdir(parents=True, exist_ok=True)
+        original_skill = "---\nname: agent-gov\ndescription: Preserve this existing skill.\n---\n\n# Preserve\n"
+        (replacement_skill / "SKILL.md").write_text(original_skill, encoding="utf-8")
+        replacement_counter = temp_root / "replacement-python-wrapper-count"
+        replacement_wrapper = temp_root / "replacement-python-wrapper.sh"
+        replacement_wrapper.write_text(
+            "#!/bin/sh\n"
+            f"counter='{replacement_counter}'\n"
+            "count=0\n"
+            "if [ -f \"$counter\" ]; then count=$(cat \"$counter\"); fi\n"
+            "count=$((count + 1))\n"
+            "printf '%s' \"$count\" > \"$counter\"\n"
+            "if [ \"$count\" -ge 3 ]; then exit 42; fi\n"
+            f"exec '{python}' \"$@\"\n",
+            encoding="utf-8",
+        )
+        replacement_wrapper.chmod(0o755)
+        replacement_env = dict(os.environ)
+        replacement_env["AGENT_GOV_PYTHON"] = str(replacement_wrapper)
+        run(
+            [
+                "node",
+                str(NPM_BIN),
+                "init",
+                str(replacement_target),
+                "--layout",
+                "minimal",
+                "--force-skill",
+            ],
+            cwd=PACKAGE_ROOT,
+            expect_ok=False,
+            env=replacement_env,
+        )
+        replacement_files = [path for path in replacement_skill.rglob("*") if path.is_file()]
+        if replacement_files != [replacement_skill / "SKILL.md"] or replacement_files[0].read_text(encoding="utf-8") != original_skill:
+            print("failed initializer did not restore the existing skill after forced replacement", file=sys.stderr)
+            raise SystemExit(1)
+
+
+def assert_fresh_npm_skill_registry(temp_root: Path, python: str) -> None:
+    target = temp_root / "fresh-npm-skill-registry"
+    target.mkdir(parents=True, exist_ok=True)
+    intake = temp_root / "fresh-npm-skill-registry-intake.json"
+    write_intake(
+        intake,
+        {
+            "project_target": "library",
+            "selection_status": "confirmed",
+            "language_preference": ["python"],
+        },
+    )
+    run(
+        [
+            "node",
+            str(NPM_BIN),
+            "init",
+            str(target),
+            "--layout",
+            "minimal",
+            "--governance-profile",
+            "standard",
+            "--architecture-intake",
+            str(intake),
+        ],
+        cwd=PACKAGE_ROOT,
+    )
+    registry_path = target / ".agent" / "project-skills.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    installed = registry.get("skills", {}).get("agent-gov", {})
+    if installed.get("path") != ".codex/skills/agent-gov" or installed.get("source", {}).get("kind") != "npm":
+        print("fresh npm init did not register bundled agent-gov as a managed project skill", file=sys.stderr)
+        print(json.dumps(registry, indent=2), file=sys.stderr)
+        raise SystemExit(1)
+    if not installed.get("source", {}).get("ref") or not installed.get("content", {}).get("tree_sha256"):
+        print("fresh npm skill registry is missing package version or content identity", file=sys.stderr)
+        print(json.dumps(installed, indent=2), file=sys.stderr)
+        raise SystemExit(1)
+    run([python, "scripts/agent_project_skills.py", "doctor"], cwd=target)
+
+    add_version_decisions(target)
+    mark_blueprint_reviewed(target)
+    saved_skills = registry["skills"]
+    registry["skills"] = {}
+    registry_path.write_text(json.dumps(registry, indent=2) + "\n", encoding="utf-8")
+    strict = run([python, "scripts/agent_check.py", "--strict"], cwd=target, expect_ok=False)
+    if "project skills readiness failed" not in (strict.stdout + strict.stderr):
+        print("strict readiness did not surface orphaned project skill failure", file=sys.stderr)
+        print(strict.stdout + strict.stderr, file=sys.stderr)
+        raise SystemExit(1)
+    score = run([python, "scripts/agent_score.py", "score", "--json"], cwd=target, expect_ok=False)
+    score_report = json.loads(score.stdout)
+    if score_report.get("status") != "fail" or "project_skills" not in score_report.get("hard_fail_dimensions", []):
+        print("governance score did not hard-fail orphaned project skill state", file=sys.stderr)
+        print(json.dumps(score_report, indent=2), file=sys.stderr)
+        raise SystemExit(1)
+    registry["skills"] = saved_skills
+    registry_path.write_text(json.dumps(registry, indent=2) + "\n", encoding="utf-8")
+
+    existing = temp_root / "existing-governed-skill-registry"
+    existing.mkdir(parents=True, exist_ok=True)
+    run(
+        [
+            python,
+            str(INIT_SCRIPT),
+            str(existing),
+            "--layout",
+            "minimal",
+            "--governance-profile",
+            "standard",
+        ],
+        cwd=PACKAGE_ROOT,
+    )
+    existing_registry_path = existing / ".agent" / "project-skills.json"
+    existing_registry = json.loads(existing_registry_path.read_text(encoding="utf-8"))
+    existing_registry["skills"]["agent-gov"] = {
+        "scope": "project",
+        "host": "codex",
+        "path": ".codex/skills/agent-gov",
+        "lifecycle": "active",
+        "intent": "workspace-only",
+        "owner": "existing-owner",
+        "risk": "high",
+        "source": {"kind": "repo-local", "repository": "", "ref": "old", "pinned": False},
+        "content": {"skill_md_sha256": "old", "tree_sha256": "old"},
+        "release": {"manifest": "existing-manifest.json", "publishable": False, "release_gate": "existing-gate"},
+        "review": {"requires_review": True, "latest_status": "pass", "latest_artifact": "docs/existing-review.md"},
+        "custom_policy": "preserve-me",
+    }
+    existing_registry_path.write_text(json.dumps(existing_registry, indent=2) + "\n", encoding="utf-8")
+    before_dry_run = existing_registry_path.read_bytes()
+    run(["node", str(NPM_BIN), "install-skill", str(existing), "--dry-run"], cwd=PACKAGE_ROOT)
+    if existing_registry_path.read_bytes() != before_dry_run:
+        print("install-skill --dry-run modified project-skills.json", file=sys.stderr)
+        raise SystemExit(1)
+
+    run(["node", str(NPM_BIN), "install-skill", str(existing)], cwd=PACKAGE_ROOT)
+    existing_registry = json.loads(existing_registry_path.read_text(encoding="utf-8"))
+    existing_entry = existing_registry.get("skills", {}).get("agent-gov", {})
+    if existing_entry.get("source", {}).get("kind") != "npm" or not existing_entry.get("content", {}).get("tree_sha256"):
+        print("install-skill did not register bundled agent-gov in an existing governed project", file=sys.stderr)
+        print(json.dumps(existing_registry, indent=2), file=sys.stderr)
+        raise SystemExit(1)
+    for key, expected in (
+        ("owner", "existing-owner"),
+        ("intent", "workspace-only"),
+        ("risk", "high"),
+        ("custom_policy", "preserve-me"),
+    ):
+        if existing_entry.get(key) != expected:
+            print(f"install-skill replaced project-owned registry metadata: {key}", file=sys.stderr)
+            print(json.dumps(existing_entry, indent=2), file=sys.stderr)
+            raise SystemExit(1)
+    if existing_entry.get("release", {}).get("release_gate") != "existing-gate":
+        print("install-skill replaced project-owned release governance metadata", file=sys.stderr)
+        raise SystemExit(1)
+    if existing_entry.get("review", {}).get("latest_status") != "pending" or existing_entry.get("review", {}).get("latest_artifact"):
+        print("install-skill did not invalidate required review evidence after lifecycle change", file=sys.stderr)
+        print(json.dumps(existing_entry.get("review", {}), indent=2), file=sys.stderr)
+        raise SystemExit(1)
+    existing_entry["review"] = {"requires_review": False, "latest_status": "not-required", "latest_artifact": ""}
+    existing_registry_path.write_text(json.dumps(existing_registry, indent=2) + "\n", encoding="utf-8")
+    run([python, "scripts/agent_project_skills.py", "doctor"], cwd=existing)
 
 
 def assert_blank_project_default_profile(temp_root: Path) -> None:
@@ -213,11 +603,111 @@ def assert_blank_project_default_profile(temp_root: Path) -> None:
     if (explicit / ".agent" / "subagents.json").exists():
         print("explicit standard profile unexpectedly created full-profile subagent config", file=sys.stderr)
         raise SystemExit(1)
+    for relative in (".agent/security.json", "scripts/agent_security.py"):
+        if not (explicit / relative).exists():
+            print(f"explicit standard profile did not create its security command registry: {relative}", file=sys.stderr)
+            raise SystemExit(1)
+    for relative in (".agent/tooling.json", "scripts/agent_tooling.py", "docs/SECURITY.md"):
+        if (explicit / relative).exists():
+            print(f"explicit standard profile unexpectedly created full-profile artifact: {relative}", file=sys.stderr)
+            raise SystemExit(1)
 
 
 def write_intake(path: Path, data: dict) -> None:
     payload = {"schema": "agent-architecture-intake-v1", **data}
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def assert_strict_architecture_intake(temp_root: Path, python: str) -> None:
+    invalid_values = ({"unexpected": True}, [True], 1, None, "not-a-boolean")
+    for index, value in enumerate(invalid_values):
+        intake_path = temp_root / f"invalid-boolean-intake-{index}.json"
+        write_intake(intake_path, {"skills_are_first_class": value})
+        target = temp_root / f"invalid-boolean-target-{index}"
+        target.mkdir(parents=True, exist_ok=True)
+        result = run(
+            [
+                python,
+                str(INIT_SCRIPT),
+                str(target),
+                "--layout",
+                "minimal",
+                "--governance-profile",
+                "standard",
+                "--architecture-intake",
+                str(intake_path),
+                "--no-makefile",
+            ],
+            cwd=PACKAGE_ROOT,
+            expect_ok=False,
+        )
+        output = result.stdout + result.stderr
+        if "architecture intake field skills_are_first_class" not in output:
+            print(f"malformed architecture boolean did not produce a field-specific error: {value!r}", file=sys.stderr)
+            print(output, file=sys.stderr)
+            raise SystemExit(1)
+        for relative in (".agent", ".codex", "AGENTS.md", "scripts"):
+            if (target / relative).exists():
+                print(f"malformed architecture intake left a partial target write: {relative}", file=sys.stderr)
+                raise SystemExit(1)
+
+    short_circuit_cases = (
+        (
+            "frontend-enabled-with-framework",
+            {"frontend": {"enabled": {"invalid": True}, "framework": "react"}},
+            "architecture intake field frontend.enabled",
+        ),
+        (
+            "frontend-confirmed-with-selection",
+            {"frontend": {"confirmed": [], "selection_status": "confirmed"}},
+            "architecture intake field frontend.confirmed",
+        ),
+        (
+            "visualization-confirmed-with-engine",
+            {"frontend": {"visualization_enabled": True, "visualization_engine": "echarts", "visualization_confirmed": 1}},
+            "architecture intake field frontend.visualization_confirmed",
+        ),
+        (
+            "mcp-enabled-with-target",
+            {"project_target": "mcp-server", "mcp_server_enabled": {"invalid": True}},
+            "architecture intake field mcp_server_enabled",
+        ),
+        (
+            "nested-vitals-enabled",
+            {"frontend": {"enabled": True, "core_web_vitals": {"enabled": "sometimes"}}},
+            "architecture intake field frontend.core_web_vitals.enabled",
+        ),
+    )
+    for case_id, payload, expected in short_circuit_cases:
+        intake_path = temp_root / f"strict-intake-{case_id}.json"
+        write_intake(intake_path, payload)
+        target = temp_root / f"strict-intake-target-{case_id}"
+        target.mkdir(parents=True, exist_ok=True)
+        result = run(
+            [
+                python,
+                str(INIT_SCRIPT),
+                str(target),
+                "--layout",
+                "minimal",
+                "--governance-profile",
+                "standard",
+                "--architecture-intake",
+                str(intake_path),
+                "--no-makefile",
+            ],
+            cwd=PACKAGE_ROOT,
+            expect_ok=False,
+        )
+        output = result.stdout + result.stderr
+        if expected not in output:
+            print(f"short-circuit architecture intake case did not fail on {expected}: {case_id}", file=sys.stderr)
+            print(output, file=sys.stderr)
+            raise SystemExit(1)
+        for relative in (".agent", ".codex", "AGENTS.md", "scripts"):
+            if (target / relative).exists():
+                print(f"short-circuit architecture intake left a partial target write: {case_id}: {relative}", file=sys.stderr)
+                raise SystemExit(1)
 
 
 def add_version_decisions(target: Path) -> None:
@@ -836,6 +1326,455 @@ no_impact_reason: ""
     run([python, "scripts/agent_blueprint.py", "doctor"], cwd=library)
 
 
+def assert_frontend_web_governance(temp_root: Path, python: str) -> None:
+    install_markers = ("node_modules", ".pnpm-store", ".yarn", "bun.lock", "bun.lockb")
+
+    def assert_doctor_finding(target: Path, expected: str) -> None:
+        result = subprocess.run(
+            [python, "scripts/agent_frontend.py", "doctor"],
+            cwd=target,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        output = result.stdout + result.stderr
+        if result.returncode == 0 or "Traceback" in output or expected not in output:
+            print(f"frontend doctor did not report deterministic finding: {expected}", file=sys.stderr)
+            print(output, file=sys.stderr)
+            raise SystemExit(1)
+
+    def assert_malformed_json_finding(
+        target: Path,
+        relative: str,
+        mutate: object,
+        expected: str,
+    ) -> None:
+        path = target / relative
+        original = path.read_text(encoding="utf-8")
+        data = json.loads(original)
+        mutate(data)
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        try:
+            assert_doctor_finding(target, expected)
+        finally:
+            path.write_text(original, encoding="utf-8")
+
+    non_web = temp_root / "frontend-non-web"
+    non_web.mkdir(parents=True, exist_ok=True)
+    run(
+        [
+            python,
+            str(INIT_SCRIPT),
+            str(non_web),
+            "--tech-stack",
+            "python",
+            "--layout",
+            "service",
+            "--governance-profile",
+            "standard",
+            "--no-makefile",
+        ],
+        cwd=PACKAGE_ROOT,
+    )
+    for relative in (".agent/frontend.json", "scripts/agent_frontend.py", "docs/FRONTEND_GOVERNANCE.md"):
+        if (non_web / relative).exists():
+            print(f"non-Web project unexpectedly generated frontend artifact: {relative}", file=sys.stderr)
+            raise SystemExit(1)
+    for relative in ("docs/PROJECT_BLUEPRINT.md", ".agent/templates/project-blueprint.md.tmpl"):
+        if "Frontend Web Stack Decision" in (non_web / relative).read_text(encoding="utf-8"):
+            print(f"non-Web project unexpectedly gained a frontend Blueprint section: {relative}", file=sys.stderr)
+            raise SystemExit(1)
+    run([python, "scripts/agent_check.py"], cwd=non_web)
+
+    web = temp_root / "frontend-web-default"
+    web.mkdir(parents=True, exist_ok=True)
+    run(
+        [
+            python,
+            str(INIT_SCRIPT),
+            str(web),
+            "--tech-stack",
+            "typescript",
+            "--layout",
+            "web-app",
+            "--governance-profile",
+            "standard",
+            "--no-makefile",
+        ],
+        cwd=PACKAGE_ROOT,
+    )
+    frontend_path = web / ".agent" / "frontend.json"
+    frontend = json.loads(frontend_path.read_text(encoding="utf-8"))
+    stack = frontend.get("stack_decision", {})
+    expected_stack = {
+        "profile": "react-vite-client",
+        "framework": "react",
+        "build_tool": "vite",
+        "router": "react-router",
+        "selection_status": "recommended",
+    }
+    for key, expected in expected_stack.items():
+        if stack.get(key) != expected:
+            print(f"greenfield Web stack {key} mismatch: expected {expected}, got {stack.get(key)}", file=sys.stderr)
+            raise SystemExit(1)
+    if stack.get("typescript", {}).get("strict") is not True:
+        print("greenfield Web stack did not require strict TypeScript", file=sys.stderr)
+        raise SystemExit(1)
+    if frontend.get("visualization", {}).get("engine") != "none" or "echarts" in frontend.get("visualization", {}):
+        print("greenfield Web stack enabled ECharts without visualization intake", file=sys.stderr)
+        raise SystemExit(1)
+    for marker in install_markers:
+        if (web / marker).exists():
+            print(f"frontend initialization unexpectedly created dependency artifact: {marker}", file=sys.stderr)
+            raise SystemExit(1)
+    run([python, "scripts/agent_frontend.py", "doctor"], cwd=web)
+    run([python, "scripts/agent_check.py"], cwd=web)
+    run([python, "scripts/agent_verify.py", "doctor"], cwd=web)
+    run([python, "scripts/agent_migrate.py", "doctor"], cwd=web)
+    malformed_cases = (
+        (".agent/frontend.json", lambda data: data["stack_decision"].__setitem__("typescript", []), "stack_decision.typescript must be an object"),
+        (".agent/frontend.json", lambda data: data.__setitem__("harness", []), "harness must be an object"),
+        (".agent/frontend.json", lambda data: data["harness"].__setitem__("lanes", []), "harness.lanes must be an object"),
+        (".agent/frontend.json", lambda data: data["browser_evidence"].__setitem__("viewports", {}), "browser_evidence.viewports must be a list"),
+        (".agent/frontend.json", lambda data: data["browser_evidence"].__setitem__("freshness_days", {}), "browser_evidence.freshness_days must be a positive integer"),
+        (".agent/frontend.json", lambda data: data["accessibility"].__setitem__("manual_coverage", {}), "accessibility.manual_coverage must be a list"),
+        (".agent/frontend.json", lambda data: data.__setitem__("ui_states", {}), "ui_states must be a list"),
+        (".agent/blueprint.json", lambda data: data.__setitem__("frontend_stack_decision", []), "missing BP-FRONTEND-001"),
+        (".agent/harness.json", lambda data: data.__setitem__("validation", []), "validation must be an object"),
+        (".agent/harness.json", lambda data: data.__setitem__("frontend", []), "frontend must be an object"),
+    )
+    for relative, mutate, expected in malformed_cases:
+        assert_malformed_json_finding(web, relative, mutate, expected)
+    readiness = run([python, "scripts/agent_frontend.py", "readiness"], cwd=web, expect_ok=False)
+    if "browser evidence missing" not in (readiness.stdout + readiness.stderr):
+        print("frontend readiness did not reject missing browser-rendered evidence", file=sys.stderr)
+        raise SystemExit(1)
+    strict = run([python, "scripts/agent_check.py", "--strict"], cwd=web, expect_ok=False)
+    if "frontend readiness failed" not in (strict.stdout + strict.stderr):
+        print("strict agent check did not propagate frontend readiness failure", file=sys.stderr)
+        raise SystemExit(1)
+    score = run([python, "scripts/agent_score.py", "score", "--json"], cwd=web, expect_ok=False)
+    score_report = json.loads(score.stdout)
+    if "frontend_governance" not in score_report.get("hard_fail_dimensions", []):
+        print("governance score did not hard-fail missing frontend readiness evidence", file=sys.stderr)
+        raise SystemExit(1)
+
+    default_vitals = frontend.get("performance", {}).get("core_web_vitals", {})
+    if default_vitals.get("threshold_policy") != "default-good-p75":
+        print("default Web Vitals policy was not recorded", file=sys.stderr)
+        print(json.dumps(default_vitals, indent=2), file=sys.stderr)
+        raise SystemExit(1)
+
+    rejected_vitals_intake = temp_root / "frontend-vitals-rejected.json"
+    rejected_vitals_intake.write_text(
+        json.dumps({"frontend": {"enabled": True, "core_web_vitals": {"lcp_ms": 3000}}}) + "\n",
+        encoding="utf-8",
+    )
+    rejected_vitals = temp_root / "frontend-vitals-rejected"
+    rejected_vitals.mkdir(parents=True, exist_ok=True)
+    run([python, str(INIT_SCRIPT), str(rejected_vitals), "--layout", "web-app", "--governance-profile", "standard", "--architecture-intake", str(rejected_vitals_intake), "--no-makefile"], cwd=PACKAGE_ROOT)
+    assert_doctor_finding(rejected_vitals, "alternative_policy missing rationale")
+
+    accepted_vitals_intake = temp_root / "frontend-vitals-accepted.json"
+    accepted_vitals_intake.write_text(
+        json.dumps(
+            {
+                "frontend": {
+                    "enabled": True,
+                    "core_web_vitals": {
+                        "percentile": 90,
+                        "lcp_ms": 3000,
+                        "inp_ms": 250,
+                        "cls": 0.15,
+                        "alternative_policy": {
+                            "rationale": "Authenticated analytics workspace prioritizes complete data hydration.",
+                            "owner": "frontend-architecture",
+                            "review_evidence": "docs/features/frontend-performance/05_CODE_REVIEW.md",
+                        },
+                    },
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    accepted_vitals = temp_root / "frontend-vitals-accepted"
+    accepted_vitals.mkdir(parents=True, exist_ok=True)
+    run([python, str(INIT_SCRIPT), str(accepted_vitals), "--layout", "web-app", "--governance-profile", "standard", "--architecture-intake", str(accepted_vitals_intake), "--no-makefile"], cwd=PACKAGE_ROOT)
+    accepted_policy = json.loads((accepted_vitals / ".agent" / "frontend.json").read_text(encoding="utf-8"))["performance"]["core_web_vitals"]
+    if accepted_policy.get("threshold_policy") != "reviewed-alternative" or accepted_policy.get("alternative_policy", {}).get("owner") != "frontend-architecture":
+        print("reviewed alternative Web Vitals policy was not preserved", file=sys.stderr)
+        print(json.dumps(accepted_policy, indent=2), file=sys.stderr)
+        raise SystemExit(1)
+    missing_vitals_evidence = run([python, "scripts/agent_frontend.py", "doctor"], cwd=accepted_vitals, expect_ok=False)
+    if "review_evidence does not exist" not in (missing_vitals_evidence.stdout + missing_vitals_evidence.stderr):
+        print("frontend doctor accepted a missing alternative Web Vitals review evidence path", file=sys.stderr)
+        raise SystemExit(1)
+    accepted_review_path = accepted_vitals / accepted_policy["alternative_policy"]["review_evidence"]
+    accepted_review_path.parent.mkdir(parents=True, exist_ok=True)
+    accepted_review_path.write_text("# Reviewed alternative Web Vitals policy\n", encoding="utf-8")
+    run([python, "scripts/agent_frontend.py", "doctor"], cwd=accepted_vitals)
+
+    lanes = frontend["harness"]["lanes"]
+    evidence_root = web / ".agent" / "local" / "frontend-evidence"
+    evidence_root.mkdir(parents=True, exist_ok=True)
+    fixture_script = web / "scripts" / "frontend_evidence_fixture.py"
+    fixture_script.write_text(
+        "from __future__ import annotations\n"
+        "import json\n"
+        "import os\n"
+        "from datetime import datetime, timezone\n"
+        "from pathlib import Path\n"
+        "\n"
+        "path = os.environ.get('AGENT_FRONTEND_EVIDENCE_PATH')\n"
+        "if path:\n"
+        "    payload = {\n"
+        "        'schema': 'agent-frontend-browser-evidence-v1',\n"
+        "        'kind': 'browser-rendered',\n"
+        "        'status': 'pass',\n"
+        "        'run_id': os.environ['AGENT_FRONTEND_RUN_ID'],\n"
+        "        'captured_at': datetime.now(timezone.utc).isoformat(timespec='microseconds').replace('+00:00', 'Z'),\n"
+        "        'rendered': True,\n"
+        "        'interaction_checks_passed': True,\n"
+        "        'responsive_checks_passed': True,\n"
+        "        'accessibility_checks_passed': True,\n"
+        "        'viewports': json.loads(os.environ['AGENT_FRONTEND_VIEWPORTS_JSON']),\n"
+        "        'browser_families': json.loads(os.environ['AGENT_FRONTEND_BROWSER_FAMILIES_JSON']),\n"
+        "        'runtime': {'console_errors': 0, 'unhandled_rejections': 0, 'failed_requests': 0},\n"
+        "    }\n"
+        "    target = Path(path)\n"
+        "    target.parent.mkdir(parents=True, exist_ok=True)\n"
+        "    target.write_text(json.dumps(payload, indent=2) + '\\n', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    fixture_command = f'"{python}" scripts/frontend_evidence_fixture.py'
+    for lane_name, lane in lanes.items():
+        if lane.get("required") is True:
+            lane["command"] = fixture_command
+            lane_path = evidence_root / f"{lane_name}.json"
+            lane_path.write_text(json.dumps({"status": "pass"}) + "\n", encoding="utf-8")
+            lane["evidence_path"] = lane_path.relative_to(web).as_posix()
+    browser_path = evidence_root / "browser.json"
+    browser_path.write_text(json.dumps({"status": "pass", "renderer": "browser"}) + "\n", encoding="utf-8")
+    frontend["stack_decision"]["selection_status"] = "confirmed"
+    frontend["browser_evidence"].update(
+        {
+            "kind": "browser-rendered",
+            "status": "pass",
+            "command": fixture_command,
+            "evidence_path": browser_path.relative_to(web).as_posix(),
+            "run_id": "frontend-regression-browser-1",
+            "captured_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "viewports": ["390x844", "1440x900"],
+            "browser_families": ["chromium"],
+        }
+    )
+    frontend_path.write_text(json.dumps(frontend, indent=2) + "\n", encoding="utf-8")
+    blueprint_path = web / ".agent" / "blueprint.json"
+    blueprint = json.loads(blueprint_path.read_text(encoding="utf-8"))
+    blueprint["frontend_stack_decision"]["selection_status"] = "confirmed"
+    blueprint_path.write_text(json.dumps(blueprint, indent=2) + "\n", encoding="utf-8")
+    self_asserted = run([python, "scripts/agent_frontend.py", "readiness"], cwd=web, expect_ok=False)
+    if "evidence schema" not in (self_asserted.stdout + self_asserted.stderr) or "runner receipt" not in (self_asserted.stdout + self_asserted.stderr):
+        print("frontend readiness accepted self-asserted lane/browser evidence", file=sys.stderr)
+        print(self_asserted.stdout + self_asserted.stderr, file=sys.stderr)
+        raise SystemExit(1)
+    for lane_name, lane in lanes.items():
+        if lane.get("required") is True:
+            run([python, "scripts/agent_frontend.py", "run-lane", lane_name], cwd=web)
+    run([python, "scripts/agent_frontend.py", "run-browser"], cwd=web)
+    run([python, "scripts/agent_frontend.py", "readiness"], cwd=web)
+
+    receipt_path = browser_path.with_name(browser_path.name + ".receipt.json")
+    valid_browser = browser_path.read_text(encoding="utf-8")
+    valid_receipt = receipt_path.read_text(encoding="utf-8")
+    browser_record = json.loads(valid_browser)
+    browser_record["runtime"]["console_errors"] = 1
+    browser_path.write_text(json.dumps(browser_record, indent=2) + "\n", encoding="utf-8")
+    tampered = run([python, "scripts/agent_frontend.py", "readiness"], cwd=web, expect_ok=False)
+    if "hash does not match" not in (tampered.stdout + tampered.stderr):
+        print("frontend readiness accepted tampered browser evidence", file=sys.stderr)
+        raise SystemExit(1)
+    browser_path.write_text(valid_browser, encoding="utf-8")
+    receipt = json.loads(valid_receipt)
+    receipt["run_id"] = "mismatched-run-id"
+    receipt_path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+    mismatched_run = run([python, "scripts/agent_frontend.py", "readiness"], cwd=web, expect_ok=False)
+    if "run_id does not match" not in (mismatched_run.stdout + mismatched_run.stderr):
+        print("frontend readiness accepted a mismatched browser run id", file=sys.stderr)
+        raise SystemExit(1)
+    receipt_path.write_text(valid_receipt, encoding="utf-8")
+    frontend["browser_evidence"]["command"] = fixture_command + " --changed"
+    frontend_path.write_text(json.dumps(frontend, indent=2) + "\n", encoding="utf-8")
+    mismatched_command = run([python, "scripts/agent_frontend.py", "readiness"], cwd=web, expect_ok=False)
+    if "browser receipt command" not in (mismatched_command.stdout + mismatched_command.stderr):
+        print("frontend readiness accepted browser evidence for another command", file=sys.stderr)
+        raise SystemExit(1)
+    frontend["browser_evidence"]["command"] = fixture_command
+    frontend_path.write_text(json.dumps(frontend, indent=2) + "\n", encoding="utf-8")
+    receipt = json.loads(valid_receipt)
+    receipt["completed_at"] = "2000-01-01T00:00:00Z"
+    receipt_path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+    stale = run([python, "scripts/agent_frontend.py", "readiness"], cwd=web, expect_ok=False)
+    if "older than" not in (stale.stdout + stale.stderr):
+        print("frontend readiness accepted stale browser evidence", file=sys.stderr)
+        raise SystemExit(1)
+    receipt_path.write_text(valid_receipt, encoding="utf-8")
+    run([python, "scripts/agent_frontend.py", "readiness"], cwd=web)
+    malformed_browser = json.loads(valid_browser)
+    malformed_browser["viewports"] = [{"invalid": True}]
+    browser_path.write_text(json.dumps(malformed_browser, indent=2) + "\n", encoding="utf-8")
+    malformed_receipt = json.loads(valid_receipt)
+    malformed_receipt["evidence_sha256"] = hashlib.sha256(browser_path.read_bytes()).hexdigest()
+    receipt_path.write_text(json.dumps(malformed_receipt, indent=2) + "\n", encoding="utf-8")
+    malformed_evidence = run([python, "scripts/agent_frontend.py", "readiness"], cwd=web, expect_ok=False)
+    malformed_output = malformed_evidence.stdout + malformed_evidence.stderr
+    if "viewports must be a list of non-empty strings" not in malformed_output or "Traceback" in malformed_output:
+        print("frontend readiness did not fail cleanly for malformed browser viewport evidence", file=sys.stderr)
+        print(malformed_output, file=sys.stderr)
+        raise SystemExit(1)
+    browser_path.write_text(valid_browser, encoding="utf-8")
+    receipt_path.write_text(valid_receipt, encoding="utf-8")
+    external_receipt = temp_root / "external-browser-receipt.json"
+    external_receipt.write_text(valid_receipt, encoding="utf-8")
+    receipt_path.unlink()
+    try:
+        receipt_path.symlink_to(external_receipt)
+    except OSError:
+        pass
+    else:
+        escaped_receipt = run([python, "scripts/agent_frontend.py", "readiness"], cwd=web, expect_ok=False)
+        escaped_output = escaped_receipt.stdout + escaped_receipt.stderr
+        if "receipt escapes the repository" not in escaped_output or "Traceback" in escaped_output:
+            print("frontend readiness did not reject an external receipt symlink cleanly", file=sys.stderr)
+            print(escaped_output, file=sys.stderr)
+            raise SystemExit(1)
+        receipt_path.unlink()
+    receipt_path.write_text(valid_receipt, encoding="utf-8")
+
+    unqualified_next_intake = temp_root / "frontend-next-unqualified.json"
+    unqualified_next_intake.write_text(json.dumps({"frontend": {"enabled": True, "framework": "nextjs"}}) + "\n", encoding="utf-8")
+    unqualified_next = temp_root / "frontend-next-unqualified"
+    unqualified_next.mkdir(parents=True, exist_ok=True)
+    run([python, str(INIT_SCRIPT), str(unqualified_next), "--layout", "web-app", "--governance-profile", "standard", "--architecture-intake", str(unqualified_next_intake), "--no-makefile"], cwd=PACKAGE_ROOT)
+    unqualified = json.loads((unqualified_next / ".agent" / "frontend.json").read_text(encoding="utf-8"))
+    if unqualified.get("stack_decision", {}).get("selection_status") != "needs-confirmation":
+        print("unqualified Next.js intake was treated as confirmed", file=sys.stderr)
+        raise SystemExit(1)
+
+    for name, extra in (
+        ("arbitrary-qualifier", {"nextjs_qualifying_requirements": ["totally-arbitrary"]}),
+        ("rationale-only", {"rationale": "personal preference"}),
+    ):
+        intake_path = temp_root / f"frontend-next-{name}.json"
+        intake_path.write_text(
+            json.dumps({"frontend": {"enabled": True, "framework": "nextjs", "confirmed": True, **extra}}) + "\n",
+            encoding="utf-8",
+        )
+        target = temp_root / f"frontend-next-{name}"
+        target.mkdir(parents=True, exist_ok=True)
+        run([python, str(INIT_SCRIPT), str(target), "--layout", "web-app", "--governance-profile", "standard", "--architecture-intake", str(intake_path), "--no-makefile"], cwd=PACKAGE_ROOT)
+        decision = json.loads((target / ".agent" / "frontend.json").read_text(encoding="utf-8"))["stack_decision"]
+        if decision.get("selection_status") != "needs-confirmation":
+            print(f"Next.js {name} bypass was treated as confirmed", file=sys.stderr)
+            raise SystemExit(1)
+
+    exception_target = temp_root / "frontend-next-reviewed-exception"
+    (exception_target / "docs").mkdir(parents=True, exist_ok=True)
+    (exception_target / "docs" / "nextjs-review.md").write_text("Reviewed exception.\n", encoding="utf-8")
+    exception_intake = temp_root / "frontend-next-reviewed-exception.json"
+    exception_intake.write_text(
+        json.dumps({"frontend": {"enabled": True, "framework": "nextjs", "confirmed": True, "nextjs_reviewed_exception": {"rationale": "Platform integration requirement.", "owner": "frontend-owner", "review_evidence": "docs/nextjs-review.md"}}}) + "\n",
+        encoding="utf-8",
+    )
+    run([python, str(INIT_SCRIPT), str(exception_target), "--layout", "web-app", "--governance-profile", "standard", "--architecture-intake", str(exception_intake), "--no-makefile"], cwd=PACKAGE_ROOT)
+    exception_decision = json.loads((exception_target / ".agent" / "frontend.json").read_text(encoding="utf-8"))["stack_decision"]
+    if exception_decision.get("selection_status") != "confirmed":
+        print("reviewed Next.js exception did not confirm the framework", file=sys.stderr)
+        raise SystemExit(1)
+    run([python, "scripts/agent_frontend.py", "doctor"], cwd=exception_target)
+
+    qualified_next_intake = temp_root / "frontend-next-qualified.json"
+    qualified_next_intake.write_text(
+        json.dumps({"frontend": {"enabled": True, "framework": "nextjs", "confirmed": True, "nextjs_qualifying_requirements": ["SSR"], "deployment_boundary": "project-owned Node runtime"}}) + "\n",
+        encoding="utf-8",
+    )
+    qualified_next = temp_root / "frontend-next-qualified"
+    qualified_next.mkdir(parents=True, exist_ok=True)
+    run([python, str(INIT_SCRIPT), str(qualified_next), "--layout", "web-app", "--governance-profile", "standard", "--architecture-intake", str(qualified_next_intake), "--no-makefile"], cwd=PACKAGE_ROOT)
+    qualified = json.loads((qualified_next / ".agent" / "frontend.json").read_text(encoding="utf-8"))
+    if qualified.get("stack_decision", {}).get("profile") != "nextjs-framework" or qualified.get("stack_decision", {}).get("selection_status") != "confirmed":
+        print("qualified Next.js intake did not select the framework profile", file=sys.stderr)
+        raise SystemExit(1)
+
+    unconfirmed_echarts_intake = temp_root / "frontend-echarts-unconfirmed.json"
+    unconfirmed_echarts_intake.write_text(json.dumps({"frontend": {"enabled": True, "confirmed": True, "visualization_enabled": True, "visualization_engine": "echarts", "visualization_confirmed": False}}) + "\n", encoding="utf-8")
+    unconfirmed_echarts_target = temp_root / "frontend-echarts-unconfirmed"
+    unconfirmed_echarts_target.mkdir(parents=True, exist_ok=True)
+    run([python, str(INIT_SCRIPT), str(unconfirmed_echarts_target), "--layout", "web-app", "--governance-profile", "standard", "--architecture-intake", str(unconfirmed_echarts_intake), "--no-makefile"], cwd=PACKAGE_ROOT)
+    unconfirmed_visualization = json.loads((unconfirmed_echarts_target / ".agent" / "frontend.json").read_text(encoding="utf-8"))["visualization"]
+    if unconfirmed_visualization.get("selection_status") == "confirmed":
+        print("visualization_confirmed=false still confirmed ECharts", file=sys.stderr)
+        raise SystemExit(1)
+
+    echarts_intake = temp_root / "frontend-echarts.json"
+    echarts_intake.write_text(json.dumps({"frontend": {"enabled": True, "confirmed": True, "visualization_enabled": True, "visualization_engine": "echarts", "visualization_confirmed": True}}) + "\n", encoding="utf-8")
+    echarts_target = temp_root / "frontend-echarts"
+    echarts_target.mkdir(parents=True, exist_ok=True)
+    run([python, str(INIT_SCRIPT), str(echarts_target), "--layout", "web-app", "--governance-profile", "standard", "--architecture-intake", str(echarts_intake), "--no-makefile"], cwd=PACKAGE_ROOT)
+    echarts = json.loads((echarts_target / ".agent" / "frontend.json").read_text(encoding="utf-8")).get("visualization", {}).get("echarts", {})
+    for key in ("modular_imports", "stable_dimensions", "resize_handling", "dispose_on_unmount", "aria_registration_and_enablement", "text_or_table_alternative", "non_color_encoding"):
+        if echarts.get(key) is not True:
+            print(f"ECharts governance missing {key}", file=sys.stderr)
+            raise SystemExit(1)
+    run([python, "scripts/agent_frontend.py", "doctor"], cwd=echarts_target)
+    assert_malformed_json_finding(
+        echarts_target,
+        ".agent/frontend.json",
+        lambda data: data["visualization"]["echarts"].__setitem__("required_states", {}),
+        "visualization.echarts.required_states must be a list",
+    )
+    canvas_path = echarts_target / ".agent" / "frontend.json"
+    canvas_policy = json.loads(canvas_path.read_text(encoding="utf-8"))
+    canvas_policy["visualization"]["echarts"]["renderer"] = "canvas"
+    canvas_path.write_text(json.dumps(canvas_policy, indent=2) + "\n", encoding="utf-8")
+    canvas_missing = run([python, "scripts/agent_frontend.py", "doctor"], cwd=echarts_target, expect_ok=False)
+    if "renderer_evidence" not in (canvas_missing.stdout + canvas_missing.stderr):
+        print("frontend doctor accepted Canvas without measured renderer evidence", file=sys.stderr)
+        raise SystemExit(1)
+
+    for framework, package_name, version, lockfile, manager in (
+        ("vue", "vue", "^3.5.0", "pnpm-lock.yaml", "pnpm"),
+        ("react", "react", "^19.0.0", "yarn.lock", "yarn"),
+        ("nextjs", "next", "^15.0.0", "package-lock.json", "npm"),
+    ):
+        existing = temp_root / f"frontend-existing-{framework}"
+        existing.mkdir(parents=True, exist_ok=True)
+        dependencies = {package_name: version}
+        if framework == "vue":
+            dependencies["echarts"] = "^6.0.0"
+        (existing / "package.json").write_text(json.dumps({"packageManager": f"{manager}@10.0.0", "dependencies": dependencies}, indent=2) + "\n", encoding="utf-8")
+        (existing / lockfile).write_text("existing-lockfile\n", encoding="utf-8")
+        original_package = (existing / "package.json").read_bytes()
+        original_lockfile = (existing / lockfile).read_bytes()
+        run([python, str(INIT_SCRIPT), str(existing), "--layout", "existing", "--governance-profile", "standard", "--no-create-layout", "--no-makefile"], cwd=PACKAGE_ROOT)
+        policy = json.loads((existing / ".agent" / "frontend.json").read_text(encoding="utf-8"))
+        evidence = policy.get("existing_evidence", {})
+        if policy.get("stack_decision", {}).get("framework") != framework or evidence.get("lockfile") != lockfile or evidence.get("package_manager") != manager:
+            print(f"existing {framework} stack or lockfile was not preserved", file=sys.stderr)
+            raise SystemExit(1)
+        if (existing / "package.json").read_bytes() != original_package or (existing / lockfile).read_bytes() != original_lockfile:
+            print(f"existing {framework} manifest or lockfile was modified", file=sys.stderr)
+            raise SystemExit(1)
+        if framework == "vue" and policy.get("visualization", {}).get("selection_status") != "preserved-existing":
+            print("existing ECharts selection was not preserved", file=sys.stderr)
+            raise SystemExit(1)
+        for marker in install_markers:
+            if marker != lockfile and (existing / marker).exists():
+                print(f"existing {framework} initialization unexpectedly installed dependencies: {marker}", file=sys.stderr)
+                raise SystemExit(1)
+
+
 def assert_workflow_stage_closure(target: Path) -> None:
     workflow_path = target / ".agent" / "workflow.json"
     profiles_path = target / ".agent" / "workflow-profiles.json"
@@ -1397,13 +2336,29 @@ def assert_session_doctor_handles_long_git_status(temp_root: Path, python: str) 
     )
     run(["git", "add", "."], cwd=tracked)
     run(["git", "commit", "-m", "session"], cwd=tracked)
+    clean_status = run(["git", "status", "--short"], cwd=tracked).stdout
+    if clean_status:
+        print("tracked session fixture was not clean before read-only checks", file=sys.stderr)
+        print(clean_status, file=sys.stderr)
+        raise SystemExit(1)
+    run([python, ".agent/tools/agent_session.py", "bootstrap"], cwd=tracked)
     run([python, ".agent/tools/agent_session.py", "doctor"], cwd=tracked)
+    after_read_only = run(["git", "status", "--short"], cwd=tracked).stdout
+    if after_read_only != clean_status:
+        print("session bootstrap/doctor modified a clean tracked project", file=sys.stderr)
+        print(after_read_only, file=sys.stderr)
+        raise SystemExit(1)
+
+    run([python, ".agent/tools/agent_session.py", "bootstrap", "--record"], cwd=tracked)
     tracked_index = json.loads((tracked / ".agent" / "sessions" / "index.json").read_text(encoding="utf-8"))
     tracked_session_id = tracked_index.get("active_session")
     tracked_snapshot = tracked / ".agent" / "sessions" / tracked_session_id / "refs" / "git-status-short.txt"
     tracked_status = run(["git", "status", "--short"], cwd=tracked).stdout
+    if not tracked_status:
+        print("explicit bootstrap --record did not refresh durable session artifacts", file=sys.stderr)
+        raise SystemExit(1)
     if tracked_snapshot.read_text(encoding="utf-8").rstrip("\n") != tracked_status.rstrip("\n"):
-        print("tracked session git status snapshot became stale after doctor/bootstrap writes", file=sys.stderr)
+        print("tracked session git status snapshot became stale after explicit bootstrap recording", file=sys.stderr)
         print(tracked_snapshot, file=sys.stderr)
         raise SystemExit(1)
 
@@ -1487,6 +2442,7 @@ def assert_existing_project_adoption(init_script: Path, temp_root: Path, python:
             "--dry-run",
         ],
         cwd=PACKAGE_ROOT,
+        expect_ok=False,
     )
     dry_output = dry_run.stdout + dry_run.stderr
     for token in ("mode: dry-run", "would create:", "conflicts:", "AGENTS.md"):
@@ -1526,10 +2482,44 @@ def assert_existing_project_adoption(init_script: Path, temp_root: Path, python:
         cwd=PACKAGE_ROOT,
     )
     rerun_output = rerun.stdout + rerun.stderr
-    if "unchanged:" not in rerun_output or "preserved append-only:" not in rerun_output or "conflicts:" in rerun_output:
+    if "unchanged:" not in rerun_output or "preserved durable state:" not in rerun_output or "conflicts:" in rerun_output:
         print("idempotent dry run did not report stable unchanged/preserved state", file=sys.stderr)
         print(rerun_output, file=sys.stderr)
         raise SystemExit(1)
+
+
+def assert_context_glob_scoring(target: Path, python: str) -> None:
+    context_path = target / ".agent" / "context.json"
+    original = context_path.read_text(encoding="utf-8")
+    fixture_dir = target / "context-glob-fixture"
+    fixture_dir.mkdir(parents=True, exist_ok=True)
+    fixture = fixture_dir / "oversized.md"
+    fixture.write_text("x" * 400 + "\n", encoding="utf-8")
+    context = json.loads(original)
+    context["tracked_files"] = []
+    context["tracked_globs"] = ["context-glob-fixture/*.md"]
+    context["budgets"]["max_total_tracked_tokens"] = 50
+    context["budgets"]["max_single_doc_tokens"] = 1000
+    context_path.write_text(json.dumps(context, indent=2) + "\n", encoding="utf-8")
+    try:
+        context_doctor = run([python, ".agent/tools/agent_context.py", "doctor"], cwd=target, expect_ok=False)
+        if "total tracked context over budget: 101 > 50" not in (context_doctor.stdout + context_doctor.stderr):
+            print("context doctor did not count tracked_globs", file=sys.stderr)
+            raise SystemExit(1)
+        score = json.loads(run([python, "scripts/agent_score.py", "score", "--json"], cwd=target).stdout)
+        dimension = score.get("dimensions", {}).get("context_budget", {})
+        if dimension.get("status") != "fail" or not any("total context over budget" in finding for finding in dimension.get("findings", [])):
+            print("governance score did not count tracked_globs", file=sys.stderr)
+            print(json.dumps(dimension, indent=2), file=sys.stderr)
+            raise SystemExit(1)
+        if not any("1 tracked files" in evidence for evidence in dimension.get("evidence", [])):
+            print("governance score did not report the glob-expanded file count", file=sys.stderr)
+            print(json.dumps(dimension, indent=2), file=sys.stderr)
+            raise SystemExit(1)
+    finally:
+        context_path.write_text(original, encoding="utf-8")
+        fixture.unlink(missing_ok=True)
+        fixture_dir.rmdir()
 
 
 def assert_task_board_guards(init_script: Path, temp_root: Path, python: str) -> None:
@@ -1573,6 +2563,306 @@ def assert_task_board_guards(init_script: Path, temp_root: Path, python: str) ->
         "--decomposition-subtask",
         "Verify completion gate rejection",
     ]
+    risk_guard = temp_root / "task-board-risk-guards"
+    risk_guard.mkdir(parents=True, exist_ok=True)
+    run(
+        [python, str(init_script), str(risk_guard), "--layout", "minimal", "--governance-profile", "standard"],
+        cwd=PACKAGE_ROOT,
+    )
+    over_risk = run(
+        [
+            python,
+            "scripts/agent_task.py",
+            "new",
+            "over-risk-task",
+            "--title",
+            "Over risk task",
+            "--profile",
+            "standard",
+            "--risk",
+            "critical",
+        ],
+        cwd=risk_guard,
+        expect_ok=False,
+    )
+    if "exceeds profile standard max_risk high" not in (over_risk.stdout + over_risk.stderr):
+        print("agent_task.py did not enforce workflow profile max_risk", file=sys.stderr)
+        raise SystemExit(1)
+    if (risk_guard / "docs" / "features" / "over-risk-task").exists():
+        print("agent_task.py created feature docs before rejecting an over-risk task", file=sys.stderr)
+        raise SystemExit(1)
+
+    run(
+        [
+            python,
+            "scripts/agent_task.py",
+            "new",
+            "risk-drift-task",
+            "--title",
+            "Risk drift task",
+            "--profile",
+            "standard",
+            "--risk",
+            "high",
+        ],
+        cwd=risk_guard,
+    )
+    risk_board_path = risk_guard / ".agent" / "task-board.json"
+    risk_board = json.loads(risk_board_path.read_text(encoding="utf-8"))
+    risk_board["items"][0]["risk"] = "critical"
+    risk_board_path.write_text(json.dumps(risk_board, indent=2) + "\n", encoding="utf-8")
+    drift_outputs = [
+        run([python, "scripts/agent_task.py", "doctor"], cwd=risk_guard, expect_ok=False),
+        run([python, "scripts/agent_check.py"], cwd=risk_guard, expect_ok=False),
+        run([python, "scripts/agent_verify.py", "doctor"], cwd=risk_guard, expect_ok=False),
+        run([python, "scripts/agent_score.py", "score", "--json"], cwd=risk_guard, expect_ok=False),
+    ]
+    drift_text = "\n".join(item.stdout + item.stderr for item in drift_outputs)
+    if drift_text.count("exceeds profile standard max_risk high") < 3:
+        print("manual risk/profile drift was not reported across generated hard checks", file=sys.stderr)
+        print(drift_text, file=sys.stderr)
+        raise SystemExit(1)
+
+    human_guard = temp_root / "task-board-human-review-guards"
+    human_guard.mkdir(parents=True, exist_ok=True)
+    run(
+        [python, str(init_script), str(human_guard), "--layout", "minimal", "--governance-profile", "standard"],
+        cwd=PACKAGE_ROOT,
+    )
+    run(
+        [
+            python,
+            "scripts/agent_task.py",
+            "new",
+            "high-risk-task",
+            "--title",
+            "High risk task",
+            "--profile",
+            "full",
+            "--risk",
+            "high",
+        ],
+        cwd=human_guard,
+    )
+    human_board_path = human_guard / ".agent" / "task-board.json"
+    human_board = json.loads(human_board_path.read_text(encoding="utf-8"))
+    high_task = human_board["items"][0]
+    review_path = "docs/features/high-risk-task/05_CODE_REVIEW.md"
+    high_task["current_stage"] = "quality_review"
+    high_task["requirements"] = {
+        "required": True,
+        "status": "complete",
+        "shared_understanding": "The high-risk review fixture scope is understood.",
+        "domain_glossary_updated": True,
+        "code_docs_cross_checked": True,
+        "open_questions": [],
+    }
+    high_task["goal_contract"] = {
+        "raw_user_goal": "Guard high-risk completion.",
+        "refined_goal": "Require structured human review before high-risk verification.",
+        "refinement_rationale": "The fixture isolates the risk-derived review gate.",
+        "user_confirmation_status": "agent_assumed",
+        "objective": "Verify human review enforcement.",
+        "user_approved_outcome": "High-risk work cannot enter verification without human review.",
+        "non_goals": ["Do not test application behavior."],
+        "constraints": ["Use local deterministic evidence."],
+        "success_evidence": ["Generated validators reject incomplete human review."],
+        "stop_conditions": ["Stop when a bypass is accepted."],
+        "current_decision_summary": "Use a full-profile high-risk task fixture.",
+        "open_decisions": [],
+        "linked_task_id": "high-risk-task",
+        "linked_spec_change_id": "regression-fixture",
+    }
+    high_task["task_decomposition"] = {
+        "required": True,
+        "status": "complete",
+        "summary": "Exercise missing, ordinary, and structured human review cases.",
+        "next_task": "Attempt the verification transition.",
+        "subtasks": ["Prepare review gates", "Verify the human review boundary"],
+        "dependencies": [],
+        "evidence_path": review_path,
+        "no_task_board_tiny_evidence": "not-applicable",
+    }
+    high_task["stage_reviews"] = {
+        stage: {
+            "status": "pass",
+            "latest_review": review_path,
+            "latest_fix": "",
+            "open_findings": [],
+            "accepted_exception": "",
+        }
+        for stage in ("spec", "plan", "implementation", "spec_review")
+    }
+    human_board_path.write_text(json.dumps(human_board, indent=2) + "\n", encoding="utf-8")
+    run([python, "scripts/agent_task.py", "doctor"], cwd=human_guard)
+    human_board = json.loads(human_board_path.read_text(encoding="utf-8"))
+    human_board["policy"]["human_review_legacy_exemptions"] = [
+        {
+            "task_id": "high-risk-task",
+            "reason": "Invalid active-task bypass fixture.",
+            "evidence": review_path,
+        }
+    ]
+    human_board_path.write_text(json.dumps(human_board, indent=2) + "\n", encoding="utf-8")
+    active_exemption = run([python, "scripts/agent_task.py", "doctor"], cwd=human_guard, expect_ok=False)
+    if "must reference a terminal task" not in (active_exemption.stdout + active_exemption.stderr):
+        print("active task was accepted by the human-review legacy exemption", file=sys.stderr)
+        raise SystemExit(1)
+    human_board["items"][0]["state"] = "done"
+    human_board["items"][0]["updated_at"] = human_board["policy"]["human_review_enforcement_started_at"]
+    human_board_path.write_text(json.dumps(human_board, indent=2) + "\n", encoding="utf-8")
+    post_policy_exemption = run([python, "scripts/agent_task.py", "doctor"], cwd=human_guard, expect_ok=False)
+    if "must predate policy enforcement" not in (post_policy_exemption.stdout + post_policy_exemption.stderr):
+        print("post-policy terminal task was accepted by the human-review legacy exemption", file=sys.stderr)
+        raise SystemExit(1)
+    human_board["items"][0]["state"] = "proposed"
+    human_board["policy"]["human_review_legacy_exemptions"] = []
+    human_board_path.write_text(json.dumps(human_board, indent=2) + "\n", encoding="utf-8")
+    run([python, "scripts/agent_task.py", "doctor"], cwd=human_guard)
+    missing_human = run(
+        [
+            python,
+            "scripts/agent_task.py",
+            "update",
+            "high-risk-task",
+            "--stage",
+            "verification",
+            "--stage-review-stage",
+            "quality_review",
+            "--stage-review-status",
+            "pass",
+            "--stage-review-path",
+            review_path,
+        ],
+        cwd=human_guard,
+        expect_ok=False,
+    )
+    if "requires human_review evidence" not in (missing_human.stdout + missing_human.stderr):
+        print("high-risk verification did not require risk-derived human review", file=sys.stderr)
+        raise SystemExit(1)
+    run(
+        [
+            python,
+            "scripts/agent_task.py",
+            "update",
+            "high-risk-task",
+            "--stage-review-stage",
+            "human_review",
+            "--stage-review-status",
+            "pass",
+            "--stage-review-path",
+            review_path,
+        ],
+        cwd=human_guard,
+    )
+    ordinary_review = run(
+        [
+            python,
+            "scripts/agent_task.py",
+            "update",
+            "high-risk-task",
+            "--stage",
+            "verification",
+            "--stage-review-stage",
+            "quality_review",
+            "--stage-review-status",
+            "pass",
+            "--stage-review-path",
+            review_path,
+        ],
+        cwd=human_guard,
+        expect_ok=False,
+    )
+    if "human_review evidence must be an object" not in (ordinary_review.stdout + ordinary_review.stderr):
+        print("ordinary stage review was accepted as structured human review", file=sys.stderr)
+        raise SystemExit(1)
+    human_board = json.loads(human_board_path.read_text(encoding="utf-8"))
+    high_task = human_board["items"][0]
+    high_task["current_stage"] = "verification"
+    high_task["stage_reviews"]["quality_review"] = {
+        "status": "pass",
+        "latest_review": review_path,
+        "latest_fix": "",
+        "open_findings": [],
+        "accepted_exception": "",
+    }
+    high_task["stage_reviews"]["human_review"] = {
+        "status": "pass",
+        "latest_review": review_path,
+        "latest_fix": "",
+        "open_findings": [],
+        "accepted_exception": "",
+        "evidence": {
+            "reviewer_type": "human",
+            "reviewer": "review-owner",
+            "review_type": "diff-and-file-review",
+            "diff_range": "base..head",
+            "files_reviewed": ["scripts/agent_task.py"],
+            "high_risk_paths_checked": ["task completion gate"],
+            "conclusion": "Fixture review complete.",
+        },
+    }
+    external_review = temp_root / "external-human-review.md"
+    external_review.write_text("external\n", encoding="utf-8")
+    escaped_review = os.path.relpath(external_review, human_guard)
+    external_link = human_guard / "docs" / "external-human-review-link.md"
+    try:
+        external_link.symlink_to(external_review)
+    except OSError:
+        external_link = None
+    invalid_review_paths = [str(external_review), ".", escaped_review]
+    if external_link is not None:
+        invalid_review_paths.append("docs/external-human-review-link.md")
+    for invalid_path in invalid_review_paths:
+        high_task["stage_reviews"]["human_review"]["latest_review"] = invalid_path
+        human_board_path.write_text(json.dumps(human_board, indent=2) + "\n", encoding="utf-8")
+        outputs = [
+            run([python, "scripts/agent_task.py", "doctor"], cwd=human_guard, expect_ok=False),
+            run([python, "scripts/agent_check.py"], cwd=human_guard, expect_ok=False),
+            run([python, "scripts/agent_verify.py", "doctor"], cwd=human_guard, expect_ok=False),
+            run([python, "scripts/agent_score.py", "score", "--json"], cwd=human_guard, expect_ok=False),
+        ]
+        output = "\n".join(item.stdout + item.stderr for item in outputs)
+        if output.count("repository-local file") < 3:
+            print(f"invalid human review path was not rejected across generated validators: {invalid_path}", file=sys.stderr)
+            print(output, file=sys.stderr)
+            raise SystemExit(1)
+    high_task["stage_reviews"]["human_review"]["latest_review"] = review_path
+    human_board_path.write_text(json.dumps(human_board, indent=2) + "\n", encoding="utf-8")
+    run([python, "scripts/agent_task.py", "doctor"], cwd=human_guard)
+    run(
+        [
+            python,
+            "scripts/agent_task.py",
+            "update",
+            "high-risk-task",
+            "--stage",
+            "verification",
+            "--stage-review-stage",
+            "quality_review",
+            "--stage-review-status",
+            "pass",
+            "--stage-review-path",
+            review_path,
+            "--human-reviewer-type",
+            "human",
+            "--human-reviewer",
+            "review-owner",
+            "--human-review-type",
+            "diff-and-file-review",
+            "--human-diff-range",
+            "base..head",
+            "--human-file-reviewed",
+            "scripts/agent_task.py",
+            "--human-high-risk-path-checked",
+            "task completion gate",
+            "--human-conclusion",
+            "The high-risk gate is satisfied for this fixture.",
+        ],
+        cwd=human_guard,
+    )
+    run([python, "scripts/agent_task.py", "doctor"], cwd=human_guard)
+
     guarded = temp_root / "task-board-guards"
     guarded.mkdir(parents=True, exist_ok=True)
     run(
@@ -2188,6 +3478,12 @@ def assert_contract_control_surfaces(target: Path, python: str) -> None:
         raise SystemExit(1)
 
     gc_config = json.loads((target / ".agent" / "governance-gc.json").read_text(encoding="utf-8"))
+    if gc_config.get("policy", {}).get("report_warnings_without_failing_by_default") is not True:
+        print("governance-gc warnings are not advisory by default", file=sys.stderr)
+        raise SystemExit(1)
+    if gc_config.get("policy", {}).get("fail_on_warning") is not False:
+        print("governance-gc fail_on_warning does not default to false", file=sys.stderr)
+        raise SystemExit(1)
     if gc_config.get("checks", {}).get("component_expiry") is not True:
         print("governance-gc missing component_expiry check", file=sys.stderr)
         raise SystemExit(1)
@@ -2200,16 +3496,425 @@ def assert_contract_control_surfaces(target: Path, python: str) -> None:
     run([python, "scripts/agent_gc.py", "doctor", "--fail-on-warning"], cwd=target)
 
 
+def assert_release_safety_gap_regressions(temp_root: Path, python: str) -> None:
+    force_target = temp_root / "force-preserves-state"
+    force_target.mkdir(parents=True, exist_ok=True)
+    run(
+        [
+            "node",
+            str(NPM_BIN),
+            "init",
+            str(force_target),
+            "--layout",
+            "minimal",
+            "--governance-profile",
+            "standard",
+            "--no-makefile",
+        ],
+        cwd=PACKAGE_ROOT,
+    )
+    run(
+        [python, ".agent/tools/agent_session.py", "start", "force-state", "--goal", "Preserve force state"],
+        cwd=force_target,
+    )
+    run(
+        [python, "scripts/agent_task.py", "new", "force-state", "--title", "Preserve force state", "--profile", "standard", "--risk", "medium"],
+        cwd=force_target,
+    )
+    run([python, "scripts/agent_verify.py", "snapshot", "--name", "force-state"], cwd=force_target)
+    resources_path = force_target / ".agent" / "resources.json"
+    resources = json.loads(resources_path.read_text(encoding="utf-8"))
+    resources["review_fixture"] = {"owner": "project-owner", "preserve": True}
+    resources_path.write_text(json.dumps(resources, indent=2) + "\n", encoding="utf-8")
+    protected = [
+        ".agent/config.json",
+        ".agent/harness.json",
+        ".agent/capabilities.json",
+        ".agent/sessions/events.jsonl",
+        ".agent/sessions/active.md",
+        ".agent/runlog.jsonl",
+        ".agent/task-board.json",
+        ".agent/baselines.json",
+        ".agent/project-skills.json",
+        ".agent/resources.json",
+    ]
+    before = {relative: (force_target / relative).read_bytes() for relative in protected}
+    run(
+        [
+            "node",
+            str(NPM_BIN),
+            "init",
+            str(force_target),
+            "--layout",
+            "minimal",
+            "--governance-profile",
+            "standard",
+            "--no-makefile",
+            "--force",
+        ],
+        cwd=PACKAGE_ROOT,
+    )
+    for relative, expected in before.items():
+        actual = (force_target / relative).read_bytes()
+        if actual != expected:
+            print(f"--force replaced protected governance state: {relative}", file=sys.stderr)
+            raise SystemExit(1)
+
+    conflict_target = temp_root / "init-conflict-fails-closed"
+    conflict_target.mkdir(parents=True, exist_ok=True)
+    custom_agents = "# Existing project instructions\n\nPreserve this reviewed file.\n"
+    (conflict_target / "AGENTS.md").write_text(custom_agents, encoding="utf-8")
+    conflict = run(
+        [
+            "node",
+            str(NPM_BIN),
+            "init",
+            str(conflict_target),
+            "--layout",
+            "minimal",
+            "--governance-profile",
+            "standard",
+            "--no-makefile",
+        ],
+        cwd=PACKAGE_ROOT,
+        expect_ok=False,
+    )
+    if "conflict" not in (conflict.stdout + conflict.stderr).lower():
+        print("init conflict failure did not identify the unresolved conflict", file=sys.stderr)
+        raise SystemExit(1)
+    if (conflict_target / ".agent").exists() or (conflict_target / ".codex").exists():
+        print("init conflict failure mutated the target before returning non-zero", file=sys.stderr)
+        raise SystemExit(1)
+    if (conflict_target / "AGENTS.md").read_text(encoding="utf-8") != custom_agents:
+        print("init conflict failure modified the existing file", file=sys.stderr)
+        raise SystemExit(1)
+
+    registry_target = temp_root / "invalid-registry-preflight"
+    registry_path = registry_target / ".agent" / "project-skills.json"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    invalid_registry = "not valid json\n"
+    registry_path.write_text(invalid_registry, encoding="utf-8")
+    invalid = run(
+        [
+            "node",
+            str(NPM_BIN),
+            "init",
+            str(registry_target),
+            "--layout",
+            "minimal",
+            "--governance-profile",
+            "standard",
+            "--no-makefile",
+            "--force",
+        ],
+        cwd=PACKAGE_ROOT,
+        expect_ok=False,
+    )
+    if "registry" not in (invalid.stdout + invalid.stderr).lower():
+        print("invalid registry preflight did not explain the registry failure", file=sys.stderr)
+        raise SystemExit(1)
+    if registry_path.read_text(encoding="utf-8") != invalid_registry:
+        print("invalid registry preflight replaced the existing registry", file=sys.stderr)
+        raise SystemExit(1)
+    for relative in ("AGENTS.md", "scripts/agent_check.py", ".codex/skills/agent-gov"):
+        if (registry_target / relative).exists():
+            print(f"invalid registry preflight left partial initialization: {relative}", file=sys.stderr)
+            raise SystemExit(1)
+    direct_invalid = run(
+        [python, str(INIT_SCRIPT), str(registry_target), "--layout", "minimal", "--governance-profile", "standard", "--force"],
+        cwd=PACKAGE_ROOT,
+        expect_ok=False,
+    )
+    if "project skill registry" not in (direct_invalid.stdout + direct_invalid.stderr).lower():
+        print("direct Python initializer did not preflight the invalid project skill registry", file=sys.stderr)
+        raise SystemExit(1)
+    if registry_path.read_text(encoding="utf-8") != invalid_registry:
+        print("direct Python registry preflight modified the existing registry", file=sys.stderr)
+        raise SystemExit(1)
+
+    rollback_target = temp_root / "generated-write-rollback"
+    blocking_path = rollback_target / "docs" / "incidents" / "README.md"
+    blocking_path.mkdir(parents=True, exist_ok=True)
+    rollback = run(
+        [
+            "node",
+            str(NPM_BIN),
+            "init",
+            str(rollback_target),
+            "--layout",
+            "minimal",
+            "--governance-profile",
+            "standard",
+            "--no-makefile",
+            "--force",
+        ],
+        cwd=PACKAGE_ROOT,
+        expect_ok=False,
+    )
+    if not (rollback.stdout + rollback.stderr).strip():
+        print("generated write failure did not report an error", file=sys.stderr)
+        raise SystemExit(1)
+    for relative in ("AGENTS.md", ".agent", ".codex/skills/agent-gov", "scripts/agent_check.py"):
+        if (rollback_target / relative).exists():
+            print(f"generated write failure did not roll back partial output: {relative}", file=sys.stderr)
+            raise SystemExit(1)
+    if not blocking_path.is_dir():
+        print("generated write rollback modified the pre-existing blocking path", file=sys.stderr)
+        raise SystemExit(1)
+
+    ordered_target = temp_root / "root-after-options"
+    run(
+        [
+            "node",
+            str(NPM_BIN),
+            "init",
+            "--layout",
+            "minimal",
+            "--governance-profile",
+            "standard",
+            str(ordered_target),
+            "--create-root",
+            "--no-makefile",
+        ],
+        cwd=PACKAGE_ROOT,
+    )
+    if not (ordered_target / "AGENTS.md").exists():
+        print("root after options was not initialized", file=sys.stderr)
+        raise SystemExit(1)
+
+    python_target = temp_root / "python-launcher-contract"
+    python_target.mkdir(parents=True, exist_ok=True)
+    run(
+        [
+            "node",
+            str(NPM_BIN),
+            "init",
+            str(python_target),
+            "--layout",
+            "python-app",
+            "--governance-profile",
+            "standard",
+            "--tech-stack",
+            "python",
+            "--no-makefile",
+        ],
+        cwd=PACKAGE_ROOT,
+    )
+    harness = json.loads((python_target / ".agent" / "harness.json").read_text(encoding="utf-8"))
+    expected_launcher = "py -3 -m" if sys.platform.startswith("win") else "python3 -m"
+    python_commands = [
+        command
+        for suite in ("test", "lint", "typecheck")
+        for command in harness.get("validation", {}).get(suite, [])
+        if "pytest" in command or "ruff" in command or "mypy" in command
+    ]
+    if not python_commands or any(not command.startswith(expected_launcher) for command in python_commands):
+        print(f"generated Python commands do not use {expected_launcher}: {python_commands}", file=sys.stderr)
+        raise SystemExit(1)
+
+    if not sys.platform.startswith("win"):
+        old_python_target = temp_root / "unsupported-python-version"
+        old_python_target.mkdir(parents=True, exist_ok=True)
+        old_python = temp_root / "python-3.9-probe.sh"
+        old_python.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" = \"-c\" ]; then\n"
+            "  case \"$2\" in\n"
+            "    *\"version_info >= (3, 10)\"*) exit 1 ;;\n"
+            "    *) printf 'agent-gov-python3\\n'; exit 0 ;;\n"
+            "  esac\n"
+            "fi\n"
+            "exit 42\n",
+            encoding="utf-8",
+        )
+        old_python.chmod(0o755)
+        old_env = dict(os.environ)
+        old_env["AGENT_GOV_PYTHON"] = str(old_python)
+        unsupported = run(
+            ["node", str(NPM_BIN), "init", str(old_python_target), "--layout", "minimal"],
+            cwd=PACKAGE_ROOT,
+            expect_ok=False,
+            env=old_env,
+        )
+        if "3.10" not in (unsupported.stdout + unsupported.stderr):
+            print("unsupported Python error did not state the Python 3.10 minimum", file=sys.stderr)
+            raise SystemExit(1)
+        if (old_python_target / ".agent").exists() or (old_python_target / ".codex").exists():
+            print("unsupported Python version mutated the target", file=sys.stderr)
+            raise SystemExit(1)
+
+    identity_target = temp_root / "identity-parity"
+    identity_target.mkdir(parents=True, exist_ok=True)
+    run(
+        [
+            "node",
+            str(NPM_BIN),
+            "init",
+            str(identity_target),
+            "--layout",
+            "minimal",
+            "--governance-profile",
+            "standard",
+            "--no-makefile",
+        ],
+        cwd=PACKAGE_ROOT,
+    )
+    installed_skill = identity_target / ".codex" / "skills" / "agent-gov"
+    for directory in (installed_skill / ".skvm", installed_skill / "build"):
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "ignored.txt").write_text("ignored identity fixture\n", encoding="utf-8")
+    run(["node", str(NPM_BIN), "doctor", str(identity_target)], cwd=PACKAGE_ROOT)
+    run([python, "scripts/agent_project_skills.py", "doctor"], cwd=identity_target)
+    shutil.rmtree(installed_skill / ".skvm")
+    shutil.rmtree(installed_skill / "build")
+
+    sensitive = installed_skill / ".env.local"
+    sensitive.write_text("REVIEW_FIXTURE=not-a-secret\n", encoding="utf-8")
+    run(["node", str(NPM_BIN), "doctor", str(identity_target)], cwd=PACKAGE_ROOT, expect_ok=False)
+    run([python, "scripts/agent_project_skills.py", "doctor"], cwd=identity_target, expect_ok=False)
+    sensitive.unlink()
+
+    if not sys.platform.startswith("win"):
+        outside = temp_root / "identity-outside.txt"
+        outside.write_text("outside\n", encoding="utf-8")
+        nested_link = installed_skill / "nested-link.txt"
+        nested_link.symlink_to(outside)
+        package_symlink = run(["node", str(NPM_BIN), "doctor", str(identity_target)], cwd=PACKAGE_ROOT, expect_ok=False)
+        project_symlink = run([python, "scripts/agent_project_skills.py", "doctor"], cwd=identity_target, expect_ok=False)
+        if "symlink" not in (package_symlink.stdout + package_symlink.stderr).lower():
+            print("package doctor did not identify nested skill symlink", file=sys.stderr)
+            raise SystemExit(1)
+        if "symlink" not in (project_symlink.stdout + project_symlink.stderr).lower():
+            print("project skill doctor did not identify nested skill symlink", file=sys.stderr)
+            raise SystemExit(1)
+        nested_link.unlink()
+
+    registry_path = identity_target / ".agent" / "project-skills.json"
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    entry = registry["skills"]["agent-gov"]
+    entry["source"]["ref"] = "0.0.0-review-fixture"
+    entry["content"]["tree_sha256"] = "old-tree"
+    entry["content"]["skill_md_sha256"] = "old-skill"
+    entry["review"] = {"requires_review": False, "latest_status": "not-required", "latest_artifact": ""}
+    registry_path.write_text(json.dumps(registry, indent=2) + "\n", encoding="utf-8")
+    lifecycle_update = run(["node", str(NPM_BIN), "install-skill", str(identity_target)], cwd=PACKAGE_ROOT)
+    registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    review = registry["skills"]["agent-gov"].get("review", {})
+    if review.get("requires_review") is not True or review.get("latest_status") != "pending" or review.get("latest_artifact"):
+        print("bundled skill lifecycle update did not require a fresh review", file=sys.stderr)
+        print(json.dumps(review, indent=2), file=sys.stderr)
+        raise SystemExit(1)
+    if "review" not in lifecycle_update.stdout.lower():
+        print("bundled skill lifecycle update did not report pending review", file=sys.stderr)
+        raise SystemExit(1)
+    run([python, "scripts/agent_project_skills.py", "doctor"], cwd=identity_target, expect_ok=False)
+
+    adapter_cases = {
+        "openai-agents": "python",
+        "mcp-sdk-python": "python",
+        "mcp-sdk-typescript": "typescript",
+        "fastmcp": "python",
+    }
+    for adapter, language in adapter_cases.items():
+        intake_path = temp_root / f"adapter-{adapter}.json"
+        write_intake(
+            intake_path,
+            {
+                "project_target": "agent",
+                "selection_status": "confirmed",
+                "architecture_style": "skill-first",
+                "default_runtime_adapter": adapter,
+                "language_preference": [language],
+                "dependency_version_policy": "defer-to-lockfile",
+            },
+        )
+        adapter_target = temp_root / f"adapter-{adapter}"
+        adapter_target.mkdir(parents=True, exist_ok=True)
+        run(
+            [
+                "node",
+                str(NPM_BIN),
+                "init",
+                str(adapter_target),
+                "--layout",
+                "minimal",
+                "--governance-profile",
+                "standard",
+                "--tech-stack",
+                language,
+                "--architecture-intake",
+                str(intake_path),
+                "--no-makefile",
+            ],
+            cwd=PACKAGE_ROOT,
+        )
+        run([python, "scripts/agent_runtime.py", "doctor"], cwd=adapter_target)
+        runtime = json.loads((adapter_target / ".agent" / "agent-runtime.json").read_text(encoding="utf-8"))
+        plans = runtime.get("runtime_adoption", {}).get("package_plan", [])
+        matching = [plan for plan in plans if plan.get("adapter") == adapter]
+        if not matching or matching[0].get("auto_install") is not False or not matching[0].get("source_url"):
+            print(f"selected adapter lacks a governed package plan: {adapter}", file=sys.stderr)
+            raise SystemExit(1)
+
+    invalid_mcp_intake = temp_root / "adapter-mcp-server-agent.json"
+    write_intake(
+        invalid_mcp_intake,
+        {
+            "project_target": "agent",
+            "selection_status": "confirmed",
+            "architecture_style": "skill-first",
+            "default_runtime_adapter": "mcp-server",
+            "language_preference": ["python"],
+        },
+    )
+    invalid_mcp_target = temp_root / "adapter-mcp-server-agent"
+    invalid_mcp_target.mkdir(parents=True, exist_ok=True)
+    invalid_mcp = run(
+        [
+            "node",
+            str(NPM_BIN),
+            "init",
+            str(invalid_mcp_target),
+            "--layout",
+            "minimal",
+            "--governance-profile",
+            "standard",
+            "--architecture-intake",
+            str(invalid_mcp_intake),
+            "--no-makefile",
+        ],
+        cwd=PACKAGE_ROOT,
+        expect_ok=False,
+    )
+    if "only valid for an mcp-server target" not in (invalid_mcp.stdout + invalid_mcp.stderr):
+        print("agent target did not reject mcp-server as its primary runtime adapter", file=sys.stderr)
+        raise SystemExit(1)
+    if (invalid_mcp_target / ".agent").exists() or (invalid_mcp_target / ".codex").exists():
+        print("invalid mcp-server primary adapter mutated the target", file=sys.stderr)
+        raise SystemExit(1)
+
+    help_output = run(["node", str(NPM_BIN), "--help"], cwd=PACKAGE_ROOT).stdout
+    if "Python 3.10" not in help_output:
+        print("package help does not state the Python 3.10 minimum", file=sys.stderr)
+        raise SystemExit(1)
+
+
 def main() -> int:
     python = sys.executable
     temp_root = Path(tempfile.mkdtemp(prefix="agent-gov-regression-"))
     try:
+        assert_packed_artifact(temp_root, python)
+        assert_npm_install_safety_and_preflight(temp_root, python)
+        assert_release_safety_gap_regressions(temp_root, python)
         assert_install_skill_scope(temp_root)
         assert_doctor_requires_target_skill(temp_root)
         assert_blank_project_default_profile(temp_root)
+        assert_fresh_npm_skill_registry(temp_root, python)
         assert_runtime_adoption_defaults(temp_root, python)
         assert_project_blueprint_governance(temp_root, python)
+        assert_frontend_web_governance(temp_root, python)
         assert_agent_development_readiness(temp_root, python)
+        assert_strict_architecture_intake(temp_root, python)
         assert_nested_technology_version_intake(temp_root, python)
         assert_session_doctor_handles_long_git_status(temp_root, python)
         if sys.platform.startswith("win"):
@@ -2318,6 +4023,7 @@ def main() -> int:
         assert_loop_primitive_governance(target, python)
         assert_resource_catalog_guards(target, python)
         assert_spec_archive_gate(target, python)
+        assert_context_glob_scoring(target, python)
         run([python, "scripts/agent_check.py"], cwd=target)
         run([python, "scripts/agent_migrate.py", "doctor"], cwd=target)
         assert_session_offload_protocol(target, python)
@@ -2331,6 +4037,23 @@ def main() -> int:
         demo_skill = target / ".codex" / "skills" / "demo-skill"
         demo_skill.mkdir(parents=True, exist_ok=True)
         (demo_skill / "SKILL.md").write_text("---\nname: demo-skill\ndescription: Demo skill.\n---\n\n# Demo\n", encoding="utf-8")
+        project_skills_path = target / ".agent" / "project-skills.json"
+        project_skills = json.loads(project_skills_path.read_text(encoding="utf-8"))
+        project_skills["skills"]["demo-skill"] = {
+            "scope": "project",
+            "host": "codex",
+            "path": ".codex/skills/demo-skill",
+            "lifecycle": "active",
+            "intent": "project-governance",
+            "owner": "regression",
+            "risk": "low",
+            "source": {"kind": "repo-local", "repository": "", "ref": "fixture", "pinned": True},
+            "content": {},
+            "release": {"manifest": "", "publishable": False, "release_gate": "local-validation"},
+            "review": {"requires_review": False, "latest_status": "not-required", "latest_artifact": ""},
+        }
+        project_skills_path.write_text(json.dumps(project_skills, indent=2) + "\n", encoding="utf-8")
+        run([python, "scripts/agent_project_skills.py", "snapshot", "--write"], cwd=target)
         release_id = run([python, "scripts/agent_skill_opt.py", "release-id", "--skill", "demo-skill"], cwd=target).stdout.strip()
         run([python, "scripts/agent_skill_opt.py", "preflight", "--skill", "demo-skill", "--release-id", release_id], cwd=target)
         run([python, "scripts/agent_skill_opt.py", "verify-preflight", "--skill", "demo-skill", "--release-id", release_id], cwd=target)
@@ -2346,11 +4069,143 @@ def main() -> int:
         if hygiene_report.get("schema") != "agent-skill-hygiene-report-v1":
             print("agent_skill_hygiene.py did not produce the expected report schema", file=sys.stderr)
             return 1
+        if hygiene_report.get("policy", {}).get("canary_is_optional") is not True:
+            print("agent_skill_hygiene.py inverted the optional canary policy", file=sys.stderr)
+            print(json.dumps(hygiene_report.get("policy", {}), indent=2), file=sys.stderr)
+            return 1
+        hygiene_config = json.loads((target / ".agent" / "skill-hygiene.json").read_text(encoding="utf-8"))
+        if hygiene_config.get("canary", {}).get("required") is not False:
+            print("generated skill hygiene config does not explicitly mark canary as optional", file=sys.stderr)
+            print(json.dumps(hygiene_config.get("canary", {}), indent=2), file=sys.stderr)
+            return 1
         gc_report = json.loads(run([python, "scripts/agent_gc.py", "report", "--json"], cwd=target).stdout)
         if gc_report.get("schema") != "agent-governance-gc-report-v1" or gc_report.get("status") != "pass":
             print("agent_gc.py did not produce a clean governance report", file=sys.stderr)
             print(json.dumps(gc_report, indent=2), file=sys.stderr)
             return 1
+        baselines_path = target / ".agent" / "baselines.json"
+        baselines = json.loads(baselines_path.read_text(encoding="utf-8"))
+        stale_snapshot_path = target / ".agent" / "baselines" / "stale-regression.json"
+        stale_snapshot_path.write_text(
+            json.dumps({"schema": "agent-verify-snapshot-v1", "created_at": "2025-01-01T00:00:00Z", "counts": {}, "findings": {}}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        stale_entry = {
+            "name": "stale-regression",
+            "path": ".agent/baselines/stale-regression.json",
+            "created_at": "2025-01-01T00:00:00Z",
+            "lifecycle": "active",
+            "sha256": hashlib.sha256(stale_snapshot_path.read_bytes()).hexdigest(),
+        }
+        baselines["snapshots"].append(stale_entry)
+        baselines_path.write_text(json.dumps(baselines, indent=2) + "\n", encoding="utf-8")
+        advisory_report = json.loads(run([python, "scripts/agent_gc.py", "report", "--json"], cwd=target).stdout)
+        if advisory_report.get("counts", {}).get("warnings") != 1 or advisory_report.get("counts", {}).get("errors") != 0:
+            print("stale active baseline did not remain an advisory GC warning", file=sys.stderr)
+            print(json.dumps(advisory_report, indent=2), file=sys.stderr)
+            return 1
+        run([python, "scripts/agent_gc.py", "doctor"], cwd=target)
+        advisory_score = json.loads(run([python, "scripts/agent_score.py", "score", "--json"], cwd=target).stdout)
+        if advisory_score.get("dimensions", {}).get("governance_gc", {}).get("status") == "fail" or "governance_gc" in advisory_score.get("hard_fail_dimensions", []):
+            print("advisory GC warning became a governance hard failure", file=sys.stderr)
+            print(json.dumps(advisory_score.get("dimensions", {}).get("governance_gc", {}), indent=2), file=sys.stderr)
+            return 1
+
+        gc_config_path = target / ".agent" / "governance-gc.json"
+        gc_config = json.loads(gc_config_path.read_text(encoding="utf-8"))
+        gc_config["policy"]["fail_on_warning"] = True
+        gc_config_path.write_text(json.dumps(gc_config, indent=2) + "\n", encoding="utf-8")
+        run([python, "scripts/agent_gc.py", "doctor"], cwd=target, expect_ok=False)
+        strict_score = json.loads(run([python, "scripts/agent_score.py", "score", "--json"], cwd=target, expect_ok=False).stdout)
+        if "governance_gc" not in strict_score.get("hard_fail_dimensions", []):
+            print("explicit GC fail_on_warning did not become a governance hard failure", file=sys.stderr)
+            print(json.dumps(strict_score.get("dimensions", {}).get("governance_gc", {}), indent=2), file=sys.stderr)
+            return 1
+        gc_config["policy"]["fail_on_warning"] = False
+        gc_config_path.write_text(json.dumps(gc_config, indent=2) + "\n", encoding="utf-8")
+
+        stale_entry["lifecycle"] = "historical"
+        stale_entry["retention_review"] = {
+            "reviewed_at": "2026-08-12T00:00:00Z",
+            "decision": "retain",
+            "rationale": "Regression fixture retains immutable evidence.",
+            "evidence": "docs/QUALITY.md",
+        }
+        baselines_path.write_text(json.dumps(baselines, indent=2) + "\n", encoding="utf-8")
+        historical_report = json.loads(run([python, "scripts/agent_gc.py", "report", "--json"], cwd=target).stdout)
+        if historical_report.get("status") != "pass":
+            print("reviewed historical baseline remained stale", file=sys.stderr)
+            print(json.dumps(historical_report, indent=2), file=sys.stderr)
+            return 1
+        stale_entry["last_reviewed_at"] = "2099-01-01"
+        baselines_path.write_text(json.dumps(baselines, indent=2) + "\n", encoding="utf-8")
+        future_active = json.loads(run([python, "scripts/agent_gc.py", "report", "--json"], cwd=target, expect_ok=False).stdout)
+        if not any(item.get("kind") == "baseline_date" and "future" in item.get("summary", "") for item in future_active.get("findings", [])):
+            print("future baseline last_reviewed_at did not fail closed", file=sys.stderr)
+            return 1
+        stale_entry.pop("last_reviewed_at")
+        stale_entry["reviewed_at"] = "2099-01-01"
+        baselines_path.write_text(json.dumps(baselines, indent=2) + "\n", encoding="utf-8")
+        future_reviewed = json.loads(run([python, "scripts/agent_gc.py", "report", "--json"], cwd=target, expect_ok=False).stdout)
+        if not any(item.get("kind") == "baseline_date" and "future" in item.get("summary", "") for item in future_reviewed.get("findings", [])):
+            print("future baseline reviewed_at did not fail closed", file=sys.stderr)
+            return 1
+        stale_entry.pop("reviewed_at")
+        stale_entry["retention_review"]["reviewed_at"] = "2099-01-01"
+        baselines_path.write_text(json.dumps(baselines, indent=2) + "\n", encoding="utf-8")
+        future_retention = json.loads(run([python, "scripts/agent_gc.py", "report", "--json"], cwd=target, expect_ok=False).stdout)
+        if not any(item.get("kind") == "baseline_retention" and "future" in item.get("summary", "") for item in future_retention.get("findings", [])):
+            print("future retention_review reviewed_at did not fail closed", file=sys.stderr)
+            return 1
+        stale_entry["retention_review"]["reviewed_at"] = "2026-08-12T00:00:00Z"
+        baselines_path.write_text(json.dumps(baselines, indent=2) + "\n", encoding="utf-8")
+        original_created_at = stale_entry["created_at"]
+        stale_entry["retention_review"]["evidence"] = "docs/missing-retention-review.md"
+        baselines_path.write_text(json.dumps(baselines, indent=2) + "\n", encoding="utf-8")
+        invalid_retention = json.loads(run([python, "scripts/agent_gc.py", "report", "--json"], cwd=target, expect_ok=False).stdout)
+        if invalid_retention.get("counts", {}).get("errors") != 1 or invalid_retention.get("findings", [{}])[0].get("kind") != "baseline_retention":
+            print("missing historical retention evidence did not fail closed", file=sys.stderr)
+            print(json.dumps(invalid_retention, indent=2), file=sys.stderr)
+            return 1
+        external_evidence = temp_root / "external-retention-review.md"
+        external_evidence.write_text("external\n", encoding="utf-8")
+        stale_entry["retention_review"]["evidence"] = os.path.relpath(external_evidence, target)
+        baselines_path.write_text(json.dumps(baselines, indent=2) + "\n", encoding="utf-8")
+        external_retention = json.loads(run([python, "scripts/agent_gc.py", "report", "--json"], cwd=target, expect_ok=False).stdout)
+        if not any(item.get("kind") == "baseline_retention" and "repository-local" in item.get("summary", "") for item in external_retention.get("findings", [])):
+            print("external existing retention evidence did not fail repository confinement", file=sys.stderr)
+            print(json.dumps(external_retention, indent=2), file=sys.stderr)
+            return 1
+        stale_entry["retention_review"]["evidence"] = "docs/QUALITY.md"
+        baselines_path.write_text(json.dumps(baselines, indent=2) + "\n", encoding="utf-8")
+        stale_snapshot_path.write_text("tampered\n", encoding="utf-8")
+        tampered_baseline = json.loads(run([python, "scripts/agent_gc.py", "report", "--json"], cwd=target, expect_ok=False).stdout)
+        if tampered_baseline.get("counts", {}).get("errors") != 1 or tampered_baseline.get("findings", [{}])[0].get("kind") != "baseline_integrity":
+            print("tampered historical baseline did not fail SHA-256 integrity", file=sys.stderr)
+            print(json.dumps(tampered_baseline, indent=2), file=sys.stderr)
+            return 1
+        immutable_snapshot = run([python, "scripts/agent_verify.py", "snapshot", "--name", "stale-regression"], cwd=target, expect_ok=False)
+        if "already exists" not in (immutable_snapshot.stdout + immutable_snapshot.stderr):
+            print("duplicate snapshot name did not preserve immutable baseline evidence", file=sys.stderr)
+            print(immutable_snapshot.stdout + immutable_snapshot.stderr, file=sys.stderr)
+            return 1
+        original_snapshot_dir = baselines["snapshot_dir"]
+        baselines["snapshot_dir"] = os.path.relpath(temp_root / "external-baselines", target)
+        baselines_path.write_text(json.dumps(baselines, indent=2) + "\n", encoding="utf-8")
+        escaped_snapshot = run([python, "scripts/agent_verify.py", "snapshot", "--name", "escaped-regression"], cwd=target, expect_ok=False)
+        if "escapes the repository" not in (escaped_snapshot.stdout + escaped_snapshot.stderr) or (temp_root / "external-baselines" / "escaped-regression.json").exists():
+            print("external snapshot_dir was not rejected before mutation", file=sys.stderr)
+            print(escaped_snapshot.stdout + escaped_snapshot.stderr, file=sys.stderr)
+            return 1
+        baselines["snapshot_dir"] = original_snapshot_dir
+        baselines_path.write_text(json.dumps(baselines, indent=2) + "\n", encoding="utf-8")
+        if stale_entry["created_at"] != original_created_at:
+            print("baseline retention review rewrote the immutable creation timestamp", file=sys.stderr)
+            return 1
+        baselines["snapshots"] = [item for item in baselines["snapshots"] if item.get("name") != "stale-regression"]
+        baselines_path.write_text(json.dumps(baselines, indent=2) + "\n", encoding="utf-8")
+        stale_snapshot_path.unlink()
+        run([python, "scripts/agent_gc.py", "doctor", "--fail-on-warning"], cwd=target)
         run([python, "scripts/agent_task.py", "doctor"], cwd=target)
         run(
             [

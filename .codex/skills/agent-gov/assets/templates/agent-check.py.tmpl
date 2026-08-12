@@ -9,6 +9,7 @@ import math
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 try:
@@ -196,6 +197,8 @@ LEGACY_CONFIG_PATH_KEYS = {
     "runtime_policy",
     "model_profiles",
     "agent_runtime",
+    "frontend_governance",
+    "frontend_governance_doc",
     "memory_config",
     "context_config",
     "capabilities_config",
@@ -220,6 +223,8 @@ REQUIREMENT_STATUSES = {"pending", "in-progress", "complete", "blocked", "not-re
 DECOMPOSITION_STATUSES = {"pending", "in-progress", "complete", "blocked", "not-required"}
 GOAL_CONFIRMATION_STATUSES = {"confirmed", "agent_assumed", "pending", "blocked"}
 TASK_DECOMPOSITION_EVIDENCE_FIELDS = ("summary", "next_task", "evidence_path")
+RISK_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+DEFAULT_HUMAN_REVIEW_FIELDS = ("reviewer_type", "reviewer", "review_type", "diff_range", "files_reviewed", "high_risk_paths_checked", "conclusion")
 GOAL_CONTRACT_REQUIRED_FIELDS = (
     "raw_user_goal",
     "refined_goal",
@@ -267,6 +272,26 @@ PLACEHOLDER_PATTERNS = (
     "fill in after project structure is known",
     "Fill this section",
 )
+
+
+def existing_repo_file(value: str, root: Path) -> bool:
+    candidate = Path(value)
+    if not value or candidate.is_absolute():
+        return False
+    repository = root.resolve()
+    try:
+        resolved = (repository / candidate).resolve(strict=True)
+        resolved.relative_to(repository)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return resolved.is_file()
+
+
+def parse_utc(value: object) -> datetime | None:
+    try:
+        return datetime.strptime(str(value), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
 
 
 def load_json(path: Path, label: str) -> dict:
@@ -794,8 +819,8 @@ def validate_review_gate(task_id: str, item: dict, profile: dict, policy: dict, 
     latest_review = str(gate.get("latest_review", "")).strip()
     if not latest_review:
         return f"task {task_id} is done without review_gate latest_review"
-    if policy.get("review_gate_latest_review_must_exist") is True and not (root / latest_review).exists():
-        return f"task {task_id} review_gate latest_review path is missing: {latest_review}"
+    if policy.get("review_gate_latest_review_must_exist") is True and not existing_repo_file(latest_review, root):
+        return f"task {task_id} review_gate latest_review must be an existing repository-local file: {latest_review}"
     return None
 
 
@@ -854,8 +879,59 @@ def validate_stage_reviews(task_id: str, item: dict, profile: dict, policy: dict
         latest_review = str(review.get("latest_review", "")).strip()
         if not latest_review:
             errors.append(f"task {task_id} stage review {stage} missing latest_review")
-        elif policy.get("review_gate_latest_review_must_exist") is True and not (root / latest_review).exists():
-            errors.append(f"task {task_id} stage review {stage} latest_review path is missing: {latest_review}")
+        elif policy.get("review_gate_latest_review_must_exist") is True and not existing_repo_file(latest_review, root):
+            errors.append(f"task {task_id} stage review {stage} latest_review must be an existing repository-local file: {latest_review}")
+    return errors
+
+
+def validate_task_risk(task_id: str, item: dict, profile: dict) -> list[str]:
+    risk = str(item.get("risk", ""))
+    max_risk = str(profile.get("max_risk", ""))
+    if risk not in RISK_ORDER:
+        return [f"task {task_id} has invalid risk: {risk}"]
+    if max_risk not in RISK_ORDER:
+        return [f"task {task_id} profile has invalid max_risk: {max_risk}"]
+    if RISK_ORDER[risk] > RISK_ORDER[max_risk]:
+        return [f"task {task_id} risk {risk} exceeds profile {item.get('profile')} max_risk {max_risk}"]
+    return []
+
+
+def validate_human_review(task_id: str, item: dict, policy: dict, root: Path) -> list[str]:
+    if str(item.get("risk", "")) not in set(policy.get("human_review_required_for_risks", ["high", "critical"])):
+        return []
+    legacy = policy.get("human_review_legacy_exemptions", [])
+    exemption = next((entry for entry in legacy if isinstance(entry, dict) and entry.get("task_id") == task_id), None)
+    enforcement_started = parse_utc(policy.get("human_review_enforcement_started_at"))
+    completed_at = parse_utc(item.get("updated_at"))
+    if exemption is not None and item.get("state") in {"done", "archived"} and completed_at and enforcement_started and completed_at < enforcement_started:
+        return []
+    if item.get("state") not in set(policy.get("human_review_required_before_states", ["done", "archived"])) and item.get("current_stage") not in set(policy.get("human_review_required_before_stages", ["verification", "handoff", "finish"])):
+        return []
+    review = stage_reviews(item).get("human_review")
+    if not isinstance(review, dict):
+        return [f"task {task_id} requires human_review evidence for risk {item.get('risk')}"]
+    errors: list[str] = []
+    if review.get("status") != policy.get("review_gate_pass_status", "pass"):
+        errors.append(f"task {task_id} human_review must be pass")
+    if any(str(finding).strip() for finding in review.get("open_findings", [])):
+        errors.append(f"task {task_id} human_review has open findings")
+    latest_review = str(review.get("latest_review", "")).strip()
+    if not latest_review:
+        errors.append(f"task {task_id} human_review missing latest_review")
+    elif policy.get("review_gate_latest_review_must_exist") is True and not existing_repo_file(latest_review, root):
+        errors.append(f"task {task_id} human_review latest_review must be an existing repository-local file: {latest_review}")
+    evidence = review.get("evidence")
+    if not isinstance(evidence, dict):
+        return errors + [f"task {task_id} human_review evidence must be an object"]
+    for field in policy.get("human_review_required_fields") or DEFAULT_HUMAN_REVIEW_FIELDS:
+        value = evidence.get(field)
+        if field in {"files_reviewed", "high_risk_paths_checked"}:
+            if not isinstance(value, list) or not any(str(entry).strip() for entry in value):
+                errors.append(f"task {task_id} human_review evidence missing {field}")
+        elif not str(value or "").strip():
+            errors.append(f"task {task_id} human_review evidence missing {field}")
+    if evidence.get("reviewer_type") != "human":
+        errors.append(f"task {task_id} human_review reviewer_type must be human")
     return errors
 
 
@@ -1217,25 +1293,33 @@ def strict_readiness_errors(root: Path, harness: dict) -> list[str]:
         (root / path).exists()
         for path in (".agent/runtime-policy.json", ".agent/model-profiles.json", ".agent/agent-runtime.json")
     )
+    has_frontend = (root / ".agent/frontend.json").exists()
 
-    if (has_blueprint or has_runtime) and not readiness_commands:
+    if (has_blueprint or has_runtime or has_frontend) and not readiness_commands:
         errors.append(".agent/harness.json validation.readiness must be configured for strict readiness")
     expected_commands = []
     if has_blueprint:
         expected_commands.append("python3 scripts/agent_blueprint.py readiness")
     if has_runtime:
         expected_commands.append("python3 scripts/agent_runtime.py readiness")
-    if has_blueprint or has_runtime:
+    if has_frontend:
+        expected_commands.append("python3 scripts/agent_frontend.py readiness")
+    if has_blueprint or has_runtime or has_frontend:
         expected_commands.append("python3 scripts/agent_check.py --strict")
     for command in expected_commands:
         if command not in readiness_commands:
             errors.append(f".agent/harness.json validation.readiness missing command: {command}")
 
     command_specs: list[tuple[str, list[str], Path]] = []
+    project_skills_script = root / "scripts/agent_project_skills.py"
+    if (root / ".agent/project-skills.json").exists():
+        command_specs.append(("project skills", [sys.executable, "scripts/agent_project_skills.py", "doctor"], project_skills_script))
     if has_blueprint:
         command_specs.append(("blueprint", [sys.executable, "scripts/agent_blueprint.py", "readiness"], root / "scripts/agent_blueprint.py"))
     if has_runtime:
         command_specs.append(("runtime", [sys.executable, "scripts/agent_runtime.py", "readiness"], root / "scripts/agent_runtime.py"))
+    if has_frontend:
+        command_specs.append(("frontend", [sys.executable, "scripts/agent_frontend.py", "readiness"], root / "scripts/agent_frontend.py"))
     for label, command, script_path in command_specs:
         if not script_path.exists():
             errors.append(f"missing strict readiness script for {label}: {script_path.relative_to(root).as_posix()}")
@@ -1632,6 +1716,51 @@ def main() -> int:
         if task_policy.get("review_gate_open_findings_must_be_empty") is not True:
             print("error: .agent/task-board.json must require empty review_gate open findings")
             return 1
+        if set(task_policy.get("human_review_required_for_risks", [])) != {"high", "critical"}:
+            print("error: .agent/task-board.json must require human review for high and critical risks")
+            return 1
+        if set(task_policy.get("human_review_required_before_states", [])) != {"done", "archived"}:
+            print("error: .agent/task-board.json human review protected states must be done and archived")
+            return 1
+        if set(task_policy.get("human_review_required_before_stages", [])) != {"verification", "handoff", "finish"}:
+            print("error: .agent/task-board.json human review protected stages must be verification, handoff, and finish")
+            return 1
+        if set(task_policy.get("human_review_required_fields", [])) != set(DEFAULT_HUMAN_REVIEW_FIELDS):
+            print("error: .agent/task-board.json human review required fields must match generated policy")
+            return 1
+        legacy = task_policy.get("human_review_legacy_exemptions", [])
+        if not isinstance(legacy, list):
+            print("error: .agent/task-board.json human_review_legacy_exemptions must be a list")
+            return 1
+        items_by_id = {str(item.get("id", "")): item for item in task_board.get("items", []) if isinstance(item, dict)}
+        enforcement_started = parse_utc(task_policy.get("human_review_enforcement_started_at"))
+        if enforcement_started is None or enforcement_started > datetime.now(timezone.utc):
+            print("error: .agent/task-board.json human_review_enforcement_started_at must be a valid non-future UTC timestamp")
+            return 1
+        legacy_ids: set[str] = set()
+        for entry in legacy:
+            if not isinstance(entry, dict):
+                print("error: .agent/task-board.json human review legacy exemption must be an object")
+                return 1
+            task_id = str(entry.get("task_id", ""))
+            if not task_id or task_id in legacy_ids:
+                print(f"error: .agent/task-board.json human review legacy exemption has missing or duplicate task_id: {task_id}")
+                return 1
+            legacy_ids.add(task_id)
+            task = items_by_id.get(task_id)
+            if not task or task.get("state") not in {"done", "archived"}:
+                print(f"error: .agent/task-board.json human review legacy exemption must reference a terminal task: {task_id}")
+                return 1
+            completed_at = parse_utc(task.get("updated_at"))
+            if completed_at is None or completed_at >= enforcement_started:
+                print(f"error: .agent/task-board.json human review legacy exemption must predate policy enforcement: {task_id}")
+                return 1
+            if not str(entry.get("reason", "")).strip():
+                print(f"error: .agent/task-board.json human review legacy exemption missing reason: {task_id}")
+                return 1
+            if not existing_repo_file(str(entry.get("evidence", "")).strip(), root):
+                print(f"error: .agent/task-board.json human review legacy exemption evidence must be an existing repository-local file: {task_id}")
+                return 1
         seen_tasks: set[str] = set()
         allowed_states = set(task_board.get("states", []))
         allowed_profiles = set(load_json(root / ".agent/workflow-profiles.json", ".agent/workflow-profiles.json").get("profiles", {})) if profiles_path.exists() else set()
@@ -1654,9 +1783,13 @@ def main() -> int:
             if allowed_profiles:
                 profile = load_json(root / ".agent/workflow-profiles.json", ".agent/workflow-profiles.json").get("profiles", {}).get(item.get("profile"), {})
                 allowed_stages = set(profile.get("stages", []))
-                if allowed_stages and item.get("current_stage") not in allowed_stages:
+            if allowed_stages and item.get("current_stage") not in allowed_stages:
                     print(f"error: task {task_id} has invalid current_stage for profile {item.get('profile')}: {item.get('current_stage')}")
                     return 1
+            risk_errors = validate_task_risk(task_id, item, profile)
+            if risk_errors:
+                print(f"error: {risk_errors[0]}")
+                return 1
             if item.get("state") == "done" and task_board.get("policy", {}).get("done_requires_delivery_conclusion") is True:
                 if not str(item.get("delivery_conclusion", "")).strip():
                     print(f"error: task {task_id} is done without delivery_conclusion")
@@ -1680,6 +1813,10 @@ def main() -> int:
             stage_review_errors = validate_stage_reviews(task_id, item, profile, task_policy, root)
             if stage_review_errors:
                 print(f"error: {stage_review_errors[0]}")
+                return 1
+            human_review_errors = validate_human_review(task_id, item, task_policy, root)
+            if human_review_errors:
+                print(f"error: {human_review_errors[0]}")
                 return 1
         spec_task_errors = validate_spec_task_links(root, seen_tasks)
         if spec_task_errors:
@@ -1725,7 +1862,7 @@ def main() -> int:
             print("error: .agent/review-policy.json must require changed-line traceability")
             return 1
         human = review_policy.get("human_review", {})
-        for field in ("reviewer", "review_type", "diff_range", "files_reviewed", "high_risk_paths_checked", "conclusion"):
+        for field in DEFAULT_HUMAN_REVIEW_FIELDS:
             if field not in human.get("evidence_fields", []):
                 print(f"error: .agent/review-policy.json missing human review evidence field: {field}")
                 return 1
@@ -2064,6 +2201,22 @@ def main() -> int:
             print(f"error: project blueprint doctor failed: {output}")
             return 1
 
+    frontend_path = root / ".agent/frontend.json"
+    if frontend_path.exists():
+        frontend = load_json(frontend_path, ".agent/frontend.json")
+        if frontend.get("schema") != "agent-frontend-governance-v1":
+            print("error: .agent/frontend.json schema must be agent-frontend-governance-v1")
+            return 1
+        for path in ("scripts/agent_frontend.py", "docs/FRONTEND_GOVERNANCE.md"):
+            if not (root / path).exists():
+                print(f"error: missing {path}")
+                return 1
+        result = subprocess.run([sys.executable, "scripts/agent_frontend.py", "doctor"], text=True, capture_output=True, check=False)
+        if result.returncode != 0:
+            output = (result.stdout + result.stderr).strip()
+            print(f"error: frontend governance doctor failed: {output}")
+            return 1
+
     runtime_paths = [
         (".agent/runtime-policy.json", "agent-runtime-policy-v1"),
         (".agent/model-profiles.json", "agent-model-profiles-v1"),
@@ -2135,6 +2288,7 @@ def main() -> int:
             "skill_hygiene",
             "project_skills",
             "project_blueprint",
+            "frontend_governance",
             "skill_runtime",
             "skill_optimization",
             "harness_evolution",
@@ -2150,6 +2304,8 @@ def main() -> int:
             "regression_criteria",
             "component_expiry",
         ]
+        if not frontend_path.exists():
+            required_mechanical_checks.remove("frontend_governance")
         if (root / ".agent/mcp-policy.json").exists():
             required_mechanical_checks.append("mcp_policy")
         for key in required_mechanical_checks:
@@ -2189,6 +2345,16 @@ def main() -> int:
                 if key not in item:
                     print(f"error: regression criteria entry missing {key}")
                     return 1
+        baseline_policy = baselines.get("policy", {})
+        if baseline_policy.get("snapshot_content_is_immutable") is not True:
+            print("error: baseline snapshots must be immutable")
+            return 1
+        if set(baseline_policy.get("snapshot_lifecycle_values", [])) != {"active", "historical", "superseded", "retained"}:
+            print("error: baseline snapshot lifecycle values are invalid")
+            return 1
+        if baseline_policy.get("historical_retention_review_required") is not True or baseline_policy.get("snapshot_sha256_required") is not True:
+            print("error: historical baselines must require retention review and SHA-256")
+            return 1
 
     evolution_path = root / ".agent/harness-evolution.json"
     if evolution_path.exists():
@@ -2238,6 +2404,12 @@ def main() -> int:
             if key not in gc_config.get("checks", {}):
                 print(f"error: .agent/governance-gc.json missing check: {key}")
                 return 1
+        if gc_config.get("policy", {}).get("report_warnings_without_failing_by_default") is not True:
+            print("error: governance-gc must report warnings without failing by default")
+            return 1
+        if not isinstance(gc_config.get("policy", {}).get("fail_on_warning"), bool):
+            print("error: governance-gc fail_on_warning must be boolean")
+            return 1
         expiry = gc_config.get("component_expiry", {})
         components = expiry.get("components", [])
         if not isinstance(components, list) or not components:

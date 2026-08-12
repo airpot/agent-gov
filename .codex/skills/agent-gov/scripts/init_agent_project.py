@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -30,6 +32,63 @@ RUNTIME_ADAPTERS = {
     "none",
 }
 MODEL_ACCESS_STRATEGIES = {"openai-compatible-first", "litellm-gateway", "provider-sdk", "local-only", "custom"}
+FRONTEND_LANES = (
+    "frontend_static",
+    "frontend_component",
+    "frontend_e2e",
+    "frontend_visual",
+    "frontend_a11y",
+    "frontend_performance",
+    "frontend_security",
+    "frontend_release",
+)
+FRONTEND_FRAMEWORK_PACKAGES = (
+    ("nextjs", "next"),
+    ("angular", "@angular/core"),
+    ("vue", "vue"),
+    ("svelte", "svelte"),
+    ("solid", "solid-js"),
+    ("preact", "preact"),
+    ("react", "react"),
+)
+FRONTEND_LOCKFILES = (
+    ("pnpm", "pnpm-lock.yaml"),
+    ("yarn", "yarn.lock"),
+    ("bun", "bun.lock"),
+    ("bun", "bun.lockb"),
+    ("npm", "package-lock.json"),
+)
+FRONTEND_VISUALIZATION_PACKAGES = (
+    ("echarts", "echarts"),
+    ("chartjs", "chart.js"),
+    ("highcharts", "highcharts"),
+    ("d3", "d3"),
+    ("plotly", "plotly.js"),
+)
+NEXTJS_QUALIFYING_REQUIREMENTS = {
+    "seo",
+    "ssr",
+    "ssg",
+    "ssr-ssg",
+    "streaming",
+    "react-server-components",
+    "integrated-server-runtime",
+    "deployment-constraint",
+}
+NEXTJS_QUALIFYING_ALIASES = {
+    "search-engine-indexable-server-output": "seo",
+    "search-engine-optimization": "seo",
+    "server-side-rendering": "ssr",
+    "static-site-generation": "ssg",
+    "integrated-react-server-runtime": "integrated-server-runtime",
+    "streaming-server-rendering": "streaming",
+    "rsc": "react-server-components",
+    "route-handlers": "integrated-server-runtime",
+    "server-actions": "integrated-server-runtime",
+    "deployment": "deployment-constraint",
+    "deployment-requirement": "deployment-constraint",
+    "platform-constraint": "deployment-constraint",
+}
 SECRET_REF_PREFIXES = ("env:", "file-ref:", "vault:", "proxy:", "op:", "keychain:")
 RUNTIME_ADAPTER_PACKAGE_PLANS = {
     "strands": {
@@ -60,6 +119,45 @@ RUNTIME_ADAPTER_PACKAGE_PLANS = {
         "source_url": "https://docs.langchain.com/oss/python/langgraph/install",
         "notes": "Conditional workflow adapter. Use only for explicit graph state, resumable workflows, or long-running orchestration.",
     },
+    "openai-agents": {
+        "language": "python",
+        "packages": ["openai-agents"],
+        "commands": [
+            {"manager": "pip", "command": "python3 -m pip install openai-agents"},
+            {"manager": "uv", "command": "uv add openai-agents"},
+        ],
+        "source_url": "https://openai.github.io/openai-agents-python/quickstart/",
+        "notes": "OpenAI Agents SDK adapter. Use when the application needs its agent, handoff, guardrail, and tracing primitives.",
+    },
+    "mcp-sdk-python": {
+        "language": "python",
+        "packages": ["mcp"],
+        "commands": [
+            {"manager": "pip", "command": "python3 -m pip install mcp"},
+            {"manager": "uv", "command": "uv add mcp"},
+        ],
+        "source_url": "https://github.com/modelcontextprotocol/python-sdk",
+        "notes": "Official Python MCP SDK adapter for MCP clients and servers.",
+    },
+    "mcp-sdk-typescript": {
+        "language": "typescript",
+        "packages": ["@modelcontextprotocol/sdk"],
+        "commands": [
+            {"manager": "npm", "command": "npm install @modelcontextprotocol/sdk"},
+        ],
+        "source_url": "https://github.com/modelcontextprotocol/typescript-sdk",
+        "notes": "Official TypeScript MCP SDK adapter for MCP clients and servers.",
+    },
+    "fastmcp": {
+        "language": "python",
+        "packages": ["fastmcp"],
+        "commands": [
+            {"manager": "pip", "command": "python3 -m pip install fastmcp"},
+            {"manager": "uv", "command": "uv add fastmcp"},
+        ],
+        "source_url": "https://gofastmcp.com/getting-started/installation",
+        "notes": "FastMCP adapter for application-owned Python MCP server implementations.",
+    },
 }
 LAYOUTS = {
     "existing": [],
@@ -70,11 +168,12 @@ LAYOUTS = {
     "service": ["src", "tests", "docs", "scripts", "configs", "deploy"],
     "library": ["src", "tests", "docs", "scripts", "examples"],
 }
+PYTHON_COMMAND = "py -3" if sys.platform.startswith("win") else "python3"
 STACK_COMMANDS = {
     "python": {
-        "test": ["python -m pytest"],
-        "lint": ["python -m ruff check ."],
-        "typecheck": ["python -m mypy src"],
+        "test": [f"{PYTHON_COMMAND} -m pytest"],
+        "lint": [f"{PYTHON_COMMAND} -m ruff check ."],
+        "typecheck": [f"{PYTHON_COMMAND} -m mypy src"],
     },
     "node": {
         "build": ["npm run build"],
@@ -105,6 +204,26 @@ APPEND_ONLY_PATHS = {
     ".agent/memory/events.jsonl",
     ".agent/context/stats.jsonl",
 }
+FORCE_PROTECTED_PATHS = APPEND_ONLY_PATHS | {
+    ".agent/sessions/index.json",
+    ".agent/sessions/active.md",
+    ".agent/sessions/bootstrap.md",
+    ".agent/task-board.json",
+    ".agent/baselines.json",
+    ".agent/project-skills.json",
+    ".agent/resources.json",
+    ".agent/blueprint.json",
+    ".agent/model-profiles.json",
+    ".agent/agent-runtime.json",
+    ".agent/skill-runtime.json",
+    ".agent/skill-optimization.json",
+    ".agent/memory.json",
+    ".agent/memory/latest.md",
+    ".agent/context.json",
+    ".agent/context/latest.md",
+    ".agent/evals/latest.md",
+}
+FORCE_REPLACEABLE_PREFIXES = (".agent/templates/", ".agent/tools/")
 SESSION_OFFLOAD_TEMPLATES = (
     "grounding.md.tmpl",
     "offload.jsonl.tmpl",
@@ -178,6 +297,12 @@ def default_governance_profile(root: Path) -> str:
     return "full" if is_blank_project_root(root) else "standard"
 
 
+def force_protected_path(relative: str) -> bool:
+    if relative in FORCE_PROTECTED_PATHS:
+        return True
+    return relative.startswith(".agent/") and not relative.startswith(FORCE_REPLACEABLE_PREFIXES)
+
+
 def skill_dir() -> Path:
     return Path(__file__).resolve().parent.parent
 
@@ -218,13 +343,82 @@ def load_architecture_intake(path_value: str) -> dict:
     return data
 
 
-def bool_from_intake(intake: dict, key: str, default: bool) -> bool:
+def validate_existing_project_skill_registry(root: Path) -> None:
+    path = root / ".agent" / "project-skills.json"
+    if not path.exists():
+        return
+    try:
+        registry = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot use project skill registry {path}: {exc}") from exc
+    skills = registry.get("skills")
+    if registry.get("schema") != "agent-project-skills-v1" or not isinstance(skills, dict):
+        raise ValueError(f"cannot use project skill registry {path}: unsupported schema")
+    existing = skills.get("agent-gov")
+    if existing and (
+        not isinstance(existing, dict)
+        or existing.get("scope") != "project"
+        or existing.get("host") != "codex"
+        or existing.get("path") != ".codex/skills/agent-gov"
+    ):
+        raise ValueError(f"cannot use project skill registry {path}: incompatible agent-gov entry")
+
+
+def bool_from_intake(intake: dict, key: str, default: bool, field: str | None = None) -> bool:
     value = intake.get(key, default)
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
-    return bool(value)
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "y", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "n", "off"}:
+            return False
+    raise ValueError(f"architecture intake field {field or key} must be a boolean or an explicit true/false string")
+
+
+def positive_int_from_intake(intake: dict, key: str, default: int) -> int:
+    value = intake.get(key, default)
+    if isinstance(value, bool):
+        raise ValueError(f"architecture intake field {key} must be a positive integer")
+    if isinstance(value, int) and value > 0:
+        return value
+    if isinstance(value, str) and value.strip().isdigit() and int(value.strip()) > 0:
+        return int(value.strip())
+    raise ValueError(f"architecture intake field {key} must be a positive integer")
+
+
+def validate_architecture_intake_types(raw_intake: dict) -> None:
+    for key in (
+        "mcp_server_enabled",
+        "skills_are_first_class",
+        "structured_output_required",
+        "long_running_workflows",
+        "model_profiles_required",
+        "architecture_confirmed",
+        "tool_calling_required",
+        "frontend_enabled",
+        "frontend_confirmed",
+        "visualization_enabled",
+        "visualization_confirmed",
+    ):
+        if key in raw_intake:
+            bool_from_intake(raw_intake, key, False)
+
+    nested = raw_intake.get("frontend")
+    if nested is None:
+        return
+    if not isinstance(nested, dict):
+        raise ValueError("architecture intake field frontend must be an object")
+    for key in ("enabled", "confirmed", "core_web_vitals_enabled", "visualization_enabled", "visualization_confirmed"):
+        if key in nested:
+            bool_from_intake(nested, key, False, f"frontend.{key}")
+    web_vitals = nested.get("core_web_vitals")
+    if web_vitals is not None:
+        if not isinstance(web_vitals, dict):
+            raise ValueError("architecture intake field frontend.core_web_vitals must be an object")
+        if "enabled" in web_vitals:
+            bool_from_intake(web_vitals, "enabled", False, "frontend.core_web_vitals.enabled")
 
 
 def list_from_intake(intake: dict, key: str, default: list[str] | None = None) -> list[str]:
@@ -239,6 +433,31 @@ def list_from_intake(intake: dict, key: str, default: list[str] | None = None) -
                 result.append(text)
         return result
     return list(default or [])
+
+
+def normalize_nextjs_qualifying_requirements(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        normalized = re.sub(r"[^a-z0-9]+", "-", value.strip().lower()).strip("-")
+        normalized = NEXTJS_QUALIFYING_ALIASES.get(normalized, normalized)
+        if normalized in NEXTJS_QUALIFYING_REQUIREMENTS and normalized not in result:
+            result.append(normalized)
+    return result
+
+
+def existing_repo_file(root: Path, value: object) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    candidate = Path(value.strip())
+    if candidate.is_absolute():
+        return False
+    repository = root.resolve()
+    try:
+        resolved = (repository / candidate).resolve(strict=True)
+        resolved.relative_to(repository)
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return resolved.is_file()
 
 
 def object_list_from_intake(intake: dict, key: str) -> list[dict]:
@@ -489,8 +708,11 @@ def runtime_adoption_config(intake: dict, raw_intake: dict, tech_stack: list[str
         blocking_reasons.append("select an application-owned runtime adapter package plan or record a manual LLM exception")
     if needs_exception and manual_status != "accepted":
         blocking_reasons.append("custom or naked LLM runtime requires accepted manual_llm_exception")
-    if framework_first and package_plan and "python" not in languages:
-        blocking_reasons.append("selected default adapters are Python packages; confirm Python is part of the application stack or select another adapter")
+    primary_plan = next((plan for plan in package_plan if plan.get("adapter") == default_adapter), None)
+    if framework_first and primary_plan and primary_plan.get("language") not in languages:
+        blocking_reasons.append(
+            f"selected default adapter requires {primary_plan.get('language')}; confirm it is part of the application stack or select another adapter"
+        )
     return {
         "schema": "agent-runtime-adoption-v1",
         "status": status,
@@ -711,6 +933,11 @@ def architecture_intake_config(intake: dict, *, has_intake: bool, tech_stack: li
     default_adapter = str(intake.get("default_runtime_adapter", "")).strip() or default_adapter_for_target(project_target, skill_first)
     if default_adapter not in RUNTIME_ADAPTERS:
         default_adapter = "custom"
+    if project_target in {"agent", "hybrid"} and default_adapter == "mcp-server":
+        raise ValueError(
+            "default_runtime_adapter mcp-server is only valid for an mcp-server target; "
+            "select an agent runtime adapter and use the hybrid target's mcp_server contract for exposure"
+        )
     optional_adapters = list_from_intake(intake, "optional_runtime_adapters", [])
     if structured_output and project_target in {"agent", "hybrid"} and "pydantic-ai" not in optional_adapters:
         optional_adapters.append("pydantic-ai")
@@ -760,6 +987,329 @@ def architecture_intake_config(intake: dict, *, has_intake: bool, tech_stack: li
     return config
 
 
+def frontend_intake_config(raw_intake: dict) -> dict:
+    nested = raw_intake.get("frontend", {})
+    result = dict(nested) if isinstance(nested, dict) else {}
+    aliases = {
+        "frontend_enabled": "enabled",
+        "frontend_framework": "framework",
+        "frontend_profile": "profile",
+        "frontend_build_tool": "build_tool",
+        "frontend_router": "router",
+        "frontend_selection_status": "selection_status",
+        "frontend_confirmed": "confirmed",
+        "frontend_rationale": "rationale",
+        "nextjs_qualifying_requirements": "nextjs_qualifying_requirements",
+        "visualization_enabled": "visualization_enabled",
+        "visualization_engine": "visualization_engine",
+        "visualization_confirmed": "visualization_confirmed",
+        "frontend_commands": "commands",
+        "frontend_evidence_paths": "evidence_paths",
+        "frontend_required_lanes": "required_lanes",
+        "browser_evidence": "browser_evidence",
+        "core_web_vitals": "core_web_vitals",
+        "web_vitals_alternative_policy": "web_vitals_alternative_policy",
+    }
+    for source, target in aliases.items():
+        if source in raw_intake and target not in result:
+            result[target] = raw_intake[source]
+    return result
+
+
+def existing_frontend_evidence(root: Path) -> dict:
+    package_path = root / "package.json"
+    if not package_path.is_file():
+        return {}
+    try:
+        package = json.loads(package_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(package, dict):
+        return {}
+    dependencies: dict[str, str] = {}
+    for key in ("dependencies", "devDependencies", "peerDependencies"):
+        values = package.get(key, {})
+        if isinstance(values, dict):
+            dependencies.update({str(name): str(version) for name, version in values.items()})
+    framework = ""
+    framework_package = ""
+    for candidate, package_name in FRONTEND_FRAMEWORK_PACKAGES:
+        if package_name in dependencies:
+            framework = candidate
+            framework_package = package_name
+            break
+    if not framework:
+        return {}
+    lockfiles = []
+    for manager, relative in FRONTEND_LOCKFILES:
+        if (root / relative).is_file():
+            lockfiles.append({"package_manager": manager, "path": relative})
+    lockfile = lockfiles[0]["path"] if lockfiles else ""
+    package_manager = lockfiles[0]["package_manager"] if lockfiles else ""
+    package_manager_version = ""
+    package_manager_declaration = str(package.get("packageManager", "")).strip()
+    if package_manager_declaration:
+        declared_manager, separator, declared_version = package_manager_declaration.partition("@")
+        if declared_manager in {"npm", "pnpm", "yarn", "bun"}:
+            package_manager = package_manager or declared_manager
+            package_manager_version = declared_version if separator else ""
+    visualization_engine = ""
+    visualization_package = ""
+    for candidate, package_name in FRONTEND_VISUALIZATION_PACKAGES:
+        if package_name in dependencies:
+            visualization_engine = candidate
+            visualization_package = package_name
+            break
+    build_tool = "vite" if "vite" in dependencies else "next" if framework == "nextjs" else "project-defined"
+    router = "react-router" if "react-router" in dependencies or "react-router-dom" in dependencies else "framework-router" if framework == "nextjs" else "project-defined"
+    return {
+        "framework": framework,
+        "framework_package": framework_package,
+        "framework_version": dependencies.get(framework_package, ""),
+        "build_tool": build_tool,
+        "router": router,
+        "package_manager": package_manager,
+        "package_manager_version": package_manager_version,
+        "package_manager_declaration": package_manager_declaration,
+        "lockfile": lockfile,
+        "lockfiles": lockfiles,
+        "package_json": "package.json",
+        "visualization_engine": visualization_engine,
+        "visualization_package": visualization_package,
+        "visualization_version": dependencies.get(visualization_package, ""),
+        "dependencies": dependencies,
+    }
+
+
+def frontend_extension_enabled(root: Path, layout: str, raw_intake: dict, governance_profile: str) -> bool:
+    if not profile_at_least(governance_profile, "standard"):
+        return False
+    frontend = frontend_intake_config(raw_intake)
+    explicit_fields = set(frontend) - {"enabled"}
+    explicit = bool(explicit_fields) or bool_from_intake(frontend, "enabled", False)
+    return layout == "web-app" or explicit or bool(existing_frontend_evidence(root))
+
+
+def frontend_governance_config(
+    project_name: str,
+    created_at: str,
+    root: Path,
+    layout: str,
+    raw_intake: dict,
+) -> dict:
+    frontend = frontend_intake_config(raw_intake)
+    existing = existing_frontend_evidence(root)
+    requested_framework = str(frontend.get("framework", "")).strip().lower().replace(".js", "")
+    if requested_framework == "next":
+        requested_framework = "nextjs"
+    framework = str(existing.get("framework", "")).strip() or requested_framework or "react"
+    qualifying = normalize_nextjs_qualifying_requirements(
+        list_from_intake(frontend, "nextjs_qualifying_requirements", [])
+    )
+    rationale = str(frontend.get("rationale", "")).strip()
+    reviewed_exception = frontend.get("nextjs_reviewed_exception", {})
+    reviewed_exception = dict(reviewed_exception) if isinstance(reviewed_exception, dict) else {}
+    reviewed_exception = {
+        "rationale": str(reviewed_exception.get("rationale", "")).strip(),
+        "owner": str(reviewed_exception.get("owner", "")).strip(),
+        "review_evidence": str(reviewed_exception.get("review_evidence", "")).strip(),
+    }
+    exception_confirmed = all(reviewed_exception.values()) and existing_repo_file(
+        root, reviewed_exception["review_evidence"]
+    )
+    explicitly_confirmed = bool_from_intake(frontend, "confirmed", False) or str(frontend.get("selection_status", "")).strip() == "confirmed"
+    if existing:
+        profile = "existing-frontend"
+        selection_status = "preserved-existing"
+        source = "existing-package-evidence"
+        build_tool = str(existing.get("build_tool", "project-defined"))
+        router = str(existing.get("router", "project-defined"))
+    elif framework == "nextjs":
+        profile = "nextjs-framework"
+        selection_status = "confirmed" if explicitly_confirmed and (qualifying or exception_confirmed) else "needs-confirmation"
+        source = "structured-intake" if frontend else "layout-default"
+        build_tool = "next"
+        router = "nextjs-app-router"
+    elif framework == "react":
+        profile = "react-vite-client"
+        selection_status = "confirmed" if explicitly_confirmed else "recommended"
+        source = "structured-intake" if frontend else "web-app-default"
+        build_tool = str(frontend.get("build_tool", "vite")).strip() or "vite"
+        router = str(frontend.get("router", "react-router")).strip() or "react-router"
+    else:
+        profile = str(frontend.get("profile", "existing-or-explicit-frontend")).strip() or "existing-or-explicit-frontend"
+        selection_status = "confirmed" if explicitly_confirmed else "needs-confirmation"
+        source = "structured-intake"
+        build_tool = str(frontend.get("build_tool", "project-defined")).strip() or "project-defined"
+        router = str(frontend.get("router", "project-defined")).strip() or "project-defined"
+
+    commands = frontend.get("commands", {})
+    commands = commands if isinstance(commands, dict) else {}
+    evidence_paths = frontend.get("evidence_paths", {})
+    evidence_paths = evidence_paths if isinstance(evidence_paths, dict) else {}
+    required_lanes = set(list_from_intake(frontend, "required_lanes", ["frontend_static", "frontend_e2e", "frontend_visual", "frontend_a11y", "frontend_release"]))
+    lanes = {}
+    for lane in FRONTEND_LANES:
+        lanes[lane] = {
+            "required": lane in required_lanes,
+            "command": str(commands.get(lane, "")).strip(),
+            "evidence_path": str(evidence_paths.get(lane, "")).strip(),
+        }
+    lanes["frontend_release"]["requires_browser_rendered_evidence"] = True
+    lanes["frontend_release"]["static_checks_are_prechecks_only"] = True
+
+    browser = frontend.get("browser_evidence", {})
+    browser = dict(browser) if isinstance(browser, dict) else {}
+    browser_evidence = {
+        "required_for_completion": True,
+        "static_checks_are_prechecks_only": True,
+        "command": str(browser.get("command", "")).strip(),
+        "evidence_path": str(browser.get("evidence_path", "")).strip(),
+        "freshness_days": positive_int_from_intake(browser, "freshness_days", 7),
+        "viewports": list_from_intake(browser, "viewports", []),
+        "browser_families": list_from_intake(browser, "browser_families", []),
+    }
+
+    default_web_vitals = {"percentile": 75, "lcp_ms": 2500, "inp_ms": 200, "cls": 0.1}
+    web_vitals_intake = frontend.get("core_web_vitals", {})
+    web_vitals_intake = web_vitals_intake if isinstance(web_vitals_intake, dict) else {}
+    web_vitals_values = {
+        key: web_vitals_intake.get(key, default)
+        for key, default in default_web_vitals.items()
+    }
+    uses_default_web_vitals = web_vitals_values == default_web_vitals
+    alternative_policy = web_vitals_intake.get(
+        "alternative_policy",
+        frontend.get("web_vitals_alternative_policy", {}),
+    )
+    alternative_policy = alternative_policy if isinstance(alternative_policy, dict) else {}
+    core_web_vitals = {
+        "enabled": bool_from_intake(
+            web_vitals_intake,
+            "enabled",
+            bool_from_intake(frontend, "core_web_vitals_enabled", True),
+        ),
+        "threshold_policy": "default-good-p75" if uses_default_web_vitals else "reviewed-alternative",
+        **web_vitals_values,
+        "alternative_policy": {
+            "rationale": str(alternative_policy.get("rationale", "")).strip(),
+            "owner": str(alternative_policy.get("owner", "")).strip(),
+            "review_evidence": str(alternative_policy.get("review_evidence", "")).strip(),
+        },
+    }
+
+    existing_visualization = str(existing.get("visualization_engine", "")).strip()
+    visualization_enabled = bool_from_intake(frontend, "visualization_enabled", bool(existing_visualization))
+    visualization_engine = str(
+        frontend.get("visualization_engine", existing_visualization or ("echarts" if visualization_enabled else "none"))
+    ).strip().lower() or "none"
+    echarts_intake = frontend.get("echarts", {})
+    echarts_intake = echarts_intake if isinstance(echarts_intake, dict) else {}
+    if existing_visualization:
+        visualization_status = "preserved-existing"
+    elif not visualization_enabled:
+        visualization_status = "not-applicable"
+    elif bool_from_intake(frontend, "visualization_confirmed", False):
+        visualization_status = "confirmed"
+    else:
+        visualization_status = "recommended"
+    visualization = {
+        "enabled": visualization_enabled,
+        "engine": visualization_engine,
+        "selection_status": visualization_status,
+        "existing_package": existing.get("visualization_package", ""),
+        "existing_version": existing.get("visualization_version", ""),
+    }
+    if visualization_enabled and visualization_engine == "echarts":
+        renderer = str(echarts_intake.get("renderer", "svg")).strip().lower() or "svg"
+        visualization["echarts"] = {
+            "modular_imports": True,
+            "stable_dimensions": True,
+            "resize_handling": True,
+            "dispose_on_unmount": True,
+            "renderer": renderer,
+            "renderer_evidence": str(echarts_intake.get("renderer_evidence", "")).strip(),
+            "aria_registration_and_enablement": True,
+            "text_or_table_alternative": True,
+            "non_color_encoding": True,
+            "required_states": ["loading", "empty", "partial", "error", "success"],
+            "untrusted_content_policy": {
+                "html": "escape-or-reviewed-sanitizer",
+                "urls": "allowlist-protocols-and-origins",
+                "css": "constrain-values",
+                "callbacks": "trusted-code-only",
+                "regular_expressions": "bounded-and-reviewed",
+            },
+            "ssr_export_policy": str(echarts_intake.get("ssr_export_policy", "not-required-unless-project-enables-it")).strip(),
+        }
+
+    return {
+        "schema": "agent-frontend-governance-v1",
+        "project_name": project_name,
+        "created_at": created_at,
+        "enabled": True,
+        "activation": {
+            "source": source,
+            "layout": layout,
+            "explicit_intake": bool(frontend),
+            "existing_package_evidence": bool(existing),
+        },
+        "stack_decision": {
+            "id": "BP-FRONTEND-001",
+            "profile": profile,
+            "framework": framework,
+            "build_tool": build_tool,
+            "router": router,
+            "typescript": {"required": profile == "react-vite-client", "strict": profile == "react-vite-client"},
+            "selection_status": selection_status,
+            "rationale": rationale or ("Preserve detected frontend framework and lockfile." if existing else "Client-rendered application default."),
+            "nextjs_qualifying_requirements": qualifying,
+            "nextjs_reviewed_exception": reviewed_exception,
+            "deployment_boundary": str(frontend.get("deployment_boundary", "project-defined")).strip() or "project-defined",
+        },
+        "existing_evidence": existing,
+        "preservation": {
+            "preserve_existing_framework": True,
+            "preserve_lockfile": True,
+            "no_automatic_migration": True,
+        },
+        "dependency_policy": {
+            "owner": "application",
+            "auto_install": False,
+            "version_policy": "defer-to-existing-lockfile" if existing.get("lockfile") else "confirm-before-install",
+            "package_manager": existing.get("package_manager", str(frontend.get("package_manager", "unresolved"))),
+            "lockfile": existing.get("lockfile", ""),
+        },
+        "harness": {"lanes": lanes},
+        "browser_evidence": browser_evidence,
+        "accessibility": {
+            "standard": str(frontend.get("accessibility_standard", "WCAG 2.2 AA")).strip() or "WCAG 2.2 AA",
+            "automated_checks_are_not_conformance": True,
+            "manual_coverage": ["keyboard", "focus", "semantics", "contrast", "reflow", "reduced-motion"],
+        },
+        "performance": {
+            "core_web_vitals": core_web_vitals,
+            "mobile_and_desktop_separate": True,
+            "field_and_lab_evidence_are_distinct": True,
+        },
+        "ui_states": ["loading", "empty", "partial", "error", "success"],
+        "security": {
+            "untrusted_html_requires_reviewed_sanitization": True,
+            "browser_secrets_forbidden": True,
+            "lockfile_review_required": True,
+            "third_party_origins_must_be_declared": True,
+        },
+        "visualization": visualization,
+        "commands": {
+            "doctor": "python3 scripts/agent_frontend.py doctor",
+            "readiness": "python3 scripts/agent_frontend.py readiness",
+            "report": "python3 scripts/agent_frontend.py report --json",
+            "run_lane": "python3 scripts/agent_frontend.py run-lane <lane>",
+            "run_browser": "python3 scripts/agent_frontend.py run-browser",
+        },
+    }
+
+
 def clean_layout_dir(value: str) -> str:
     raw = value.strip().replace("\\", "/").strip("/")
     if not raw:
@@ -789,7 +1339,7 @@ def profile_at_least(profile: str, level: str) -> bool:
     return PROFILE_ORDER[profile] >= PROFILE_ORDER[level]
 
 
-def config_path_pointers(governance_profile: str, openspec_enabled: bool, claude_enabled: bool) -> dict[str, str]:
+def config_path_pointers(governance_profile: str, openspec_enabled: bool, claude_enabled: bool, frontend_enabled: bool = False) -> dict[str, str]:
     paths = {
         "session_root": ".agent/sessions",
         "governance_manifest": ".agent/manifest.json",
@@ -836,6 +1386,13 @@ def config_path_pointers(governance_profile: str, openspec_enabled: bool, claude
                 "governance_gc": ".agent/governance-gc.json",
             }
         )
+        if frontend_enabled:
+            paths.update(
+                {
+                    "frontend_governance": ".agent/frontend.json",
+                    "frontend_governance_doc": "docs/FRONTEND_GOVERNANCE.md",
+                }
+            )
     if profile_at_least(governance_profile, "full"):
         paths.update(
             {
@@ -853,8 +1410,8 @@ def config_path_pointers(governance_profile: str, openspec_enabled: bool, claude
     return paths
 
 
-def config_paths_json(governance_profile: str, openspec_enabled: bool, claude_enabled: bool) -> str:
-    return json.dumps(config_path_pointers(governance_profile, openspec_enabled, claude_enabled), indent=2)
+def config_paths_json(governance_profile: str, openspec_enabled: bool, claude_enabled: bool, frontend_enabled: bool = False) -> str:
+    return json.dumps(config_path_pointers(governance_profile, openspec_enabled, claude_enabled, frontend_enabled), indent=2)
 
 
 def harness_config(
@@ -865,6 +1422,7 @@ def harness_config(
     openspec_enabled: bool,
     claude_enabled: bool,
     governance_profile: str,
+    frontend_enabled: bool = False,
 ) -> dict:
     validation = {
         "build": [],
@@ -1032,6 +1590,16 @@ def harness_config(
                 "docs/incidents/README.md",
             ]
         )
+        if frontend_enabled:
+            validation["test"].append("python3 scripts/agent_frontend.py doctor")
+            validation["readiness"].append("python3 scripts/agent_frontend.py readiness")
+            required_paths.extend(
+                [
+                    ".agent/frontend.json",
+                    "scripts/agent_frontend.py",
+                    "docs/FRONTEND_GOVERNANCE.md",
+                ]
+            )
     if profile_at_least(governance_profile, "full"):
         required_paths.extend(
             [
@@ -1098,6 +1666,8 @@ def harness_config(
         observability["skill_runtime"] = ".agent/skill-runtime.json"
         observability["skill_optimization"] = ".agent/skill-optimization.json"
         observability["loop_engineering"] = ".agent/loop-engineering.json"
+        if frontend_enabled:
+            observability["frontend_governance"] = ".agent/frontend.json"
 
     required_docs = ["docs/QUALITY.md"]
     if profile_at_least(governance_profile, "standard"):
@@ -1131,7 +1701,7 @@ def harness_config(
     if profile_at_least(governance_profile, "standard"):
         knowledge["manifest"] = ".agent/knowledge.json"
 
-    return {
+    payload = {
         "schema": "agent-harness-v1",
         "project_name": project_name,
         "created_at": created_at,
@@ -1154,6 +1724,16 @@ def harness_config(
             "architecture_boundaries": [],
         },
     }
+    if frontend_enabled:
+        payload["frontend"] = {
+            "authority": ".agent/frontend.json",
+            "lanes": list(FRONTEND_LANES),
+            "browser_rendered_evidence_required_for_completion": True,
+            "static_checks_are_prechecks_only": True,
+            "commands_are_application_owned": True,
+            "automatic_dependency_install": False,
+        }
+    return payload
 
 
 def project_layout_config(project_name: str, layout: str, tech_stack: list[str], dirs: list[str]) -> dict:
@@ -1441,6 +2021,20 @@ def task_board_config(project_name: str, created_at: str) -> dict:
             "review_gate_pass_status": "pass",
             "review_gate_open_findings_must_be_empty": True,
             "review_gate_latest_review_must_exist": True,
+            "human_review_required_for_risks": ["high", "critical"],
+            "human_review_required_before_states": ["done", "archived"],
+            "human_review_required_before_stages": ["verification", "handoff", "finish"],
+            "human_review_required_fields": [
+                "reviewer_type",
+                "reviewer",
+                "review_type",
+                "diff_range",
+                "files_reviewed",
+                "high_risk_paths_checked",
+                "conclusion",
+            ],
+            "human_review_enforcement_started_at": created_at,
+            "human_review_legacy_exemptions": [],
             "stage_review_required_before_stage_exit": [
                 "spec",
                 "plan",
@@ -2403,6 +2997,7 @@ def review_policy_config(project_name: str, created_at: str) -> dict:
             "requires_diff_or_file_review": True,
             "required_for_risk": ["high", "critical"],
             "evidence_fields": [
+                "reviewer_type",
                 "reviewer",
                 "review_type",
                 "diff_range",
@@ -2706,7 +3301,7 @@ def hooks_config(project_name: str, created_at: str) -> dict:
     }
 
 
-def knowledge_config(project_name: str, created_at: str, governance_profile: str) -> dict:
+def knowledge_config(project_name: str, created_at: str, governance_profile: str, frontend_enabled: bool = False) -> dict:
     docs = [
         "docs/index.md",
         "docs/ARCHITECTURE.md",
@@ -2728,6 +3323,8 @@ def knowledge_config(project_name: str, created_at: str, governance_profile: str
     ]
     if profile_at_least(governance_profile, "full"):
         docs.extend(["docs/SECURITY.md", "docs/TOOLING.md"])
+    if frontend_enabled:
+        docs.append("docs/FRONTEND_GOVERNANCE.md")
     return {
         "schema": "agent-knowledge-v1",
         "project_name": project_name,
@@ -2821,7 +3418,7 @@ def knowledge_config(project_name: str, created_at: str, governance_profile: str
     }
 
 
-def dev_map_config(project_name: str, created_at: str, dirs: list[str]) -> dict:
+def dev_map_config(project_name: str, created_at: str, dirs: list[str], frontend_enabled: bool = False) -> dict:
     application_area = {
         "id": "application",
         "name": "Application code",
@@ -2849,6 +3446,14 @@ def dev_map_config(project_name: str, created_at: str, dirs: list[str]) -> dict:
         },
         application_area,
     ]
+    if frontend_enabled:
+        application_area["read_before_edit"].append("docs/FRONTEND_GOVERNANCE.md")
+        application_area["common_patterns"].extend(
+            [
+                "Read .agent/frontend.json before frontend implementation or framework decisions.",
+                "Require real browser-rendered evidence before frontend completion claims.",
+            ]
+        )
     return {
         "schema": "agent-dev-map-v1",
         "project_name": project_name,
@@ -3104,6 +3709,7 @@ def governance_gc_config(project_name: str, created_at: str) -> dict:
             "periodic_review_cadence": "weekly",
             "doctor_is_non_destructive": True,
             "report_warnings_without_failing_by_default": True,
+            "fail_on_warning": False,
             "stale_docs_warn_after_days": 180,
             "active_tasks_warn_after_days": 30,
             "baseline_warn_after_days": 30,
@@ -3418,6 +4024,7 @@ def skill_hygiene_config(project_name: str, created_at: str) -> dict:
         },
         "canary": {
             "enabled": False,
+            "required": False,
             "meaning": "Canary evidence only proves the canary command ran; it does not prove skill discovery, full loading, compliance, or output quality.",
             "requires_explicit_user_confirmation": True,
         },
@@ -3429,7 +4036,56 @@ def skill_hygiene_config(project_name: str, created_at: str) -> dict:
     }
 
 
-def project_skills_config(project_name: str, created_at: str) -> dict:
+def bundled_project_skill(root: Path) -> dict:
+    skill_path = root / ".codex" / "skills" / "agent-gov"
+    manifest_path = skill_path / ".agent-gov-install.json"
+    if not skill_path.is_dir() or not manifest_path.is_file():
+        return {}
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if manifest.get("schema") != "agent-gov-install-v1" or manifest.get("skill") != "agent-gov":
+        return {}
+    package_version = str(manifest.get("package_version", "")).strip()
+    skill_md_sha256 = str(manifest.get("skill_md_sha256", "")).strip()
+    tree_sha256 = str(manifest.get("tree_sha256", "")).strip()
+    if not package_version or not skill_md_sha256 or not tree_sha256:
+        return {}
+    return {
+        "agent-gov": {
+            "scope": "project",
+            "host": "codex",
+            "path": ".codex/skills/agent-gov",
+            "lifecycle": "active",
+            "intent": "project-governance",
+            "owner": "project-governance-owner",
+            "risk": "medium",
+            "source": {
+                "kind": "npm",
+                "repository": "https://www.npmjs.com/package/@airpot/agent-gov",
+                "ref": package_version,
+                "pinned": True,
+            },
+            "content": {
+                "skill_md_sha256": skill_md_sha256,
+                "tree_sha256": tree_sha256,
+            },
+            "release": {
+                "manifest": ".codex/skills/agent-gov/.agent-gov-install.json",
+                "publishable": False,
+                "release_gate": "package-install-identity",
+            },
+            "review": {
+                "requires_review": False,
+                "latest_status": "not-required",
+                "latest_artifact": "",
+            },
+        }
+    }
+
+
+def project_skills_config(project_name: str, created_at: str, root: Path) -> dict:
     return {
         "schema": "agent-project-skills-v1",
         "project_name": project_name,
@@ -3482,7 +4138,7 @@ def project_skills_config(project_name: str, created_at: str) -> dict:
             "snapshot_write": "python3 scripts/agent_project_skills.py snapshot --write",
             "check": "python3 scripts/agent_project_skills.py check <skill>",
         },
-        "skills": {},
+        "skills": bundled_project_skill(root),
     }
 
 
@@ -3818,7 +4474,15 @@ def agent_runtime_config(project_name: str, created_at: str, intake: dict) -> di
     }
 
 
-def blueprint_config(project_name: str, created_at: str, intake: dict, tech_stack: list[str], dirs: list[str], raw_intake: dict | None = None) -> dict:
+def blueprint_config(
+    project_name: str,
+    created_at: str,
+    intake: dict,
+    tech_stack: list[str],
+    dirs: list[str],
+    raw_intake: dict | None = None,
+    frontend: dict | None = None,
+) -> dict:
     raw_intake = raw_intake or {}
     project_target = intake["project_target"]
     runtime_adoption = intake["runtime_adoption"]
@@ -3835,7 +4499,60 @@ def blueprint_config(project_name: str, created_at: str, intake: dict, tech_stac
     else:
         adoption_mode = "target-specific"
         direct_llm_policy = "project-defined"
-    return {
+    records = [
+        {
+            "id": "BP-PRODUCT-001",
+            "title": "Product purpose and users",
+            "status": "draft",
+            "doc_section": "Product Purpose",
+            "linked_specs": [],
+            "linked_adrs": [],
+        },
+        {
+            "id": "BP-RUNTIME-001",
+            "title": "Agent runtime and framework decision",
+            "status": "draft",
+            "doc_section": "Agent Runtime And Framework Decision",
+            "linked_specs": [],
+            "linked_adrs": [],
+        },
+        {
+            "id": "BP-DATA-001",
+            "title": "Data and state ownership",
+            "status": "draft",
+            "doc_section": "Data And State Ownership",
+            "linked_specs": [],
+            "linked_adrs": [],
+        },
+        {
+            "id": "BP-SECURITY-001",
+            "title": "Security and risk boundaries",
+            "status": "draft",
+            "doc_section": "Security And Risk Boundaries",
+            "linked_specs": [],
+            "linked_adrs": [],
+        },
+        {
+            "id": "BP-VALIDATION-001",
+            "title": "Validation and harness strategy",
+            "status": "draft",
+            "doc_section": "Validation And Harness Strategy",
+            "linked_specs": [],
+            "linked_adrs": [],
+        },
+    ]
+    if frontend:
+        records.append(
+            {
+                "id": "BP-FRONTEND-001",
+                "title": "Frontend Web stack and browser evidence decision",
+                "status": "draft",
+                "doc_section": "Frontend Web Stack Decision",
+                "linked_specs": [],
+                "linked_adrs": [],
+            }
+        )
+    payload = {
         "schema": "agent-blueprint-v1",
         "project_name": project_name,
         "created_at": created_at,
@@ -3846,48 +4563,7 @@ def blueprint_config(project_name: str, created_at: str, intake: dict, tech_stac
             "template": ".agent/templates/project-blueprint.md.tmpl",
             "runtime_architecture": "docs/AGENT_RUNTIME_ARCHITECTURE.md",
         },
-        "records": [
-            {
-                "id": "BP-PRODUCT-001",
-                "title": "Product purpose and users",
-                "status": "draft",
-                "doc_section": "Product Purpose",
-                "linked_specs": [],
-                "linked_adrs": [],
-            },
-            {
-                "id": "BP-RUNTIME-001",
-                "title": "Agent runtime and framework decision",
-                "status": "draft",
-                "doc_section": "Agent Runtime And Framework Decision",
-                "linked_specs": [],
-                "linked_adrs": [],
-            },
-            {
-                "id": "BP-DATA-001",
-                "title": "Data and state ownership",
-                "status": "draft",
-                "doc_section": "Data And State Ownership",
-                "linked_specs": [],
-                "linked_adrs": [],
-            },
-            {
-                "id": "BP-SECURITY-001",
-                "title": "Security and risk boundaries",
-                "status": "draft",
-                "doc_section": "Security And Risk Boundaries",
-                "linked_specs": [],
-                "linked_adrs": [],
-            },
-            {
-                "id": "BP-VALIDATION-001",
-                "title": "Validation and harness strategy",
-                "status": "draft",
-                "doc_section": "Validation And Harness Strategy",
-                "linked_specs": [],
-                "linked_adrs": [],
-            },
-        ],
+        "records": records,
         "runtime_framework_decision": {
             "id": "BP-RUNTIME-001",
             "project_target": project_target,
@@ -3925,6 +4601,25 @@ def blueprint_config(project_name: str, created_at: str, intake: dict, tech_stac
             "Confirm product purpose, target users/operators, core workflows, domain model, data ownership, security boundaries, validation strategy, and runtime/framework decision before non-trivial implementation."
         ],
     }
+    if frontend:
+        stack = frontend.get("stack_decision", {})
+        payload["docs"]["frontend_governance"] = "docs/FRONTEND_GOVERNANCE.md"
+        payload["frontend_stack_decision"] = {
+            "id": "BP-FRONTEND-001",
+            "profile": stack.get("profile"),
+            "framework": stack.get("framework"),
+            "build_tool": stack.get("build_tool"),
+            "router": stack.get("router"),
+            "typescript": stack.get("typescript", {}),
+            "selection_status": stack.get("selection_status"),
+            "rationale": stack.get("rationale"),
+            "nextjs_qualifying_requirements": stack.get("nextjs_qualifying_requirements", []),
+            "deployment_boundary": stack.get("deployment_boundary"),
+            "linked_frontend_governance": ".agent/frontend.json",
+            "browser_rendered_evidence_required_for_completion": True,
+            "visualization": frontend.get("visualization", {}),
+        }
+    return payload
 
 
 def skill_runtime_config(project_name: str, created_at: str) -> dict:
@@ -4303,6 +4998,7 @@ def capabilities_config(
     openspec_enabled: bool,
     claude_enabled: bool,
     governance_profile: str,
+    frontend_enabled: bool = False,
 ) -> dict:
     capabilities = [
         {
@@ -4705,6 +5401,23 @@ def capabilities_config(
             "validation": ["test -f docs/DOMAIN_GLOSSARY.md"],
         },
     ]
+    if frontend_enabled:
+        capabilities.append(
+            {
+                "id": "frontend-web-governance",
+                "kind": "policy",
+                "provider": "agent-gov",
+                "enabled": True,
+                "risk": "medium",
+                "owner": "frontend-owner",
+                "description": "Frontend stack, browser evidence, accessibility, performance, security, and optional ECharts governance.",
+                "permissions": {"read": True, "write": "bounded", "network": False, "secrets": False},
+                "required": True,
+                "provider_status": "present",
+                "fallback": "Block frontend completion claims until the generated policy and browser evidence are valid.",
+                "validation": ["python3 scripts/agent_frontend.py doctor", "python3 scripts/agent_frontend.py readiness"],
+            }
+        )
     capability_classes = {
         "instruction": {
             "description": "Agent-readable rules, skills, docs, policies, templates, specs, and glossaries.",
@@ -4742,6 +5455,7 @@ def capabilities_config(
         "skill-hygiene": "executable",
         "project-skill-governance": "executable",
         "project-blueprint": "instruction",
+        "frontend-web-governance": "instruction",
         "resource-catalog": "integration",
         "agent-runtime-architecture": "instruction",
         "skill-runtime-governance": "instruction",
@@ -4777,6 +5491,7 @@ def capabilities_config(
         "skill-hygiene",
         "project-skill-governance",
         "project-blueprint",
+        "frontend-web-governance",
         "resource-catalog",
         "agent-runtime-architecture",
         "skill-runtime-governance",
@@ -4899,7 +5614,7 @@ def security_config(project_name: str, created_at: str) -> dict:
     }
 
 
-def evals_config(project_name: str, created_at: str, governance_profile: str) -> dict:
+def evals_config(project_name: str, created_at: str, governance_profile: str, frontend_enabled: bool = False) -> dict:
     dimensions = {
         "project_integrity": {"weight": 12},
         "required_paths": {"weight": 16},
@@ -4937,6 +5652,8 @@ def evals_config(project_name: str, created_at: str, governance_profile: str) ->
                 "knowledge": {"weight": 6},
             }
         )
+        if frontend_enabled:
+            dimensions["frontend_governance"] = {"weight": 8}
     return {
         "schema": "agent-evals-v1",
         "project_name": project_name,
@@ -4969,7 +5686,7 @@ def evals_config(project_name: str, created_at: str, governance_profile: str) ->
     }
 
 
-def mechanical_checks_config(project_name: str, created_at: str, governance_profile: str) -> dict:
+def mechanical_checks_config(project_name: str, created_at: str, governance_profile: str, frontend_enabled: bool = False) -> dict:
     json_paths = [
         ".agent/config.json",
         ".agent/manifest.json",
@@ -5013,6 +5730,8 @@ def mechanical_checks_config(project_name: str, created_at: str, governance_prof
                 ".agent/skill-distribution.json",
             ]
         )
+    if frontend_enabled:
+        json_paths.append(".agent/frontend.json")
     checks = {
         "json_integrity": {
             "enabled": True,
@@ -5252,6 +5971,20 @@ def mechanical_checks_config(project_name: str, created_at: str, governance_prof
             "fail_on_missing_local_file": False,
         },
     }
+    if frontend_enabled:
+        checks["frontend_governance"] = {
+            "enabled": True,
+            "path": ".agent/frontend.json",
+            "doc": "docs/FRONTEND_GOVERNANCE.md",
+            "script": "scripts/agent_frontend.py",
+            "doctor": "python3 scripts/agent_frontend.py doctor",
+            "readiness": "python3 scripts/agent_frontend.py readiness",
+            "schema": "agent-frontend-governance-v1",
+            "browser_rendered_evidence_required_for_completion": True,
+            "static_checks_are_prechecks_only": True,
+            "required_lanes": list(FRONTEND_LANES),
+            "no_automatic_dependency_install": True,
+        }
     return {
         "schema": "agent-mechanical-checks-v1",
         "project_name": project_name,
@@ -5302,6 +6035,10 @@ def baselines_config(project_name: str, created_at: str) -> dict:
             "before_after_required_for_profiles": ["standard", "full"],
             "bugfix_should_capture_reproduction_baseline": True,
             "tiny_may_skip_with_session_note": True,
+            "snapshot_content_is_immutable": True,
+            "snapshot_lifecycle_values": ["active", "historical", "superseded", "retained"],
+            "historical_retention_review_required": True,
+            "snapshot_sha256_required": True,
         },
     }
 
@@ -5330,6 +6067,7 @@ def manifest_config(project_name: str, created_at: str, harness: dict, evals: di
         ".agent/skill-hygiene.json": "agent-skill-hygiene-v1",
         ".agent/project-skills.json": "agent-project-skills-v1",
         ".agent/blueprint.json": "agent-blueprint-v1",
+        ".agent/frontend.json": "agent-frontend-governance-v1",
         ".agent/memory.json": "agent-memory-v1",
         ".agent/context.json": "agent-context-budget-v1",
         ".agent/capabilities.json": "agent-capabilities-v1",
@@ -5595,6 +6333,7 @@ class Writer:
         self.unchanged: list[str] = []
         self.preserved: list[str] = []
         self.conflicts: list[str] = []
+        self.operations: list[tuple[Path, bytes, bool]] = []
 
     def target(self, relative: str) -> Path:
         relative_path = Path(relative)
@@ -5611,8 +6350,11 @@ class Writer:
     def write(self, relative: str, content: str, executable: bool = False) -> None:
         path = self.target(relative)
         exists = path.exists()
+        if exists and self.force and force_protected_path(relative):
+            self.preserved.append(relative)
+            return
         if exists and not self.force:
-            if relative in APPEND_ONLY_PATHS:
+            if force_protected_path(relative):
                 self.preserved.append(relative)
             elif self.same_text(path, content):
                 self.unchanged.append(relative)
@@ -5621,10 +6363,7 @@ class Writer:
                 self.conflicts.append(relative)
             return
         if not self.dry_run:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content, encoding="utf-8")
-            if executable:
-                path.chmod(path.stat().st_mode | 0o111)
+            self.operations.append((path, content.encode("utf-8"), executable))
         (self.updated if exists else self.created).append(relative)
 
     def ensure_line(self, relative: str, line: str) -> None:
@@ -5636,18 +6375,20 @@ class Writer:
             self.unchanged.append(relative)
             return
         if not self.dry_run:
-            path.parent.mkdir(parents=True, exist_ok=True)
             prefix = current
             if prefix and not prefix.endswith("\n"):
                 prefix += "\n"
-            path.write_text(prefix + line + "\n", encoding="utf-8")
+            self.operations.append((path, (prefix + line + "\n").encode("utf-8"), False))
         (self.updated if exists else self.created).append(relative)
 
     def copy(self, source: Path, relative: str, executable: bool = False) -> None:
         path = self.target(relative)
         exists = path.exists()
+        if exists and self.force and force_protected_path(relative):
+            self.preserved.append(relative)
+            return
         if exists and not self.force:
-            if relative in APPEND_ONLY_PATHS:
+            if force_protected_path(relative):
                 self.preserved.append(relative)
             elif self.same_bytes(path, source):
                 self.unchanged.append(relative)
@@ -5656,11 +6397,60 @@ class Writer:
                 self.conflicts.append(relative)
             return
         if not self.dry_run:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, path)
-            if executable:
-                path.chmod(path.stat().st_mode | 0o111)
+            self.operations.append((path, source.read_bytes(), executable))
         (self.updated if exists else self.created).append(relative)
+
+    @staticmethod
+    def atomic_write(path: Path, content: bytes, mode: int) -> None:
+        temporary = path.with_name(f".{path.name}.agent-gov-write-{os.getpid()}")
+        try:
+            temporary.write_bytes(content)
+            temporary.chmod(mode)
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def apply(self) -> None:
+        if self.dry_run or not self.operations:
+            return
+        backups: list[tuple[Path, bool, bytes, int]] = []
+        created_dirs: set[Path] = set()
+        try:
+            for path, content, executable in self.operations:
+                parent = path.parent
+                missing: list[Path] = []
+                while parent != self.root and not parent.exists():
+                    missing.append(parent)
+                    parent = parent.parent
+                path.parent.mkdir(parents=True, exist_ok=True)
+                created_dirs.update(missing)
+                existed = path.exists()
+                previous = path.read_bytes() if existed else b""
+                previous_mode = path.stat().st_mode & 0o777 if existed else 0o644
+                backups.append((path, existed, previous, previous_mode))
+                mode = previous_mode | 0o111 if executable else previous_mode
+                self.atomic_write(path, content, mode)
+        except Exception as original_error:
+            rollback_errors: list[str] = []
+            for path, existed, previous, previous_mode in reversed(backups):
+                try:
+                    if existed:
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        self.atomic_write(path, previous, previous_mode)
+                    else:
+                        path.unlink(missing_ok=True)
+                except OSError as exc:
+                    rollback_errors.append(f"{path}: {exc}")
+            for directory in sorted(created_dirs, key=lambda item: len(item.parts), reverse=True):
+                try:
+                    directory.rmdir()
+                except OSError:
+                    pass
+            if rollback_errors:
+                raise OSError(
+                    f"generated write failed ({original_error}); rollback was incomplete: {'; '.join(rollback_errors)}"
+                ) from original_error
+            raise
 
     @staticmethod
     def same_text(path: Path, content: str) -> bool:
@@ -5879,7 +6669,7 @@ python3 scripts/agent_sync_skills.py --dry-run
     }
 
 
-def build_values(root: Path, args: argparse.Namespace) -> dict[str, str]:
+def build_values(root: Path, args: argparse.Namespace, raw_architecture_intake: dict | None = None) -> dict[str, str]:
     project_name = args.project_name or root.name
     tech_stack = parse_csv(args.tech_stack)
     dirs = layout_dirs(args.layout, parse_csv(args.dir))
@@ -5888,6 +6678,8 @@ def build_values(root: Path, args: argparse.Namespace) -> dict[str, str]:
     standard_ground_rules, full_ground_rules = agent_ground_rules(args.governance_profile)
     workspace_path = str(root.resolve())
     created_at = utc_now() if args.force else (existing_created_at(root) or utc_now())
+    raw_architecture_intake = raw_architecture_intake or {}
+    frontend_enabled = frontend_extension_enabled(root, args.layout, raw_architecture_intake, args.governance_profile)
     core_workflow, standard_workflow, full_workflow = agent_workflow(
         args.governance_profile,
         "Check documented planning context before substantial changes."
@@ -5918,7 +6710,7 @@ def build_values(root: Path, args: argparse.Namespace) -> dict[str, str]:
         "created_at_json": json.dumps(created_at),
         "openspec_enabled_json": "true" if enabled else "false",
         "claude_enabled_json": "true" if claude_enabled else "false",
-        "config_paths_json": config_paths_json(args.governance_profile, enabled, claude_enabled),
+        "config_paths_json": config_paths_json(args.governance_profile, enabled, claude_enabled, frontend_enabled),
         "agent_standard_ground_rules": standard_ground_rules,
         "agent_full_ground_rules": full_ground_rules,
         "agent_core_workflow": core_workflow,
@@ -5943,6 +6735,8 @@ def build_values(root: Path, args: argparse.Namespace) -> dict[str, str]:
             "- [Development Map](DEV_MAP.md): concise entry points, ownership, read-before-edit docs, and common patterns.\n"
             "- [Loop Engineering](LOOP_ENGINEERING.md): loop contracts, iteration budgets, stop conditions, evidence, and escalation rules.\n"
             "- [Project Resources](RESOURCES.md): resource catalog, local secret-material template, matching, resolve, and safe-use rules.\n"
+            + ("- [Frontend Web Governance](FRONTEND_GOVERNANCE.md): frontend stack, browser evidence, accessibility, performance, security, and optional ECharts rules.\n" if frontend_enabled else "")
+            +
             "- [Skill Runtime Governance](SKILL_RUNTIME.md): canonical Skill cores, thin host adapters, runtime modes, command lanes, review lanes, skill-impact benchmarks, and shortcut/debt ledgers.\n"
             "- [Skill Optimization Governance](SKILL_OPTIMIZATION.md): skill self-optimization triggers, candidate staging, release preflight, auto-promote limits, and rollback evidence.\n"
             "- [Feature Work](features/INDEX.md): task-board-backed feature-stage documents.\n"
@@ -5951,6 +6745,34 @@ def build_values(root: Path, args: argparse.Namespace) -> dict[str, str]:
             "- [RFCs](rfcs/README.md): pre-change design proposals.\n"
             "- [Incidents](incidents/README.md): postmortems and reliability learning."
             if profile_at_least(args.governance_profile, "standard")
+            else ""
+        ),
+        "frontend_blueprint_section": (
+            "## Frontend Web Stack Decision\n\n"
+            "- Current status: review `.agent/frontend.json` and confirm the selected stack.\n"
+            "- Blueprint authority: `.agent/blueprint.json#/frontend_stack_decision`\n"
+            "- Detailed frontend authority: `.agent/frontend.json`\n"
+            "- Frontend doctor: `python3 scripts/agent_frontend.py doctor`\n"
+            "- Frontend readiness: `python3 scripts/agent_frontend.py readiness`\n"
+            "- Final frontend completion requires current evidence from a real browser rendering the application; static and source checks are prechecks only.\n"
+            if frontend_enabled
+            else ""
+        ),
+        "frontend_blueprint_template_section": (
+            "## Frontend Web Stack Decision\n\n"
+            "- Blueprint authority: `.agent/blueprint.json#/frontend_stack_decision`\n"
+            "- Detailed authority: `.agent/frontend.json`\n"
+            "- Profile:\n"
+            "- Framework:\n"
+            "- Build tool:\n"
+            "- Router:\n"
+            "- TypeScript strict mode:\n"
+            "- Next.js qualifying requirements:\n"
+            "- Existing framework and lockfile evidence:\n"
+            "- Browser-rendered completion evidence:\n"
+            "- Visualization and ECharts decision:\n"
+            "- Linked ADR:\n"
+            if frontend_enabled
             else ""
         ),
         "standard_config_updates": (
@@ -6013,13 +6835,24 @@ def init_project(args: argparse.Namespace) -> int:
     if args.spec_mode not in SPEC_MODES:
         print(f"error: --spec-mode must be one of {', '.join(sorted(SPEC_MODES))}", file=sys.stderr)
         return 2
+    validate_existing_project_skill_registry(root)
     if args.install_openspec != "ignored" or args.openspec_package_manager or args.openspec_tools:
         print("note: external OpenSpec CLI options are ignored; agent-gov uses its embedded spec layer")
     if args.no_openspec:
         print("note: --no-openspec is ignored; embedded spec management is part of agent-gov")
 
+    raw_architecture_intake = load_architecture_intake(args.architecture_intake)
+    validate_architecture_intake_types(raw_architecture_intake)
+    frontend_enabled = frontend_extension_enabled(root, args.layout, raw_architecture_intake, args.governance_profile)
+    frontend = (
+        frontend_governance_config(project_name=args.project_name or root.name, created_at=existing_created_at(root) or utc_now(), root=root, layout=args.layout, raw_intake=raw_architecture_intake)
+        if frontend_enabled
+        else None
+    )
     writer = Writer(root, args.force, args.dry_run)
-    values = build_values(root, args)
+    values = build_values(root, args, raw_architecture_intake)
+    if frontend:
+        frontend["created_at"] = values["created_at"]
     tech_stack = parse_csv(args.tech_stack)
     dirs = layout_dirs(args.layout, parse_csv(args.dir))
     project_name = args.project_name or root.name
@@ -6028,8 +6861,8 @@ def init_project(args: argparse.Namespace) -> int:
     governance_profile = args.governance_profile
     standard_enabled = profile_at_least(governance_profile, "standard")
     full_enabled = profile_at_least(governance_profile, "full")
-    harness = harness_config(project_name, values["created_at"], tech_stack, dirs, openspec_enabled, claude_enabled, governance_profile)
-    evals = evals_config(project_name, values["created_at"], governance_profile)
+    harness = harness_config(project_name, values["created_at"], tech_stack, dirs, openspec_enabled, claude_enabled, governance_profile, frontend_enabled)
+    evals = evals_config(project_name, values["created_at"], governance_profile, frontend_enabled)
 
     if openspec_enabled:
         writer.write("openspec/config.yaml", render(template("openspec-config.yaml.tmpl"), values))
@@ -6063,7 +6896,6 @@ def init_project(args: argparse.Namespace) -> int:
     )
     if standard_enabled:
         writer.ensure_line(".gitignore", ".agent/local/")
-        raw_architecture_intake = load_architecture_intake(args.architecture_intake)
         architecture_intake = architecture_intake_config(
             raw_architecture_intake,
             has_intake=bool(args.architecture_intake),
@@ -6079,6 +6911,7 @@ def init_project(args: argparse.Namespace) -> int:
                     tech_stack,
                     dirs,
                     raw_architecture_intake,
+                    frontend,
                 ),
                 indent=2,
             )
@@ -6088,6 +6921,8 @@ def init_project(args: argparse.Namespace) -> int:
             ".agent/workflow.json",
             json.dumps(workflow_config(project_name, values["created_at"], openspec_enabled), indent=2) + "\n",
         )
+        if frontend:
+            writer.write(".agent/frontend.json", json.dumps(frontend, indent=2) + "\n")
         writer.write(
             ".agent/workflow-profiles.json",
             json.dumps(workflow_profiles_config(project_name, values["created_at"]), indent=2) + "\n",
@@ -6118,11 +6953,11 @@ def init_project(args: argparse.Namespace) -> int:
         )
         writer.write(
             ".agent/knowledge.json",
-            json.dumps(knowledge_config(project_name, values["created_at"], governance_profile), indent=2) + "\n",
+            json.dumps(knowledge_config(project_name, values["created_at"], governance_profile, frontend_enabled), indent=2) + "\n",
         )
         writer.write(
             ".agent/dev-map.json",
-            json.dumps(dev_map_config(project_name, values["created_at"], dirs), indent=2) + "\n",
+            json.dumps(dev_map_config(project_name, values["created_at"], dirs, frontend_enabled), indent=2) + "\n",
         )
         writer.write(
             ".agent/skill-hygiene.json",
@@ -6130,7 +6965,7 @@ def init_project(args: argparse.Namespace) -> int:
         )
         writer.write(
             ".agent/project-skills.json",
-            json.dumps(project_skills_config(project_name, values["created_at"]), indent=2) + "\n",
+            json.dumps(project_skills_config(project_name, values["created_at"], root), indent=2) + "\n",
         )
         writer.write(
             ".agent/runtime-policy.json",
@@ -6171,14 +7006,14 @@ def init_project(args: argparse.Namespace) -> int:
         writer.write(
             ".agent/capabilities.json",
             json.dumps(
-                capabilities_config(project_name, values["created_at"], openspec_enabled, claude_enabled, governance_profile),
+                capabilities_config(project_name, values["created_at"], openspec_enabled, claude_enabled, governance_profile, frontend_enabled),
                 indent=2,
             )
             + "\n",
         )
         writer.write(
             ".agent/mechanical-checks.json",
-            json.dumps(mechanical_checks_config(project_name, values["created_at"], governance_profile), indent=2) + "\n",
+            json.dumps(mechanical_checks_config(project_name, values["created_at"], governance_profile, frontend_enabled), indent=2) + "\n",
         )
         writer.write(
             ".agent/baselines.json",
@@ -6258,7 +7093,8 @@ def init_project(args: argparse.Namespace) -> int:
     if full_enabled:
         template_names.extend(full_templates)
     for name in template_names:
-        writer.write(f".agent/templates/{name}", template(name))
+        content = render(template(name), values) if name == "project-blueprint.md.tmpl" else template(name)
+        writer.write(f".agent/templates/{name}", content)
     if standard_enabled:
         for name in FEATURE_STAGE_TEMPLATES:
             writer.write(f".agent/templates/features/{name}", template(f"features/{name}"))
@@ -6298,6 +7134,8 @@ def init_project(args: argparse.Namespace) -> int:
         writer.write("scripts/agent_gc.py", template("agent-gc.py.tmpl"), executable=True)
         writer.write("scripts/agent_security.py", template("agent-security.py.tmpl"), executable=True)
         writer.write("scripts/agent_resources.py", template("agent-resources.py.tmpl"), executable=True)
+        if frontend_enabled:
+            writer.write("scripts/agent_frontend.py", template("agent-frontend.py.tmpl"), executable=True)
     if full_enabled:
         writer.write("scripts/agent_tooling.py", template("agent-tooling.py.tmpl"), executable=True)
         writer.write("scripts/agent_sync_skills.py", template("agent-sync-skills.py.tmpl"), executable=True)
@@ -6317,6 +7155,8 @@ def init_project(args: argparse.Namespace) -> int:
         writer.write("docs/AGENT_RUNTIME_ARCHITECTURE.md", render(template("docs-agent-runtime-architecture.md.tmpl"), values))
         writer.write("docs/SKILL_RUNTIME.md", render(template("docs-skill-runtime.md.tmpl"), values))
         writer.write("docs/SKILL_OPTIMIZATION.md", render(template("docs-skill-optimization.md.tmpl"), values))
+        if frontend_enabled:
+            writer.write("docs/FRONTEND_GOVERNANCE.md", render(template("docs-frontend-governance.md.tmpl"), values))
         writer.write("docs/features/INDEX.md", render(template("docs-features-index.md.tmpl"), values))
         writer.write("docs/features/.gitkeep", "")
         writer.write("docs/tech-debt.md", render(template("docs-tech-debt.md.tmpl"), values))
@@ -6343,7 +7183,7 @@ def init_project(args: argparse.Namespace) -> int:
         ("would create" if args.dry_run else "created", writer.created),
         ("would update" if args.dry_run else "updated", writer.updated),
         ("unchanged", writer.unchanged),
-        ("preserved append-only", writer.preserved),
+        ("preserved durable state", writer.preserved),
         ("conflicts", writer.conflicts),
     )
     for label, items in labels:
@@ -6355,7 +7195,13 @@ def init_project(args: argparse.Namespace) -> int:
     if writer.conflicts:
         print("note: existing different files were preserved; merge manually or rerun with --force only if overwriting is intended")
     if writer.preserved:
-        print("note: append-only stores were preserved to avoid losing runlog, session, memory, or context history")
+        print("note: durable or project-owned governance state was preserved, including append-only history")
+
+    if writer.conflicts:
+        print("error: unresolved generated-file conflicts require review or explicit --force", file=sys.stderr)
+        return 3
+
+    writer.apply()
 
     if not args.dry_run:
         check = root / "scripts" / "agent_check.py"
@@ -6366,6 +7212,9 @@ def init_project(args: argparse.Namespace) -> int:
             print("next: python3 scripts/agent_validate.py --list")
             print("next: python3 scripts/agent_migrate.py doctor")
             if standard_enabled:
+                if frontend_enabled:
+                    print("next: python3 scripts/agent_frontend.py doctor")
+                    print("next: python3 scripts/agent_frontend.py readiness")
                 print("next: python3 scripts/agent_capabilities.py doctor")
                 print("next: python3 scripts/agent_runtime.py doctor")
                 print("next: python3 scripts/agent_task.py doctor")
@@ -6429,7 +7278,7 @@ def main(argv: list[str]) -> int:
         args.governance_profile = default_governance_profile(Path(args.root).expanduser().resolve())
     try:
         return init_project(args)
-    except ValueError as exc:
+    except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

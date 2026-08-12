@@ -8,6 +8,8 @@
 @airpot/agent-gov
 ```
 
+本目录准备的包版本是 `0.1.14`。`npm view @airpot/agent-gov version` 返回的是 registry 已发布版本；两者不一致时，本目录只能称为待发布候选，README 中的 `@latest` 命令仍会安装 registry 版本，不能据此声称本地候选已经发布。
+
 ## 借鉴的开源项目与公开资料
 
 `agent-gov` 借鉴了以下项目或公开材料的设计思想。这里的“借鉴”指治理机制、工作流模式和文档结构，不表示 vendoring、运行时依赖或自动安装这些项目。
@@ -31,28 +33,49 @@
 
 `agent-gov` 当前主要提供以下能力。
 
+运行要求：Node.js `>=20.19.0`，Python `>=3.10`。初始化器会在修改目标项目前验证 Python 版本。
+
 ### 治理体量 profile
 
 初始化时可以用 `--governance-profile core|standard|full` 控制生成规模。
 
 - `core`：最小治理面，包含内嵌规格、harness、项目目录契约、会话接续、runlog、基础评分和迁移检查。
-- `standard`：已有项目默认档，推荐给多数已有项目，增加 workflow profiles、requirements interview gate、task-board、feature 阶段文档、domain glossary、memory、context budget、session event stream、dev map、mechanical checks、baseline、skill hygiene、禁用态 MCP policy、governance-gc 和 harness evolution。
-- `full`：空白项目默认档，完整框架，额外增加 subagent 编排、Codex/Claude 原生适配、hooks、tooling/security 配置和 skill distribution。
+- `standard`：已有项目默认档，推荐给多数已有项目，增加 workflow profiles、requirements interview gate、task-board、feature 阶段文档、domain glossary、memory、context budget、session event stream、dev map、mechanical checks、baseline、skill hygiene、可选 security 命令注册表、禁用态 MCP policy、governance-gc 和 harness evolution。
+- `full`：空白项目默认档，完整框架，额外增加 subagent 编排、Codex/Claude 原生适配、hooks、bounded tooling、security 人类可读文档和 skill distribution。
 
 未显式传 `--governance-profile` 时，空白项目默认 `full`，已有项目默认 `standard`。空白项目判定会忽略 `.git`、常见编辑器目录和空目录。只需要最小接续能力时用 `core`，已有项目需要完整接管时显式传 `full`。
 
 | 场景 | 推荐 profile | 原因 |
 | --- | --- | --- |
 | 只想让长会话可接续，项目还很小 | `core` | 保留 spec、harness、session、runlog 和评分，治理面最小。 |
-| 空白项目从 0 建立 agent-ready 生产流水线 | `full` | 一次性启用 subagent、native adapter、tooling/security 和 skill distribution。 |
+| 空白项目从 0 建立 agent-ready 生产流水线 | `full` | 一次性启用 subagent、native adapter、tooling、security 文档和 skill distribution。 |
 | 已有项目想纳入 agent 开发治理 | `standard` | 覆盖 task-board、requirements gate、memory/context、dev map、baseline、mechanical checks 和治理 GC。 |
-| 跨模块重构、发布、迁移或多 agent 协作 | `full` | 额外启用 subagent、native adapter、tooling/security 和 skill distribution。 |
+| 跨模块重构、发布、迁移或多 agent 协作 | `full` | 额外启用 subagent、native adapter、tooling、security 文档和 skill distribution。 |
 | 不确定选哪个 | 省略参数 | 让初始化器按空白/已有项目自动选择。 |
+
+### 可选 frontend-web 治理
+
+`frontend-web` 只在 `web-app` layout、显式 frontend architecture intake，或已有 `package.json` 中检测到前端框架时启用；`core` 和非 Web 项目不生成 frontend policy、命令、评分维度或 Blueprint 段落。
+
+- 新建 client-rendered 应用默认建议 React、strict TypeScript、Vite 和 React Router。
+- Next.js 仅在 SEO、SSR/SSG、streaming、React Server Components、integrated server runtime、部署约束或其他已审阅理由存在时确认。
+- 已有 Vue、React、Next.js 等项目保留当前框架、依赖版本、package manager、lockfile 和已选可视化引擎，不自动迁移或安装依赖。
+- Apache ECharts 只在 visualization 启用时推荐；选择后治理 modular import、容器尺寸、resize/dispose、SVG/Canvas 依据、ARIA、文本/表格替代、完整数据状态、安全和 SSR/export。
+- frontend doctor 验证 policy 结构；readiness 还要求已确认的 stack、application-owned lane commands/evidence paths，以及真实浏览器产生的当前证据。lint、typecheck、build、静态 HTML 和非浏览器截图只能作为 precheck。
+
+生成后的关键命令：
+
+```bash
+python3 scripts/agent_frontend.py doctor
+python3 scripts/agent_frontend.py readiness
+python3 scripts/agent_frontend.py report --json
+python3 scripts/agent_check.py --strict
+```
 
 1. 项目治理初始化
    - 生成 `AGENTS.md`，可选生成 `CLAUDE.md`。
    - 记录技术栈、固定目录结构、远程开发环境类型。
-   - 默认保留已有文件，除非显式使用 `--force`。
+   - 默认保留已有文件；显式 `--force` 只刷新可再生成文件，仍保护 append-only 记录、session、task、baseline、resource/runtime 决策和 project-skill lifecycle evidence。
 
 2. 内嵌规格管理
    - 生成 `.agent/spec.json` 和 `openspec/` 目录。
@@ -68,7 +91,8 @@
 4. 长会话和跨会话接续
    - 生成 `.agent/sessions/` 和 `.agent/tools/agent_session.py`。
    - 支持 `start`、`checkpoint`、`compact`、`bootstrap`、`resume`、`doctor`、`events`。
-   - 生成 `.agent/sessions/events.jsonl` 作为 append-only 会话事件流，记录 session start、checkpoint、bootstrap、compact 和 archive 事件，方便新会话先读取最近事实。
+   - 生成 `.agent/sessions/events.jsonl` 作为 append-only 会话事件流，记录 session start、checkpoint、显式 `bootstrap --record`、compact 和 archive 事件，方便新会话先读取最近事实。
+   - `bootstrap` 和 `doctor` 默认只读；只有显式 `--record` 才刷新 tracked session 文件。
    - 适合 VS Code Remote 中长期使用 Codex，避免把关键上下文只留在聊天记录里。
 
 5. repo-local 长期记忆
@@ -129,7 +153,7 @@
 12. Agent runtime 框架采用门禁
     - 对 `agent` 和 `hybrid` 目标，默认是 framework-first，而不是让开发者猜要不要用框架。
     - `.agent/agent-runtime.json` 会生成 `runtime_adoption`：primary adapter、recommended adapters、package plan、pre-implementation gate 和 manual LLM exception 契约。
-    - 默认 Skill-first agent 会给出 Strands 安装计划；需要结构化输出时会给出 Pydantic AI 计划；需要长流程/状态图时会给出 LangGraph 计划。
+    - 默认 Skill-first agent 会给出 Strands 安装计划；需要结构化输出时会给出 Pydantic AI 计划；需要长流程/状态图时会给出 LangGraph 计划；选择 OpenAI Agents、官方 Python/TypeScript MCP SDK 或 FastMCP 时也会生成带来源和版本策略的 package plan。
     - 初始化不会静默执行 `pip`、`uv`、`npm` 等安装命令；依赖变更仍归应用层，通过 spec/task/review-fix/validation 落地。
     - 直接手写 LLM 调用、绕过成熟 runtime adapter，只能作为例外：必须记录 rationale、owner、review evidence 和 validation evidence。
 
@@ -232,8 +256,8 @@ https://github.com/airpot/agent-gov.git
 
 启动要求：
 1. 先检查 pwd、git status --short、AGENTS.md、CLAUDE.md、.agent、openspec、Makefile、scripts、docs 和当前技术栈。
-2. 先 dry-run 初始化，默认按 standard profile；如果项目需要多 agent 协作、runtime 框架治理、native adapter、security/tooling，再建议升级到 full profile。
-3. 把 dry-run 结果分成 would create、unchanged、preserved append-only、conflicts，并说明哪些文件需要人工合并。
+2. 先 dry-run 初始化，默认按 standard profile；如果项目需要多 agent 协作、native adapter、bounded tooling 或完整 security 文档，再建议升级到 full profile。
+3. 把 dry-run 结果分成 would create、unchanged、preserved durable state、conflicts，并说明哪些文件需要人工合并。
 4. 不要用 --force 覆盖已有文件，除非我明确同意。
 5. 初始化前先做需求和架构 intake：项目目标、当前模块边界、真实验证命令、部署形态、风险区、是否涉及 agent / MCP / hybrid / library。
 6. 技术栈 intake 必须读取或询问版本证据：lockfile、manifest、.tool-versions、Dockerfile、CI、部署配置、数据库/服务版本、框架版本、agent runtime / MCP SDK 版本。冲突或缺失项要进入 open version decisions，不要用技术栈名称代替版本约束。
@@ -316,9 +340,9 @@ npx @airpot/agent-gov@latest init . --layout minimal --no-create-layout
 npx @airpot/agent-gov@latest init . --layout existing --dir cmd,pkg,internal --no-create-layout
 ```
 
-默认不会覆盖已有文件。遇到已有 `AGENTS.md`、`CLAUDE.md`、`Makefile`、`docs/` 或 `.agent/` 文件时，先人工合并差异；只有确认要替换生成文件时才使用 `--force`。如果只是更新 bundled agent-gov skill，使用：
+默认不会覆盖已有文件。遇到已有 `AGENTS.md`、`CLAUDE.md`、`Makefile`、`docs/` 或 `.agent/` 文件时，先人工合并差异；未解决的 conflict 会返回非零。只有确认要替换可再生成文件时才使用 `--force`，durable/project-owned state 即使在 force 下也会保留。如果只是更新 bundled agent-gov skill，使用：
 
-`--dry-run` 会区分 `would create`、`unchanged`、`preserved append-only` 和 `conflicts`。其中 `preserved append-only` 表示 runlog、session events、memory events 或 context stats 这类追加型历史会被保留；`conflicts` 表示已有文件和将生成内容不同，需要人工合并或明确使用 `--force`。
+`--dry-run` 会区分 `would create`、`unchanged`、`preserved durable state` 和 `conflicts`。其中 durable state 包括追加型历史及 session/task/baseline/resource/runtime/project-skill lifecycle 状态；`conflicts` 表示已有文件和将生成内容不同，需要人工合并或明确使用 `--force`，命令会保持非零直到冲突被解决。
 
 ```bash
 npx @airpot/agent-gov@latest install-skill . --force-skill
@@ -356,7 +380,7 @@ npx @airpot/agent-gov@latest [root] [options]
 - `--no-claude`：不生成 Claude 相关适配文件。
 - `--no-makefile`：不生成目标项目 `Makefile`。
 - `--no-create-layout`：不创建固定目录结构，只记录配置。
-- `--force`：允许覆盖已有生成文件。
+- `--force`：允许覆盖可再生成文件，但不覆盖 durable/project-owned governance state。
 - `--dry-run`：只展示将要创建或跳过的文件。
 - `--skip-skill-install`：npm wrapper 专用，只运行初始化脚本，不复制 bundled agent-gov skill。
 - `--force-skill`：npm wrapper 专用，覆盖目标仓库中的 bundled agent-gov skill。
@@ -384,7 +408,7 @@ python3 scripts/agent_gc.py doctor
 python3 scripts/agent_score.py score --write
 ```
 
-`core` 档不会生成 `agent_task.py`、`agent_verify.py`、`agent_gc.py`、memory/context 工具或原生 adapter；`standard` 档会生成禁用态 `.agent/mcp-policy.json`，但不会生成 subagent/native adapter/tooling/security/skill distribution 相关文件。运行命令时以实际生成的脚本为准。
+`core` 档不会生成 `agent_task.py`、`agent_verify.py`、`agent_gc.py`、memory/context 工具或原生 adapter；`standard` 档会生成禁用态 `.agent/mcp-policy.json` 以及可选 `.agent/security.json` / `agent_security.py`，但不会生成 subagent、native adapter、tooling、security 文档或 skill distribution。运行命令时以实际生成的脚本为准。
 
 任务看板和 feature 文档：
 
@@ -424,8 +448,10 @@ python3 .agent/tools/agent_session.py start feature-name --goal "目标"
 python3 .agent/tools/agent_session.py checkpoint --summary "当前进展" --next "下一步"
 python3 .agent/tools/agent_session.py compact --summary "压缩摘要" --next "下一步"
 python3 .agent/tools/agent_session.py bootstrap
+python3 .agent/tools/agent_session.py bootstrap --record
 python3 .agent/tools/agent_session.py events --limit 10
 python3 .agent/tools/agent_session.py doctor
+python3 .agent/tools/agent_session.py doctor --record
 ```
 
 长期记忆和上下文预算：
@@ -448,6 +474,13 @@ Install skill from https://github.com/airpot/agent-gov/tree/main/.codex/skills/a
 安装后同样需要重启或 reload Codex。
 
 ## 维护者发布检查
+
+先核对本地候选和 registry 状态；registry 版本落后是正常的发布前状态，但必须在对外宣称发布完成前消除：
+
+```bash
+node npm/bin/agent-gov.mjs --version
+npm view @airpot/agent-gov version
+```
 
 发布前在本目录运行：
 

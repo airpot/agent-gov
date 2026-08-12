@@ -21,6 +21,8 @@ scripts/agent_blueprint.py
 
 `core` profile projects do not require blueprint governance by default.
 
+When the optional frontend extension is active, the Blueprint also owns the cross-feature `.agent/blueprint.json#/frontend_stack_decision` summary. Read `frontend-web-governance.md` for the detailed `.agent/frontend.json` authority and browser evidence rules; non-Web projects do not gain the frontend record or document section.
+
 ## Workflow Gate
 
 After requirements interview and before non-trivial implementation:
@@ -30,8 +32,9 @@ After requirements interview and before non-trivial implementation:
 3. Confirm technology version constraints for languages/runtimes, package managers, frameworks/libraries, datastores/services, deployment targets, and agent runtime/MCP SDKs; record exact versions, supported ranges, LTS lines, managed-service versions, or accepted defer-to-lockfile policies.
 4. Confirm external resources, MCP boundary, security/risk boundary, and validation strategy.
 5. Confirm agent runtime/framework strategy in `.agent/blueprint.json#/runtime_framework_decision`.
-6. Run `python3 scripts/agent_blueprint.py doctor`; before implementation, run `python3 scripts/agent_blueprint.py readiness`.
-7. Create or continue the feature-level OpenSpec change and fill `.agent-spec.json#/blueprint_impact`.
+6. When `.agent/frontend.json` exists, confirm the frontend stack and visualization decisions and run frontend doctor/readiness.
+7. Run `python3 scripts/agent_blueprint.py doctor`; before implementation, run `python3 scripts/agent_blueprint.py readiness`.
+8. Create or continue the feature-level OpenSpec change and fill `.agent-spec.json#/blueprint_impact`.
 
 Record unresolved choices in the blueprint `open_decisions` list instead of implementing around them silently.
 Record unresolved version choices in `.agent/blueprint.json#/technology_version_decisions.open_version_decisions`; these are valid draft evidence but do not satisfy implementation readiness until a concrete version/range or accepted lockfile policy is recorded.

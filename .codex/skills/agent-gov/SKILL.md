@@ -1,6 +1,6 @@
 ---
 name: agent-gov
-description: Initialize, retrofit, audit, and maintain Codex/Claude-ready repositories with repo-local governance. Use when making a project agent-ready or managing embedded specs, harness checks, sessions, memory, context budgets, workflow/task boards, worktrees, loop engineering, review-fix gates, knowledge promotion bundles, goal contracts, evidence boundaries, capability/resource/runtime policy, project skills, release evidence, archival, or long-running session recovery.
+description: Initialize, retrofit, audit, and maintain Codex/Claude-ready repositories with repo-local governance. Use when making a project agent-ready or managing embedded specs, harness checks, sessions, memory, context budgets, workflow/task boards, worktrees, loop engineering, review-fix gates, knowledge promotion bundles, goal contracts, evidence boundaries, capability/resource/runtime/frontend Web policy, project skills, release evidence, archival, or long-running session recovery.
 ---
 
 # Agent Gov
@@ -17,11 +17,12 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
 
 2. **Choose initialization scope**
    - Ask for or infer the technology stack before initialization. Include version constraints for languages/runtimes, package managers, frameworks/libraries, datastores/services, deployment targets, and agent runtime/MCP SDKs when they affect design; if unknown, ask whether to continue with `unspecified` and record open version decisions.
-   - Ask for the fixed project directory layout. Use a built-in layout (`minimal`, `python-app`, `node-app`, `web-app`, `service`, `library`) or explicit extra directories.
-   - Choose the initialization profile that matches the repository maturity: `core` for minimal spec/harness/session continuity, `standard` for durable workflow/task/memory/context governance plus disabled-by-default MCP policy, or `full` for native Codex/Claude adapters, subagent orchestration, security/tooling, and skill distribution. When no profile is specified, blank projects default to `full` and existing projects default to `standard`; use an explicit `--governance-profile` when the user wants a smaller or larger governance footprint.
+   - Ask for the fixed project directory layout. Use a built-in layout (`existing`, `minimal`, `python-app`, `node-app`, `web-app`, `service`, `library`) or explicit extra directories.
+   - Choose the initialization profile that matches the repository maturity: `core` for minimal spec/harness/session continuity, `standard` for durable workflow/task/memory/context governance, disabled-by-default MCP policy, and the optional security command registry, or `full` for native Codex/Claude adapters, subagent orchestration, bounded tooling, security documentation, and skill distribution. When no profile is specified, blank projects default to `full` and existing projects default to `standard`; use an explicit `--governance-profile` when the user wants a smaller or larger governance footprint.
    - Use `references/spec-management.md` for embedded OpenSpec-style project specification setup, status checks, and mandatory archival of completed changes.
    - Use `references/workflow-governance.md` for workflow profiles, lifecycle gates, task-board continuity, feature-stage documents, loop engineering, task risk/autonomy, plan quality, TDD/debugging evidence, diff traceability, worktree isolation, review order, human review evidence, goal contracts, knowledge promotion review, and completion proof.
    - Use `references/project-blueprint-governance.md` for requirements-interview-to-blueprint flow, global project architecture contracts, runtime/framework decisions, and OpenSpec blueprint-impact sync before implementation.
+   - Use `references/frontend-web-governance.md` for browser-facing Web projects, frontend stack selection, React/Vite versus Next.js decisions, browser-rendered evidence, accessibility, performance, security, and optional Apache ECharts governance.
    - Use `references/implementation-discipline.md` for assumption clarification, simplicity-first implementation, surgical diffs, verifiable goals, and evidence-bounded source adoption.
    - Use `references/harness-management.md` for command, validation, capability governance, project resource catalog governance, Skill-first runtime architecture governance, Skill Runtime Governance, model profile governance, runlog evidence, knowledge promotion bundle checks, evidence-store boundaries, ACI tooling, security/supply-chain suites, governance scoring/evals, dev map, harness evolution, MCP policy, governance-gc, ADR/RFC/postmortem records, native adapters, context budget, project skill governance, skill distribution, and repo-harness setup.
    - Use `references/skill-runtime-governance.md` when governing portable Skill/plugin products, canonical Skill cores, thin host adapters, runtime modes, command lanes, impact benchmarks, shortcut/debt ledgers, or adapter parity.
@@ -32,6 +33,7 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
    - Use `references/review-fix-loop.md` when release readiness, loop engineering, or review gates are part of the request.
 
 3. **Run deterministic initialization**
+   - Require Python 3.10 or newer; the initializer and generated tools use Python 3.10 syntax.
    - Prefer `scripts/init_agent_project.py <repo-root>`.
    - Pass `--tech-stack <stack>` and `--layout <layout>` when known.
    - Pass `--governance-profile core|standard|full` when the user wants a smaller or larger governance footprint.
@@ -39,13 +41,14 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
    - Add `--remote-kind ssh|devcontainer|wsl|local|unknown` when known.
    - The initializer uses agent-gov's embedded spec layer; it does not install or call a global OpenSpec CLI.
    - Add `--no-claude` only when the user does not want Claude support.
-   - Do not overwrite existing files unless the user explicitly asks for `--force`.
-   - For existing projects, run `--dry-run` first and inspect `would create`, `unchanged`, `preserved append-only`, and `conflicts` before writing.
+   - Do not overwrite existing files unless the user explicitly asks for `--force`. Even with force, preserve durable/project-owned state such as append-only ledgers, sessions, tasks, baselines, resource decisions, runtime decisions, and project-skill lifecycle evidence.
+   - For existing projects, run `--dry-run` first and inspect `would create`, `unchanged`, `preserved durable state`, and `conflicts` before writing. Treat a non-zero conflict result as an unresolved manual merge gate, not a failed dry-run transport.
 
 4. **Create or verify session continuity**
    - Ensure `.agent/config.json`, `.agent/sessions/index.json`, `.agent/sessions/events.jsonl`, `.agent/sessions/active.md`, `.agent/tools/agent_session.py`, and session/offload templates exist.
    - For active long-running work, use the generated `.agent/tools/agent_session.py start/checkpoint/bootstrap/compact/grounding/offload-add/offload-recall/offload-map/rollover/doctor/resume/status/events` commands.
    - Require new sessions to run `python3 .agent/tools/agent_session.py bootstrap` before editing when an active session exists.
+   - Treat `bootstrap` and `doctor` as read-only inspection by default. Use their explicit `--record` mode only when refreshing tracked bootstrap/resume/offload/status artifacts and appending session events is intended.
    - Keep bootstrap and compact output as compact recovery packets with evidence handles. Do not inline long historical handoff, changes, validation, grounding, memory, context, archived spec, or dirty-status bodies; keep complete dirty state in `refs/git-status-short.txt`.
    - Use `grounding` before implementation after rollover: current repository files, configs, specs, task-board state, runlog evidence, and validation notes override memory summaries and prior chat assumptions.
    - Use `offload-add` for compact cross-session context only when every summary has evidence handles; use `offload-recall` progressively and verify recalled facts against durable truth sources before editing.
@@ -82,7 +85,7 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
    - Stop repeating when the same failure recurs; change strategy, classify a harness gap, or ask for human input instead of retrying the same action without new evidence.
    - For every task-board-backed task, require `review_gate.status=pass`, an existing latest review document, no open blocker/major/minor findings, and completed task decomposition before task state can become `done`.
    - Use workflow gates for task risk/autonomy, design/spec approval, plan quality, implementation discipline, diff traceability, isolated execution, TDD evidence, systematic debugging, spec review, quality review, human review evidence, completion verification, handoff, and finish choices.
-   - Require high and critical risk work to record approval/review evidence; critical work is not autonomous modification work.
+   - Enforce each workflow profile's `max_risk` before task artifacts are written and in task/check/score validation. Require high and critical risk tasks entering verification, handoff, finish, done, or archived boundaries to record structured human review evidence with `reviewer_type=human`, reviewer, review type, diff range, reviewed files, checked high-risk paths, conclusion, and an existing review path; critical work is not autonomous modification work.
    - Prefer ignored git worktrees for feature work, implementation-plan execution, and risky refactors; record baseline validation before edits.
    - Require fresh validation evidence before completion, merge, PR, archive, or handoff claims.
    - When an embedded spec change reaches `all_done`, archive it with `python3 scripts/agent_spec.py archive <name>` before claiming completion, handoff, release, or archive readiness.
@@ -90,8 +93,8 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
 
 8. **Create or verify capability governance and runlog evidence**
    - Ensure core scoring and evidence files exist in every profile: `.agent/manifest.json`, `.agent/runlog.jsonl`, `.agent/evals.json`, `.agent/evals/latest.md`, `scripts/agent_runlog.py`, `scripts/agent_score.py`, and `scripts/agent_migrate.py`.
-   - For `standard` and `full`, ensure `.agent/capabilities.json`, `.agent/dev-map.json`, `.agent/skill-hygiene.json`, `.agent/loop-engineering.json`, `.agent/harness-evolution.json`, `.agent/mcp-policy.json`, `.agent/governance-gc.json`, `scripts/agent_capabilities.py`, `scripts/agent_skill_hygiene.py`, `scripts/agent_verify.py`, and `scripts/agent_gc.py` exist.
-   - For `full`, ensure `.agent/tooling.json`, `.agent/security.json`, `scripts/agent_tooling.py`, and `scripts/agent_security.py` exist.
+   - For `standard` and `full`, ensure `.agent/capabilities.json`, `.agent/dev-map.json`, `.agent/skill-hygiene.json`, `.agent/loop-engineering.json`, `.agent/harness-evolution.json`, `.agent/mcp-policy.json`, `.agent/governance-gc.json`, `.agent/security.json`, `scripts/agent_capabilities.py`, `scripts/agent_skill_hygiene.py`, `scripts/agent_verify.py`, `scripts/agent_gc.py`, and `scripts/agent_security.py` exist.
+   - For `full`, additionally ensure `.agent/tooling.json` and `scripts/agent_tooling.py` exist.
    - Treat `.agent/manifest.json` as the generated governance manifest for required paths, JSON schemas, JSONL stores, and score dimensions; update it when the governance surface changes.
    - Use `.agent/capabilities.json` to record enabled skills, tools, MCP/integration entries, resource-catalog capability, native adapters, owner, risk, capability class, permission shape, provider status (`present`, `missing`, `unknown`, or `degraded`), required/optional classification, fallback behavior, and validation commands.
    - Use `.agent/manifest.json#/governance_presets` for selected presets, extensions, and catalog entries with source status, version or revision, owner, permission scope, generated paths, validation, conflict behavior, dry-run support, and no automatic dependency installation.
@@ -103,6 +106,10 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
    - Use `.agent/skill-runtime.json` and `docs/SKILL_RUNTIME.md` to govern portable Skill/plugin product architecture: canonical skill core, thin host adapters, runtime modes, command lanes, separated review lanes, benchmark evidence, and deliberate shortcut/debt ledgers.
    - Use `.agent/skill-optimization.json`, `docs/SKILL_OPTIMIZATION.md`, `scripts/agent_skill_opt.py`, and `skillflows/<skill>/optimization/` to govern skill self-optimization, candidate staging, release-preflight evidence, rejected edits, promotion limits, and rollback. Before every agent-system or production skill release, run or verify a current self-optimization preflight; release checks validate existing evidence and fail closed with a repair command when it is missing, stale, or failing.
    - During initialization, convert the user's architecture conversation into structured `--architecture-intake <json-file>` input when possible; the initializer does not read transient chat history directly.
+   - For `web-app`, explicit frontend intake, or detected existing frontend packages, generate `.agent/frontend.json`, `docs/FRONTEND_GOVERNANCE.md`, and `scripts/agent_frontend.py`. Preserve existing frameworks, package managers, versions, visualization engines, and lockfiles; do not install or migrate dependencies.
+   - For greenfield client-rendered applications, recommend React, strict TypeScript, Vite, and React Router. Select Next.js only when SEO, SSR/SSG, streaming, React Server Components, an integrated server runtime, a deployment constraint, or another reviewed rationale requires it.
+   - Recommend Apache ECharts only when visualization is enabled. Keep it absent otherwise, and require a confirmed renderer/lifecycle/accessibility/state/security/SSR-export policy when selected.
+   - Require application-owned frontend commands to run through `scripts/agent_frontend.py run-lane <lane>` and `run-browser`; readiness validates runner-produced lane records and a browser evidence/receipt pair bound by exact command, run id, time window, repository-relative path, SHA-256, viewport/browser coverage, and zero runtime errors. Config assertions, empty files, stale records, source review, lint, typecheck, build output, static HTML, and non-browser screenshots do not prove completion.
    - Treat Strands as the default Skill-first agent runtime adapter, not as the architecture standard; keep Pydantic AI, LangGraph, MCP SDKs, and FastMCP-style servers as optional application-owned adapters and keep runtime dependencies in application code, not agent-gov.
    - For `agent` and `hybrid` projects, treat runtime adoption as framework-first by default: run `python3 scripts/agent_runtime.py doctor`, `python3 scripts/agent_runtime.py readiness`, and `python3 scripts/agent_runtime.py report --json`, follow `.agent/agent-runtime.json` `runtime_adoption.package_plan` when adding application dependencies, and do not hand-write direct LLM orchestration unless `.agent/agent-runtime.json` records an accepted `manual_llm_exception` with rationale, owner, review evidence, validation evidence, and residual risk.
    - For MCP server projects, do not force model profiles or agent orchestration; require explicit MCP tool/resource/prompt, transport, host/client, credential, and destructive-operation boundaries.
@@ -114,7 +121,7 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
    - Ensure `docs/DEV_MAP.md` exists as a concise repository navigation map, not a full file inventory.
    - Use `.agent/loop-engineering.json` and `docs/LOOP_ENGINEERING.md` to govern loop primitive selection, bounded work loops, review-fix loops, debugging loops, eval optimization loops, session recovery loops, goal proof contracts, scheduled routines, scripted workflows, usage evidence, readiness levels, attempt ledgers, quota/circuit-breaker controls, safe fallback lanes, and explicit loop state transitions.
    - Use `.agent/harness-evolution.json` and `python3 scripts/agent_gc.py classify ...` to classify repeated failures and promote fixes into rules, skills, scripts, workflow gates, loop contracts, role contracts, tool/MCP policy, or docs.
-   - Use `.agent/mechanical-checks.json#/checks/strict_agent_contracts`, `.agent/baselines.json#/regression_criteria`, and `.agent/governance-gc.json#/component_expiry` for contract fixtures, protected-action evidence, provider fallback checks, bootstrap compactness, regression criteria, and stale load-bearing component review.
+   - Use `.agent/mechanical-checks.json#/checks/strict_agent_contracts`, `.agent/baselines.json#/regression_criteria`, and `.agent/governance-gc.json#/component_expiry` for contract fixtures, protected-action evidence, provider fallback checks, bootstrap compactness, regression criteria, and stale load-bearing component review. Baseline snapshots are immutable evidence: record SHA-256 plus a structured retention review and lifecycle (`historical`, `retained`, or `superseded`) instead of changing historical timestamps or deleting snapshots; GC warnings are advisory by default and only explicit `fail_on_warning` turns them into a blocking policy.
    - Use `.agent/skill-hygiene.json` and `scripts/agent_skill_hygiene.py` as a read-only skill topology/source/hash/frontmatter/symlink/risk-signal scan; cleanup and canary injection require explicit human confirmation.
    - For `standard` and `full`, ensure `.agent/project-skills.json` and `scripts/agent_project_skills.py` exist.
    - Use `.agent/project-skills.json` as the canonical repo-local registry for intentionally governed project skills; keep `skills.manifest.json` as the production/release boundary and `workspace-tools.manifest.json` as workspace-only helper awareness when present.
@@ -122,6 +129,7 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
    - Treat both project-local and global installed skills as governed inventory: `scripts/agent_project_skills.py report --json` must surface both, and unmanaged global installs require registration or an explicit policy exception.
    - Use `scripts/agent_project_skills.py report --json` before adopting, updating, deprecating, removing, pinning, or reclassifying project skills; use `snapshot --write` only after the lifecycle change has been reviewed and validated.
    - Treat project skill lifecycle changes as non-trivial governance work: open or use an embedded spec, run review -> fix -> review through the controlling skill lifecycle, run validation, and archive the completed embedded spec before claiming completion.
+   - Allow the first bundled `agent-gov` bootstrap registration to be `not-required`, but require every later package-version or content-identity change to set review `pending` and block project-skill doctor until fresh review evidence exists.
    - Treat `.agent/mcp-policy.json` as optional and disabled by default until the project explicitly enables external integrations; it defines trust boundaries even when no MCP server is active, and raw credentials must stay behind vault/proxy boundaries outside the repo, harness, and sandbox.
    - Treat high-risk, production write, destructive, release, billing, privileged, or cost-bearing resource use as approval-gated work and record high-risk use in runlog when available.
    - Keep runlog entries structured and concise; do not store raw transcripts, terminal scrollback, secrets, or private host data.
@@ -147,6 +155,7 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
    - Run the generated project check when available: `python3 scripts/agent_check.py`.
    - Before agent/hybrid/MCP runtime implementation in `standard` or `full` projects, run strict readiness: `python3 scripts/agent_check.py --strict` or `python3 scripts/agent_validate.py readiness --require-configured`.
    - Check migration and version drift when available: `python3 scripts/agent_migrate.py doctor`.
+   - For projects with `.agent/frontend.json`, run configured evidence commands through `python3 scripts/agent_frontend.py run-lane <lane>` and `python3 scripts/agent_frontend.py run-browser`, then run `doctor`, `readiness`, and `report --json`; readiness is expected to fail until required application-owned lanes and correlated real-browser evidence are current.
    - Run `python3 scripts/agent_spec.py doctor` and `python3 scripts/agent_spec.py list --json`; `doctor` must fail while a completed `all_done` change remains active instead of archived.
    - Inspect executable feedback commands: `python3 scripts/agent_validate.py --list`.
    - Check the knowledge store and invariants: `python3 scripts/agent_knowledge.py` and `python3 scripts/agent_invariants.py`.
@@ -167,7 +176,7 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
 
 12. **Review before handoff**
    - For substantial initialization work, create or update a review-fix record in the controlling skill lifecycle.
-   - If the user asks to review or audit an agent-governed project, use `references/review-fix-loop.md` and repeat review, fix, revalidation, and review until the latest review has no blocker, major, or minor findings.
+   - If the user asks only to review or audit an agent-governed project, use `references/review-fix-loop.md` in report-only mode and return findings without modifying files. Enter review -> fix -> revalidation -> re-review only when the user requested fixes in the same request or explicitly approves the reported fixes.
    - For active embedded spec changes, run `python3 scripts/agent_spec.py status --change <name> --json`; if the state is `all_done`, archive it before final response or handoff.
    - Do not claim completion, handoff, merge readiness, archive readiness, or release readiness for `standard` or `full` tasks until the generated task-board review gate is `pass`.
    - Confirm that resume instructions do not depend on unsaved editor buffers, terminal scrollback, or Codex native thread history.
@@ -181,6 +190,7 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
 - `assets/templates/agent-capabilities.py.tmpl`: Source for generated target-project `scripts/agent_capabilities.py`.
 - `assets/templates/agent-resources.py.tmpl`: Source for generated target-project `scripts/agent_resources.py`.
 - `assets/templates/agent-blueprint.py.tmpl`: Source for generated target-project `scripts/agent_blueprint.py`.
+- `assets/templates/agent-frontend.py.tmpl`: Source for generated target-project `scripts/agent_frontend.py`.
 - `assets/templates/agent-runtime.py.tmpl`: Source for generated target-project `scripts/agent_runtime.py`.
 - `assets/templates/agent-skill-hygiene.py.tmpl`: Source for generated target-project `scripts/agent_skill_hygiene.py`.
 - `assets/templates/agent-project-skills.py.tmpl`: Source for generated target-project `scripts/agent_project_skills.py`.
@@ -196,6 +206,7 @@ Govern a repository so long-running Codex/Claude work can be specified, planned,
 - `assets/templates/agent-spec.py.tmpl`: Source for generated target-project `scripts/agent_spec.py`.
 - `references/workflow-governance.md`: Workflow gates, loop engineering, worktree isolation, TDD/debugging evidence, review sequencing, and completion proof.
 - `references/project-blueprint-governance.md`: Global project blueprint, runtime/framework decision, and OpenSpec blueprint-impact governance.
+- `references/frontend-web-governance.md`: Conditional frontend stack, rendered evidence, accessibility, performance, ECharts, security, and release governance.
 - `references/implementation-discipline.md`: Assumption clarification, simplicity-first implementation, surgical change boundaries, and goal-driven verification.
 - `references/spec-management.md`: Embedded OpenSpec-style specification rules.
 - `references/harness-management.md`: Harness files, native adapters, commands, validation, and safety rules.

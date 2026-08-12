@@ -19,23 +19,10 @@ HYGIENE_SCRIPT = Path("scripts/agent_skill_hygiene.py")
 PRODUCTION_MANIFEST = Path("skills.manifest.json")
 WORKSPACE_TOOLS_MANIFEST = Path("workspace-tools.manifest.json")
 CAPABILITIES_CONFIG = Path(".agent/capabilities.json")
-SKIP_DIRS = {".git", "__pycache__", "node_modules", "dist", "build", "target"}
-SKIP_NAMES = {".DS_Store"}
+SKIP_DIRS = {".git", "__pycache__", ".skvm", "node_modules", "dist", "build", "target"}
+SKIP_NAMES = {".DS_Store", ".agent-gov-install.json"}
+SKIP_SUFFIXES = {".pyc", ".pyo", ".log"}
 PROJECT_SKILL_DEFAULT_ROOT = ".codex/skills"
-SENSITIVE_NAMES = {
-    ".env",
-    ".env.local",
-    ".env.production",
-    ".netrc",
-    "credentials",
-    "credentials.json",
-    "secrets",
-    "secrets.json",
-    "id_rsa",
-    "id_dsa",
-    "id_ecdsa",
-    "id_ed25519",
-}
 PINNED_REF_PREFIXES = ("refs/tags/",)
 COMMON_BRANCH_REFS = {"main", "master", "develop", "dev", "trunk", "latest", "head", "HEAD"}
 REVIEW_FINDING_SECTIONS = ("Blocker", "Major", "Minor")
@@ -93,23 +80,19 @@ def same_repo_path(left: Any, right: Any) -> bool:
     return normalized_repo_path(left) == normalized_repo_path(right)
 
 
-def is_sensitive(path: Path) -> bool:
-    if path.name in SENSITIVE_NAMES:
-        return True
-    suffix = path.suffix.lower()
-    return suffix in {".pem", ".key", ".p12", ".pfx", ".jks", ".keystore", ".gpg", ".asc"}
-
-
 def iter_skill_files(skill_dir: Path) -> list[Path]:
     files: list[Path] = []
     if not skill_dir.exists() or not skill_dir.is_dir():
         return files
     for path in sorted(skill_dir.rglob("*")):
+        relative_parts = set(path.relative_to(skill_dir).parts)
+        if relative_parts & SKIP_DIRS:
+            continue
+        if path.name in SKIP_NAMES or path.suffix in SKIP_SUFFIXES:
+            continue
+        if path.is_symlink():
+            raise ValueError(f"unsupported symlink in skill tree: {path}")
         if not path.is_file():
-            continue
-        if set(path.parts) & SKIP_DIRS:
-            continue
-        if path.name in SKIP_NAMES or is_sensitive(path):
             continue
         files.append(path)
     return files
@@ -137,13 +120,14 @@ def tree_sha256(skill_dir: Path) -> str:
 def content_identity(skill_path: str) -> dict[str, str]:
     try:
         root = safe_rel_path(skill_path)
-    except ValueError:
-        return {"skill_md_sha256": "", "tree_sha256": ""}
-    skill_md = root / "SKILL.md"
-    return {
-        "skill_md_sha256": file_sha256(skill_md) if skill_md.exists() and skill_md.is_file() else "",
-        "tree_sha256": tree_sha256(root) if root.exists() and root.is_dir() else "",
-    }
+        skill_md = root / "SKILL.md"
+        return {
+            "skill_md_sha256": file_sha256(skill_md) if skill_md.exists() and skill_md.is_file() else "",
+            "tree_sha256": tree_sha256(root) if root.exists() and root.is_dir() else "",
+            "error": "",
+        }
+    except (OSError, ValueError) as exc:
+        return {"skill_md_sha256": "", "tree_sha256": "", "error": str(exc)}
 
 
 def run_hygiene_report() -> tuple[dict[str, Any], str]:
@@ -500,13 +484,17 @@ def status_for_skill(
     if registered_bool and scope != "global" and exists and not path_error:
         current = content_identity(path)
         recorded = registered.get("content", {}) if isinstance(registered.get("content"), dict) else {}
-        for key in ("skill_md_sha256", "tree_sha256"):
-            expected = str(recorded.get(key, "")).strip()
-            actual = current.get(key, "")
-            if expected and actual and expected != actual:
-                if "drifted" not in statuses:
-                    statuses.append("drifted")
-                findings.append({"severity": "error", "kind": "drifted", "summary": f"{name} {key} differs from registry", "path": path})
+        if current.get("error"):
+            statuses.append("drifted")
+            findings.append({"severity": "error", "kind": "drifted", "summary": f"{name} identity failed: {current['error']}", "path": path})
+        else:
+            for key in ("skill_md_sha256", "tree_sha256"):
+                expected = str(recorded.get(key, "")).strip()
+                actual = current.get(key, "")
+                if expected and actual and expected != actual:
+                    if "drifted" not in statuses:
+                        statuses.append("drifted")
+                    findings.append({"severity": "error", "kind": "drifted", "summary": f"{name} {key} differs from registry", "path": path})
 
     if registered_bool:
         source = registered.get("source", {}) if isinstance(registered.get("source"), dict) else {}
@@ -709,17 +697,25 @@ def cmd_snapshot(args: argparse.Namespace) -> int:
     config = load_config()
     skills = registry_skills(config)
     snapshots: dict[str, dict[str, str]] = {}
+    errors: list[str] = []
     for name, item in sorted(skills.items()):
         if not isinstance(item, dict):
             continue
         path = str(item.get("path", "")).strip()
         if not path:
             continue
-        snapshots[name] = content_identity(path)
+        identity = content_identity(path)
+        if identity.get("error"):
+            errors.append(f"{name}: {identity['error']}")
+        snapshots[name] = identity
         if args.write:
             item.setdefault("content", {})
-            if isinstance(item["content"], dict):
-                item["content"].update(snapshots[name])
+            if isinstance(item["content"], dict) and not identity.get("error"):
+                item["content"].update({key: identity[key] for key in ("skill_md_sha256", "tree_sha256")})
+    if errors:
+        for error in errors:
+            print(f"error: {error}", file=sys.stderr)
+        return 1
     if args.write:
         config["updated_at"] = utc_now()
         write_json(CONFIG_PATH, config)

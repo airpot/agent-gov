@@ -1,0 +1,759 @@
+#!/usr/bin/env python3
+"""Validate optional frontend Web governance and release readiness."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+import os
+import secrets
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+CONFIG_PATH = Path(".agent/frontend.json")
+BLUEPRINT_PATH = Path(".agent/blueprint.json")
+HARNESS_PATH = Path(".agent/harness.json")
+REQUIRED_LANES = (
+    "frontend_static",
+    "frontend_component",
+    "frontend_e2e",
+    "frontend_visual",
+    "frontend_a11y",
+    "frontend_performance",
+    "frontend_security",
+    "frontend_release",
+)
+SELECTION_STATUSES = {"confirmed", "preserved-existing", "recommended", "needs-confirmation"}
+REQUIRED_UI_STATES = {"loading", "empty", "partial", "error", "success"}
+DEFAULT_WEB_VITALS = {"percentile": 75, "lcp_ms": 2500, "inp_ms": 200, "cls": 0.1}
+LANE_EVIDENCE_SCHEMA = "agent-frontend-lane-evidence-v1"
+BROWSER_EVIDENCE_SCHEMA = "agent-frontend-browser-evidence-v1"
+BROWSER_RECEIPT_SCHEMA = "agent-frontend-browser-receipt-v1"
+RUNNER_PRODUCER = "agent_frontend.py"
+NEXTJS_QUALIFYING_REQUIREMENTS = {
+    "seo",
+    "ssr",
+    "ssg",
+    "ssr-ssg",
+    "streaming",
+    "react-server-components",
+    "integrated-server-runtime",
+    "deployment-constraint",
+}
+
+
+def read_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def unique(items: list[str]) -> list[str]:
+    return list(dict.fromkeys(item for item in items if item))
+
+
+def parse_timestamp(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def is_finite_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def string_list(value: Any, field: str, errors: list[str]) -> list[str]:
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item.strip() for item in value):
+        errors.append(f"{field} must be a list of non-empty strings")
+        return []
+    return value
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def repo_file(value: str, field: str, findings: list[str], require_exists: bool = False) -> Path | None:
+    text = value.strip()
+    if not text:
+        return None
+    candidate = Path(text)
+    if candidate.is_absolute():
+        findings.append(f"{field} must be repository-relative")
+        return None
+    root = Path.cwd().resolve()
+    resolved = (root / candidate).resolve()
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        findings.append(f"{field} escapes the repository: {text}")
+        return None
+    if require_exists and not resolved.is_file():
+        findings.append(f"{field} does not exist: {text}")
+        return None
+    return resolved
+
+
+def relative_path(path: Path) -> str:
+    return path.resolve().relative_to(Path.cwd().resolve()).as_posix()
+
+
+def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.agent-frontend-{os.getpid()}")
+    try:
+        temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def fresh_timestamp(value: Any, freshness_days: int, field: str, findings: list[str]) -> datetime | None:
+    parsed = parse_timestamp(str(value or "").strip())
+    if parsed is None:
+        findings.append(f"{field} must be an ISO-8601 timestamp with timezone")
+        return None
+    age_days = (datetime.now(timezone.utc) - parsed).total_seconds() / 86400
+    if age_days < -1:
+        findings.append(f"{field} cannot be in the future")
+    elif age_days > freshness_days:
+        findings.append(f"{field} is older than {freshness_days} day(s)")
+    return parsed
+
+
+def validate_lane_evidence(
+    lane_name: str,
+    lane: dict[str, Any],
+    freshness_days: int,
+    blockers: list[str],
+) -> None:
+    command = str(lane.get("command", "")).strip()
+    evidence_value = str(lane.get("evidence_path", "")).strip()
+    evidence_path = repo_file(evidence_value, f"{lane_name}.evidence_path", blockers, require_exists=True)
+    if evidence_path is None:
+        return
+    evidence = read_json(evidence_path)
+    expected = {
+        "schema": LANE_EVIDENCE_SCHEMA,
+        "producer": RUNNER_PRODUCER,
+        "lane": lane_name,
+        "command": command,
+        "status": "pass",
+        "exit_code": 0,
+    }
+    for field, value in expected.items():
+        if field == "exit_code":
+            if not isinstance(evidence.get(field), int) or isinstance(evidence.get(field), bool) or evidence.get(field) != value:
+                blockers.append(f"{lane_name} evidence {field} must be {value!r}")
+        elif evidence.get(field) != value:
+            blockers.append(f"{lane_name} evidence {field} must be {value!r}")
+    if not str(evidence.get("run_id", "")).strip():
+        blockers.append(f"{lane_name} evidence missing run_id")
+    started = fresh_timestamp(evidence.get("started_at"), freshness_days, f"{lane_name} evidence started_at", blockers)
+    completed = fresh_timestamp(evidence.get("completed_at"), freshness_days, f"{lane_name} evidence completed_at", blockers)
+    if started is not None and completed is not None and started > completed:
+        blockers.append(f"{lane_name} evidence started_at is after completed_at")
+
+
+def browser_receipt_path(evidence_path: Path) -> Path:
+    return evidence_path.with_name(evidence_path.name + ".receipt.json")
+
+
+def validate_browser_evidence(browser: dict[str, Any], freshness_days: int, blockers: list[str]) -> None:
+    command = str(browser.get("command", "")).strip()
+    evidence_value = str(browser.get("evidence_path", "")).strip()
+    evidence_path = repo_file(evidence_value, "browser_evidence.evidence_path", blockers, require_exists=True)
+    if evidence_path is None:
+        return
+    receipt_candidate = browser_receipt_path(evidence_path)
+    try:
+        receipt_value = receipt_candidate.relative_to(Path.cwd().resolve()).as_posix()
+    except ValueError:
+        blockers.append("browser evidence runner receipt path escapes the repository")
+        return
+    receipt_path = repo_file(receipt_value, "browser evidence runner receipt", blockers, require_exists=True)
+    if receipt_path is None:
+        return
+    evidence = read_json(evidence_path)
+    receipt = read_json(receipt_path)
+    for field, value in {
+        "schema": BROWSER_RECEIPT_SCHEMA,
+        "producer": RUNNER_PRODUCER,
+        "command": command,
+        "evidence_path": relative_path(evidence_path),
+        "status": "pass",
+        "exit_code": 0,
+    }.items():
+        if field == "exit_code":
+            if not isinstance(receipt.get(field), int) or isinstance(receipt.get(field), bool) or receipt.get(field) != value:
+                blockers.append(f"browser receipt {field} must be {value!r}")
+        elif receipt.get(field) != value:
+            blockers.append(f"browser receipt {field} must be {value!r}")
+    run_id = str(receipt.get("run_id", "")).strip()
+    if not run_id:
+        blockers.append("browser receipt missing run_id")
+    if receipt.get("evidence_sha256") != sha256_file(evidence_path):
+        blockers.append("browser evidence hash does not match the runner receipt")
+    started = fresh_timestamp(receipt.get("started_at"), freshness_days, "browser receipt started_at", blockers)
+    completed = fresh_timestamp(receipt.get("completed_at"), freshness_days, "browser receipt completed_at", blockers)
+    if started is not None and completed is not None and started > completed:
+        blockers.append("browser receipt started_at is after completed_at")
+    if evidence.get("schema") != BROWSER_EVIDENCE_SCHEMA:
+        blockers.append(f"browser evidence schema must be {BROWSER_EVIDENCE_SCHEMA}")
+    if evidence.get("kind") != "browser-rendered" or evidence.get("status") != "pass":
+        blockers.append("browser evidence must record kind=browser-rendered and status=pass")
+    if evidence.get("run_id") != run_id:
+        blockers.append("browser evidence run_id does not match the runner receipt")
+    captured = fresh_timestamp(evidence.get("captured_at"), freshness_days, "browser evidence captured_at", blockers)
+    if captured is not None and started is not None and captured < started:
+        blockers.append("browser evidence captured_at is before the runner started_at")
+    if captured is not None and completed is not None and captured > completed:
+        blockers.append("browser evidence captured_at is after the runner completed_at")
+    for field in ("rendered", "interaction_checks_passed", "responsive_checks_passed", "accessibility_checks_passed"):
+        if evidence.get(field) is not True:
+            blockers.append(f"browser evidence {field} must be true")
+    runtime = evidence.get("runtime", {})
+    if not isinstance(runtime, dict):
+        blockers.append("browser evidence runtime must be an object")
+    else:
+        for field in ("console_errors", "unhandled_rejections", "failed_requests"):
+            value = runtime.get(field)
+            if not isinstance(value, int) or isinstance(value, bool) or value != 0:
+                blockers.append(f"browser evidence runtime.{field} must be 0")
+    expected_viewports = set(browser.get("viewports", []))
+    actual_viewport_values = evidence.get("viewports", [])
+    if not isinstance(actual_viewport_values, list) or any(not isinstance(item, str) or not item.strip() for item in actual_viewport_values):
+        blockers.append("browser evidence viewports must be a list of non-empty strings")
+        actual_viewports: set[str] = set()
+    else:
+        actual_viewports = set(actual_viewport_values)
+    if not expected_viewports.issubset(actual_viewports):
+        blockers.append("browser evidence does not cover all configured viewports")
+    expected_families = set(browser.get("browser_families", []))
+    actual_family_values = evidence.get("browser_families", [])
+    if not isinstance(actual_family_values, list) or any(not isinstance(item, str) or not item.strip() for item in actual_family_values):
+        blockers.append("browser evidence browser_families must be a list of non-empty strings")
+        actual_families: set[str] = set()
+    else:
+        actual_families = set(actual_family_values)
+    if not expected_families.issubset(actual_families):
+        blockers.append("browser evidence does not cover all configured browser families")
+
+
+def validate() -> dict[str, Any]:
+    config = read_json(CONFIG_PATH)
+    errors: list[str] = []
+    warnings: list[str] = []
+    blockers: list[str] = []
+    if config.get("schema") != "agent-frontend-governance-v1":
+        errors.append(".agent/frontend.json schema must be agent-frontend-governance-v1")
+    if config.get("enabled") is not True:
+        errors.append("frontend governance must set enabled=true when the file is present")
+
+    stack = config.get("stack_decision", {})
+    if not isinstance(stack, dict):
+        errors.append("stack_decision must be an object")
+        stack = {}
+    profile = str(stack.get("profile", "")).strip()
+    framework = str(stack.get("framework", "")).strip()
+    selection_status = str(stack.get("selection_status", "")).strip()
+    if not profile or not framework:
+        errors.append("stack_decision requires profile and framework")
+    if selection_status not in SELECTION_STATUSES:
+        errors.append("stack_decision.selection_status is invalid")
+    elif selection_status not in {"confirmed", "preserved-existing"}:
+        blockers.append("confirm the frontend stack decision before implementation readiness")
+    if profile == "react-vite-client":
+        if framework != "react" or str(stack.get("build_tool", "")).strip() != "vite":
+            errors.append("react-vite-client requires React and Vite")
+        typescript = stack.get("typescript", {})
+        if not isinstance(typescript, dict):
+            errors.append("stack_decision.typescript must be an object")
+            typescript = {}
+        if typescript.get("strict") is not True:
+            errors.append("react-vite-client requires TypeScript strict mode")
+        if str(stack.get("router", "")).strip() != "react-router":
+            errors.append("react-vite-client requires React Router")
+    if profile == "nextjs-framework":
+        qualifying = stack.get("nextjs_qualifying_requirements", [])
+        if framework != "nextjs":
+            errors.append("nextjs-framework requires framework=nextjs")
+        if not isinstance(qualifying, list) or any(item not in NEXTJS_QUALIFYING_REQUIREMENTS for item in qualifying):
+            errors.append("nextjs_qualifying_requirements contains an unsupported requirement")
+            qualifying = []
+        reviewed_exception = stack.get("nextjs_reviewed_exception", {})
+        if not isinstance(reviewed_exception, dict):
+            errors.append("stack_decision.nextjs_reviewed_exception must be an object")
+            reviewed_exception = {}
+        exception_fields = ("rationale", "owner", "review_evidence")
+        exception_requested = any(str(reviewed_exception.get(field, "")).strip() for field in exception_fields)
+        exception_valid = exception_requested and all(
+            str(reviewed_exception.get(field, "")).strip() for field in exception_fields
+        )
+        if exception_requested and not exception_valid:
+            errors.append("stack_decision.nextjs_reviewed_exception requires rationale, owner, and review_evidence")
+        if exception_valid:
+            repo_file(
+                str(reviewed_exception.get("review_evidence", "")),
+                "stack_decision.nextjs_reviewed_exception.review_evidence",
+                errors,
+                require_exists=True,
+            )
+        if not qualifying and not exception_valid:
+            blockers.append("Next.js requires a supported qualifying requirement or reviewed exception")
+
+    preservation = config.get("preservation", {})
+    if not isinstance(preservation, dict):
+        errors.append("preservation must be an object")
+    else:
+        for key in ("preserve_existing_framework", "preserve_lockfile", "no_automatic_migration"):
+            if preservation.get(key) is not True:
+                errors.append(f"preservation.{key} must be true")
+    dependency = config.get("dependency_policy", {})
+    if not isinstance(dependency, dict) or dependency.get("auto_install") is not False:
+        errors.append("dependency_policy.auto_install must be false")
+
+    browser = config.get("browser_evidence", {})
+    if not isinstance(browser, dict):
+        errors.append("browser_evidence must be an object")
+        browser = {}
+    freshness_days = browser.get("freshness_days", 7)
+    valid_freshness = isinstance(freshness_days, int) and not isinstance(freshness_days, bool) and freshness_days > 0
+    if not valid_freshness:
+        errors.append("browser_evidence.freshness_days must be a positive integer")
+
+    frontend_harness = config.get("harness", {})
+    if not isinstance(frontend_harness, dict):
+        errors.append("harness must be an object")
+        frontend_harness = {}
+    lanes = frontend_harness.get("lanes", {})
+    if not isinstance(lanes, dict):
+        errors.append("harness.lanes must be an object")
+        lanes = {}
+    for lane_name in REQUIRED_LANES:
+        lane = lanes.get(lane_name)
+        if not isinstance(lane, dict):
+            errors.append(f"missing frontend harness lane: {lane_name}")
+            continue
+        if not isinstance(lane.get("required"), bool):
+            errors.append(f"{lane_name}.required must be boolean")
+        command = str(lane.get("command", "")).strip()
+        evidence_path = str(lane.get("evidence_path", "")).strip()
+        if lane.get("required") is True:
+            if not command:
+                blockers.append(f"required frontend lane missing command: {lane_name}")
+            if not evidence_path:
+                blockers.append(f"required frontend lane missing evidence_path: {lane_name}")
+            if command and evidence_path and valid_freshness:
+                validate_lane_evidence(lane_name, lane, freshness_days, blockers)
+    release_lane = lanes.get("frontend_release", {})
+    if isinstance(release_lane, dict) and release_lane.get("requires_browser_rendered_evidence") is not True:
+        errors.append("frontend_release must require browser-rendered evidence")
+
+    if browser.get("required_for_completion") is not True:
+        errors.append("browser_evidence.required_for_completion must be true")
+    if browser.get("static_checks_are_prechecks_only") is not True:
+        errors.append("browser_evidence.static_checks_are_prechecks_only must be true")
+    for key in ("command", "evidence_path"):
+        if not str(browser.get(key, "")).strip():
+            blockers.append(f"browser evidence missing {key}")
+    viewports = string_list(browser.get("viewports", []), "browser_evidence.viewports", errors)
+    browser_families = string_list(browser.get("browser_families", []), "browser_evidence.browser_families", errors)
+    if not viewports:
+        blockers.append("browser evidence must record tested viewports")
+    if not browser_families:
+        blockers.append("browser evidence must record tested browser families")
+    if (
+        str(browser.get("command", "")).strip()
+        and str(browser.get("evidence_path", "")).strip()
+        and viewports
+        and browser_families
+        and valid_freshness
+    ):
+        normalized_browser = dict(browser)
+        normalized_browser["viewports"] = viewports
+        normalized_browser["browser_families"] = browser_families
+        validate_browser_evidence(normalized_browser, freshness_days, blockers)
+
+    accessibility = config.get("accessibility", {})
+    if not isinstance(accessibility, dict):
+        errors.append("accessibility must be an object")
+    else:
+        if not str(accessibility.get("standard", "")).strip():
+            errors.append("accessibility.standard is required")
+        if accessibility.get("automated_checks_are_not_conformance") is not True:
+            errors.append("accessibility must state that automated checks are not conformance")
+        required_manual = {"keyboard", "focus", "semantics", "contrast", "reflow", "reduced-motion"}
+        manual_coverage = string_list(accessibility.get("manual_coverage", []), "accessibility.manual_coverage", errors)
+        if not required_manual.issubset(set(manual_coverage)):
+            errors.append("accessibility.manual_coverage is incomplete")
+
+    performance = config.get("performance", {})
+    if not isinstance(performance, dict):
+        errors.append("performance must be an object")
+        performance = {}
+    vitals = performance.get("core_web_vitals", {})
+    if not isinstance(vitals, dict):
+        errors.append("performance.core_web_vitals must be an object")
+        vitals = {}
+    if not isinstance(vitals.get("enabled"), bool):
+        errors.append("performance.core_web_vitals.enabled must be boolean")
+    elif vitals.get("enabled") is True:
+        valid_thresholds = True
+        for key in DEFAULT_WEB_VITALS:
+            if not is_finite_number(vitals.get(key)):
+                errors.append(f"performance.core_web_vitals.{key} must be a finite number")
+                valid_thresholds = False
+        if valid_thresholds:
+            if not 0 < vitals["percentile"] <= 100:
+                errors.append("performance.core_web_vitals.percentile must be greater than 0 and at most 100")
+            for key in ("lcp_ms", "inp_ms"):
+                if vitals[key] <= 0:
+                    errors.append(f"performance.core_web_vitals.{key} must be greater than 0")
+            if vitals["cls"] < 0:
+                errors.append("performance.core_web_vitals.cls must be at least 0")
+            uses_defaults = all(vitals.get(key) == value for key, value in DEFAULT_WEB_VITALS.items())
+            policy = str(vitals.get("threshold_policy", "")).strip()
+            expected_policy = "default-good-p75" if uses_defaults else "reviewed-alternative"
+            if policy != expected_policy:
+                errors.append(f"performance.core_web_vitals.threshold_policy must be {expected_policy}")
+            if not uses_defaults:
+                alternative = vitals.get("alternative_policy", {})
+                if not isinstance(alternative, dict):
+                    errors.append("performance.core_web_vitals.alternative_policy must be an object")
+                    alternative = {}
+                for field in ("rationale", "owner", "review_evidence"):
+                    if not str(alternative.get(field, "")).strip():
+                        errors.append(f"performance.core_web_vitals.alternative_policy missing {field}")
+                review_evidence = str(alternative.get("review_evidence", "")).strip()
+                if review_evidence:
+                    repo_file(
+                        review_evidence,
+                        "performance.core_web_vitals.alternative_policy.review_evidence",
+                        errors,
+                        require_exists=True,
+                    )
+    for key in ("mobile_and_desktop_separate", "field_and_lab_evidence_are_distinct"):
+        if performance.get(key) is not True:
+            errors.append(f"performance.{key} must be true")
+
+    ui_states = string_list(config.get("ui_states", []), "ui_states", errors)
+    if set(ui_states) != REQUIRED_UI_STATES:
+        errors.append("ui_states must cover loading, empty, partial, error, and success")
+    security = config.get("security", {})
+    if not isinstance(security, dict):
+        errors.append("security must be an object")
+    else:
+        for key in (
+            "untrusted_html_requires_reviewed_sanitization",
+            "browser_secrets_forbidden",
+            "lockfile_review_required",
+            "third_party_origins_must_be_declared",
+        ):
+            if security.get(key) is not True:
+                errors.append(f"security.{key} must be true")
+
+    visualization = config.get("visualization", {})
+    if not isinstance(visualization, dict):
+        errors.append("visualization must be an object")
+        visualization = {}
+    visualization_status = str(visualization.get("selection_status", "")).strip()
+    if visualization.get("enabled") is True:
+        if str(visualization.get("engine", "")).strip() in {"", "none"}:
+            errors.append("enabled visualization requires an engine")
+        if visualization_status not in {"confirmed", "preserved-existing"}:
+            blockers.append("confirm the visualization engine before frontend implementation readiness")
+    if visualization.get("enabled") is True and str(visualization.get("engine", "")).strip() == "echarts":
+        echarts = visualization.get("echarts", {})
+        if not isinstance(echarts, dict):
+            errors.append("visualization.echarts must be an object")
+        else:
+            required_true = (
+                "modular_imports",
+                "stable_dimensions",
+                "resize_handling",
+                "dispose_on_unmount",
+                "aria_registration_and_enablement",
+                "text_or_table_alternative",
+                "non_color_encoding",
+            )
+            for key in required_true:
+                if echarts.get(key) is not True:
+                    errors.append(f"visualization.echarts.{key} must be true")
+            if echarts.get("renderer") not in {"svg", "canvas"}:
+                errors.append("visualization.echarts.renderer must be svg or canvas")
+            if echarts.get("renderer") == "canvas":
+                renderer_evidence = str(echarts.get("renderer_evidence", "")).strip()
+                if not renderer_evidence:
+                    errors.append("Canvas ECharts renderer requires measured renderer_evidence")
+                else:
+                    repo_file(
+                        renderer_evidence,
+                        "visualization.echarts.renderer_evidence",
+                        errors,
+                        require_exists=True,
+                    )
+            required_states = string_list(
+                echarts.get("required_states", []),
+                "visualization.echarts.required_states",
+                errors,
+            )
+            if set(required_states) != REQUIRED_UI_STATES:
+                errors.append("ECharts required_states must cover loading, empty, partial, error, and success")
+            if not isinstance(echarts.get("untrusted_content_policy"), dict):
+                errors.append("ECharts untrusted_content_policy must be an object")
+            if not str(echarts.get("ssr_export_policy", "")).strip():
+                errors.append("ECharts ssr_export_policy is required")
+    elif visualization.get("enabled") is not True and str(visualization.get("engine", "none")).strip() != "none":
+        errors.append("a visualization engine cannot be selected when visualization is disabled")
+
+    blueprint = read_json(BLUEPRINT_PATH)
+    blueprint_frontend = blueprint.get("frontend_stack_decision", {}) if isinstance(blueprint, dict) else {}
+    if not isinstance(blueprint_frontend, dict) or blueprint_frontend.get("id") != "BP-FRONTEND-001":
+        errors.append(".agent/blueprint.json missing BP-FRONTEND-001 frontend_stack_decision")
+    elif framework and str(blueprint_frontend.get("framework", "")).strip() != framework:
+        errors.append("Blueprint frontend framework does not match .agent/frontend.json")
+
+    harness = read_json(HARNESS_PATH)
+    harness_validation = harness.get("validation", {})
+    if not isinstance(harness_validation, dict):
+        errors.append(".agent/harness.json validation must be an object")
+        harness_validation = {}
+    readiness_commands = string_list(
+        harness_validation.get("readiness", []),
+        ".agent/harness.json validation.readiness",
+        errors,
+    )
+    expected_readiness = "python3 scripts/agent_frontend.py readiness"
+    if expected_readiness not in readiness_commands:
+        errors.append(f".agent/harness.json missing readiness command: {expected_readiness}")
+    harness_frontend = harness.get("frontend", {})
+    if not isinstance(harness_frontend, dict):
+        errors.append(".agent/harness.json frontend must be an object")
+        harness_frontend = {}
+    harness_lanes = string_list(
+        harness_frontend.get("lanes", []),
+        ".agent/harness.json frontend.lanes",
+        errors,
+    )
+    if sorted(harness_lanes) != sorted(REQUIRED_LANES):
+        errors.append(".agent/harness.json frontend lanes do not match frontend policy")
+
+    return {
+        "schema": "agent-frontend-governance-report-v1",
+        "status": "fail" if errors else "warn" if warnings or blockers else "pass",
+        "config_path": CONFIG_PATH.as_posix(),
+        "profile": profile,
+        "framework": framework,
+        "selection_status": selection_status,
+        "visualization_engine": visualization.get("engine", "none"),
+        "required_lanes": [name for name, lane in lanes.items() if isinstance(lane, dict) and lane.get("required") is True],
+        "errors": unique(errors),
+        "warnings": unique(warnings),
+        "readiness_blockers": unique(blockers),
+    }
+
+
+def cmd_doctor(_args: argparse.Namespace) -> int:
+    report = validate()
+    for warning in report["warnings"]:
+        print(f"warning: {warning}")
+    if report["errors"]:
+        print("agent frontend doctor failed")
+        for error in report["errors"]:
+            print(f"error: {error}")
+        return 1
+    print("agent frontend doctor passed")
+    return 0
+
+
+def cmd_readiness(_args: argparse.Namespace) -> int:
+    report = validate()
+    findings = report["errors"] + report["readiness_blockers"]
+    if findings:
+        print("agent frontend readiness failed")
+        for finding in findings:
+            print(f"error: {finding}")
+        return 1
+    print("agent frontend readiness passed")
+    return 0
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    report = validate()
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(f"status: {report['status']}")
+        print(f"profile: {report['profile']}")
+        print(f"framework: {report['framework']}")
+        print(f"visualization: {report['visualization_engine']}")
+        for blocker in report["readiness_blockers"]:
+            print(f"readiness_blocker: {blocker}")
+    return 0 if not report["errors"] else 1
+
+
+def cmd_run_lane(args: argparse.Namespace) -> int:
+    config = read_json(CONFIG_PATH)
+    lanes = config.get("harness", {}).get("lanes", {})
+    lane = lanes.get(args.lane) if isinstance(lanes, dict) else None
+    if args.lane not in REQUIRED_LANES or not isinstance(lane, dict):
+        print(f"error: unknown frontend lane: {args.lane}", file=sys.stderr)
+        return 2
+    command = str(lane.get("command", "")).strip()
+    evidence_value = str(lane.get("evidence_path", "")).strip()
+    if not command:
+        print(f"error: frontend lane missing command: {args.lane}", file=sys.stderr)
+        return 2
+    if not evidence_value:
+        print(f"error: frontend lane missing evidence_path: {args.lane}", file=sys.stderr)
+        return 2
+    findings: list[str] = []
+    evidence_path = repo_file(evidence_value, f"{args.lane}.evidence_path", findings)
+    if evidence_path is None:
+        for finding in findings:
+            print(f"error: {finding}", file=sys.stderr)
+        return 2
+
+    run_id = secrets.token_hex(16)
+    started_at = utc_now()
+    completed = subprocess.run(command, shell=True, cwd=Path.cwd(), check=False)
+    completed_at = utc_now()
+    atomic_write_json(
+        evidence_path,
+        {
+            "schema": LANE_EVIDENCE_SCHEMA,
+            "producer": RUNNER_PRODUCER,
+            "lane": args.lane,
+            "command": command,
+            "run_id": run_id,
+            "started_at": started_at,
+            "completed_at": completed_at,
+            "status": "pass" if completed.returncode == 0 else "fail",
+            "exit_code": completed.returncode,
+        },
+    )
+    print(f"frontend lane evidence: {relative_path(evidence_path)}")
+    if completed.returncode != 0:
+        print(f"error: frontend lane command failed with exit code {completed.returncode}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_run_browser(_args: argparse.Namespace) -> int:
+    config = read_json(CONFIG_PATH)
+    browser = config.get("browser_evidence", {})
+    if not isinstance(browser, dict):
+        print("error: browser_evidence must be an object", file=sys.stderr)
+        return 2
+    command = str(browser.get("command", "")).strip()
+    evidence_value = str(browser.get("evidence_path", "")).strip()
+    if not command:
+        print("error: browser_evidence.command is required", file=sys.stderr)
+        return 2
+    if not evidence_value:
+        print("error: browser_evidence.evidence_path is required", file=sys.stderr)
+        return 2
+    findings: list[str] = []
+    evidence_path = repo_file(evidence_value, "browser_evidence.evidence_path", findings)
+    if evidence_path is None:
+        for finding in findings:
+            print(f"error: {finding}", file=sys.stderr)
+        return 2
+
+    run_id = secrets.token_hex(16)
+    started_at = utc_now()
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "AGENT_FRONTEND_RUN_ID": run_id,
+            "AGENT_FRONTEND_EVIDENCE_PATH": relative_path(evidence_path),
+            "AGENT_FRONTEND_STARTED_AT": started_at,
+            "AGENT_FRONTEND_VIEWPORTS_JSON": json.dumps(browser.get("viewports", [])),
+            "AGENT_FRONTEND_BROWSER_FAMILIES_JSON": json.dumps(browser.get("browser_families", [])),
+        }
+    )
+    completed = subprocess.run(command, shell=True, cwd=Path.cwd(), env=environment, check=False)
+    completed_at = utc_now()
+    evidence = read_json(evidence_path)
+    record_correlated = (
+        evidence.get("schema") == BROWSER_EVIDENCE_SCHEMA
+        and evidence.get("kind") == "browser-rendered"
+        and evidence.get("status") == "pass"
+        and evidence.get("run_id") == run_id
+    )
+    passed = completed.returncode == 0 and evidence_path.is_file() and record_correlated
+    receipt = {
+        "schema": BROWSER_RECEIPT_SCHEMA,
+        "producer": RUNNER_PRODUCER,
+        "command": command,
+        "run_id": run_id,
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "evidence_path": relative_path(evidence_path),
+        "evidence_sha256": sha256_file(evidence_path) if evidence_path.is_file() else "",
+        "status": "pass" if passed else "fail",
+        "exit_code": completed.returncode,
+    }
+    receipt_path = browser_receipt_path(evidence_path)
+    atomic_write_json(receipt_path, receipt)
+    print(f"browser runner receipt: {relative_path(receipt_path)}")
+    if completed.returncode != 0:
+        print(f"error: browser command failed with exit code {completed.returncode}", file=sys.stderr)
+        return 1
+    if not evidence_path.is_file():
+        print(f"error: browser command did not write evidence: {relative_path(evidence_path)}", file=sys.stderr)
+        return 1
+    if not record_correlated:
+        print("error: browser command wrote malformed or uncorrelated evidence", file=sys.stderr)
+        return 1
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    doctor = subparsers.add_parser("doctor", help="Validate frontend governance structure")
+    doctor.set_defaults(func=cmd_doctor)
+    readiness = subparsers.add_parser("readiness", help="Validate strict frontend implementation and release readiness")
+    readiness.set_defaults(func=cmd_readiness)
+    report = subparsers.add_parser("report", help="Print the frontend governance report")
+    report.add_argument("--json", action="store_true")
+    report.set_defaults(func=cmd_report)
+    run_lane = subparsers.add_parser("run-lane", help="Run a configured frontend lane and record evidence")
+    run_lane.add_argument("lane", choices=REQUIRED_LANES)
+    run_lane.set_defaults(func=cmd_run_lane)
+    run_browser = subparsers.add_parser("run-browser", help="Run the configured browser command and bind its evidence")
+    run_browser.set_defaults(func=cmd_run_browser)
+    return parser
+
+
+def main(argv: list[str]) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

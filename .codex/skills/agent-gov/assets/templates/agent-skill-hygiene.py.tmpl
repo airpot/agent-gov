@@ -185,7 +185,7 @@ def collect(config: dict) -> dict:
         "policy": {
             "read_only": True,
             "no_auto_delete": True,
-            "canary_is_optional": bool(config.get("canary", {}).get("enabled", False)),
+            "canary_is_optional": not bool(config.get("canary", {}).get("required", False)),
         },
     }
 

@@ -15,6 +15,7 @@ from typing import Any
 BLUEPRINT_PATH = Path(".agent/blueprint.json")
 BLUEPRINT_DOC = Path("docs/PROJECT_BLUEPRINT.md")
 AGENT_RUNTIME_PATH = Path(".agent/agent-runtime.json")
+FRONTEND_PATH = Path(".agent/frontend.json")
 CHANGES_ROOT = Path("openspec/changes")
 REQUIRED_SECTIONS = (
     "Product Purpose",
@@ -174,6 +175,39 @@ def validate_runtime_decision(blueprint: dict[str, Any], runtime: dict[str, Any]
     return errors, warnings, report
 
 
+def validate_frontend_decision(blueprint: dict[str, Any]) -> tuple[list[str], list[str], dict[str, Any]]:
+    errors: list[str] = []
+    warnings: list[str] = []
+    frontend = read_json(FRONTEND_PATH)
+    decision = blueprint.get("frontend_stack_decision")
+    if not frontend and decision is None:
+        return errors, warnings, {"enabled": False}
+    if not frontend:
+        return ["frontend_stack_decision exists without .agent/frontend.json"], warnings, {}
+    if frontend.get("schema") != "agent-frontend-governance-v1":
+        errors.append(".agent/frontend.json schema must be agent-frontend-governance-v1")
+    if not isinstance(decision, dict):
+        return ["frontend governance requires blueprint frontend_stack_decision"], warnings, {}
+    if decision.get("id") != "BP-FRONTEND-001":
+        errors.append("frontend_stack_decision.id must be BP-FRONTEND-001")
+    stack = frontend.get("stack_decision", {})
+    for field in ("profile", "framework", "build_tool", "router", "selection_status"):
+        if decision.get(field) != stack.get(field):
+            errors.append(f"frontend_stack_decision.{field} conflicts with .agent/frontend.json")
+    if decision.get("browser_rendered_evidence_required_for_completion") is not True:
+        errors.append("frontend_stack_decision must require browser-rendered completion evidence")
+    selection_status = str(decision.get("selection_status", "")).strip()
+    if selection_status not in {"confirmed", "preserved-existing"}:
+        warnings.append("frontend stack decision needs confirmation before frontend implementation")
+    return errors, warnings, {
+        "enabled": True,
+        "profile": decision.get("profile"),
+        "framework": decision.get("framework"),
+        "selection_status": selection_status,
+        "visualization_engine": frontend.get("visualization", {}).get("engine", "none"),
+    }
+
+
 def version_item_has_constraint(item: Any) -> bool:
     if not isinstance(item, dict):
         return False
@@ -326,7 +360,8 @@ def validate_all() -> tuple[list[str], list[str], dict[str, Any]]:
     if not BLUEPRINT_DOC.exists():
         errors.append(f"missing {BLUEPRINT_DOC}")
     else:
-        missing_sections = [section for section in REQUIRED_SECTIONS if section not in sections]
+        required_sections = REQUIRED_SECTIONS + (("Frontend Web Stack Decision",) if FRONTEND_PATH.exists() else ())
+        missing_sections = [section for section in required_sections if section not in sections]
         for section in missing_sections:
             errors.append(f"{BLUEPRINT_DOC} missing section: {section}")
     known_ids, id_errors = blueprint_ids(blueprint)
@@ -338,6 +373,9 @@ def validate_all() -> tuple[list[str], list[str], dict[str, Any]]:
     version_errors, version_warnings, version_report = validate_technology_versions(blueprint)
     errors.extend(version_errors)
     warnings.extend(version_warnings)
+    frontend_errors, frontend_warnings, frontend_report = validate_frontend_decision(blueprint)
+    errors.extend(frontend_errors)
+    warnings.extend(frontend_warnings)
     active_changes: list[dict[str, Any]] = []
     archive_blocks: list[str] = []
     for base, metadata in iter_active_changes():
@@ -363,6 +401,7 @@ def validate_all() -> tuple[list[str], list[str], dict[str, Any]]:
         "known_blueprint_ids": sorted(known_ids),
         "runtime_framework_decision": runtime_report,
         "technology_version_decisions": version_report,
+        "frontend_stack_decision": frontend_report,
         "active_changes": active_changes,
         "archive_blocking_reasons": archive_blocks,
         "errors": errors,
@@ -398,6 +437,9 @@ def readiness_findings(errors: list[str], report: dict[str, Any]) -> list[str]:
             findings.append("at least one concrete technology version constraint or defer-to-lockfile policy must be recorded before implementation readiness")
         for adapter in version_report.get("unresolved_package_plans", []) or []:
             findings.append(f"runtime package plan missing version constraint or lockfile policy: {adapter}")
+    frontend_report = report.get("frontend_stack_decision", {})
+    if frontend_report.get("enabled") is True and frontend_report.get("selection_status") not in {"confirmed", "preserved-existing"}:
+        findings.append("frontend stack decision must be confirmed before frontend implementation readiness")
     records = blueprint.get("records", []) if isinstance(blueprint, dict) else []
     if isinstance(records, list):
         for index, record in enumerate(records):

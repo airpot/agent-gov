@@ -140,6 +140,7 @@ Use these commands instead of manually stitching session files together:
 
 ```bash
 python3 .agent/tools/agent_session.py bootstrap
+python3 .agent/tools/agent_session.py bootstrap --record
 python3 .agent/tools/agent_session.py grounding --checked "git status --short"
 python3 .agent/tools/agent_session.py offload-add --summary "..." --evidence <path-or-runlog-id>
 python3 .agent/tools/agent_session.py offload-recall "<query>"
@@ -147,6 +148,7 @@ python3 .agent/tools/agent_session.py offload-map
 python3 .agent/tools/agent_session.py rollover --summary "..." --next "..."
 python3 .agent/tools/agent_session.py compact --summary "..." --next "..."
 python3 .agent/tools/agent_session.py doctor
+python3 .agent/tools/agent_session.py doctor --record
 python3 .agent/tools/agent_session.py events --limit 10
 python3 .agent/tools/agent_memory.py doctor
 python3 .agent/tools/agent_context.py doctor
@@ -158,7 +160,7 @@ python3 scripts/agent_runlog.py tail --limit 10
 python3 .agent/tools/governance_hook.py --event session-start
 ```
 
-- `bootstrap` prints and refreshes the active session startup packet. It must stay compact and evidence-handle based; full details live behind `refs/git-status-short.txt`, `offload-index.md`, runlog ids, memory detail ids, and embedded spec paths.
+- `bootstrap` renders and prints the current active session startup packet without writing by default. Use `bootstrap --record` to refresh tracked bootstrap/status files and append a bootstrap event. The packet must stay compact and evidence-handle based; full details live behind `refs/git-status-short.txt`, `offload-index.md`, runlog ids, memory detail ids, and embedded spec paths.
 - `grounding` refreshes the truth-first repository snapshot; current files, configs, specs, task-board state, runlog evidence, and validation notes override memory and prior chat.
 - `offload-add` records compact session context with evidence handles. Entries are advisory and must not contain raw transcripts, terminal scrollback, secrets, or unsupported claims.
 - `offload-recall` searches advisory offload entries with bounded human-readable output; use it after `offload-index.md`, then verify selected facts from evidence handles.
@@ -166,7 +168,7 @@ python3 .agent/tools/governance_hook.py --event session-start
 - `rollover` refreshes handoff, grounding, offload index, task map, bootstrap, and resume prompt for a new native session.
 - `compact` refreshes `handoff.md`, `resume-prompt.md`, and `bootstrap.md`.
 - `events` reads the append-only session event stream. It is the session lifecycle event source; markdown files remain the human-readable handoff layer.
-- `doctor` checks the active session files, validation notes, and dirty worktree continuity through `refs/git-status-short.txt` so long dirty trees do not create false warnings from truncated markdown snapshots.
+- `doctor` checks the active session files, validation notes, and dirty worktree continuity through `refs/git-status-short.txt` without writing by default. Use `doctor --record` only to repair or refresh the documented session artifacts.
 - `agent_memory.py` provides cross-session timeline/search/detail over concise summaries, decisions, validations, and handoffs. Search output is bounded by `.agent/memory.json` recall limits; use `detail <id>` for selected full records. Its `doctor` command is read-only by default; use `init`, `ingest-session`, or `doctor --write` when refreshing stores is intended.
 - `agent_context.py` keeps governance docs, bootstraps, memory digests, embedded spec change docs, and subagent outputs within measured budgets. Its `doctor` command is read-only by default; use `scan` or `doctor --write` when refreshing the latest digest is intended.
 - `agent_runlog.py` records and retrieves compact evidence for validations, session lifecycle actions, and high-risk capability use.
